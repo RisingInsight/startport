@@ -112,6 +112,7 @@ jobs:
       - name: tag 与源码版本一致性断言
         run: |
           SRC=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)
+          SRC="${SRC%-panel}"   # appVersion 带 -panel 后缀，比对前剥掉
           TAG="${GITHUB_REF_NAME#v}"
           if [[ "$GITHUB_REF_NAME" != *-ci ]]; then
             if [[ "$TAG" != "$SRC" ]]; then
