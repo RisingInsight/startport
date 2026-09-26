@@ -701,6 +701,14 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <label class="fld"><span class="lb">刷新间隔（分钟）</span>
                 <input name="balance_refresh_minutes" type="number" min="1" placeholder="5"></label>
             </div>
+            <div class="hr"></div>
+            <div class="grid2">
+              <div class="switch"><span class="lb">成长任务自动执行</span>
+                <input type="checkbox" name="growth_enabled" checked></div>
+              <label class="fld"><span class="lb">执行时点（小时，逗号分隔）</span>
+                <input name="growth_hours" placeholder="1">
+                <span class="hint">每日到点自动「扫描 + 执行全部待办」（Sequential 任务链零点解锁后自动推进，建议零点后）</span></label>
+            </div>
           </div>
         </div>
 

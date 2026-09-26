@@ -196,12 +196,33 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	if body.Concurrency > 4 {
 		body.Concurrency = 4
 	}
+	started, total, seq, msg := p.startGrowthQueue(body.Concurrency, body.Growth, body.School)
+	switch {
+	case seq == -1:
+		writeErr(w, http.StatusConflict, msg)
+	case !started:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": msg})
+	default:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
+	}
+}
+
+// startGrowthQueue 扫描全部账号待办并启动队列（HTTP「执行全部待办」与调度器
+// growth 时点共用核心）。返回 (started, total, seq, msg)：seq==-1 表示队列
+// 已在执行（冲突）；started=false 时 msg 为无可执行待办的说明。并发夹取
+// [1,4]；growth/school 开关同 HTTP 入参语义。
+func (p *Panel) startGrowthQueue(concurrency int, growth, school bool) (started bool, total int, seq int, msg string) {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > 4 {
+		concurrency = 4
+	}
 	q := p.queue()
 	q.mu.Lock()
 	if q.running {
 		q.mu.Unlock()
-		writeErr(w, http.StatusConflict, "队列正在执行中（可在任务中心查看进度）")
-		return
+		return false, 0, -1, "队列正在执行中（可在任务中心查看进度）"
 	}
 	q.mu.Unlock()
 
@@ -231,7 +252,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 			if a.IsGlobal() {
 				return
 			}
-			if body.Growth {
+			if growth {
 				if tasks, err := p.cfg.Upstream.ListTasks(a); err == nil {
 					for _, t := range tasks {
 						if growthPending(t) {
@@ -272,7 +293,7 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 				accts = append(accts, one)
 				mu.Unlock()
 			}
-		}(a, body.School)
+		}(a, school)
 	}
 	wg.Wait()
 
@@ -288,22 +309,32 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(items) == 0 {
 		log.Printf("panel: 队列启动：无可执行待办（全部账号任务已完成）")
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": "全部账号没有待办任务"})
-		return
+		return false, 0, 0, "全部账号没有待办任务"
 	}
 
 	q.mu.Lock()
 	q.running = true
 	q.startedAt = time.Now()
 	q.items = items
-	q.conc = body.Concurrency
+	q.conc = concurrency
 	q.seq++
-	seq := q.seq
+	seq = q.seq
 	q.mu.Unlock()
 
-	go p.runQueueItems(accts, items, body.Concurrency)
-	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v 开学季 %v）", len(items), body.Concurrency, body.Growth, body.School)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": len(items), "seq": seq})
+	go p.runQueueItems(accts, items, concurrency)
+	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v 开学季 %v）", len(items), concurrency, growth, school)
+	return true, len(items), seq, ""
+}
+
+// RunGrowthQueueOnce 调度器 growth 时点回调（sch.SetGrowthHook 挂载）：与
+// 「执行全部待办」按钮完全同管线（成长+开学季，串行并发 1）。Sequential 族
+// 每日零点解锁一环，此前只能手动扫描推进；此回调让链条每天自动走一环。
+// 异步执行（startGrowthQueue 启动 goroutine 即返），已在跑/无待办安全跳过。
+func (p *Panel) RunGrowthQueueOnce() {
+	started, total, _, _ := p.startGrowthQueue(1, true, true)
+	if started {
+		log.Printf("panel: 定时成长任务队列已启动（%d 项）", total)
+	}
 }
 
 // runQueueItems 队列执行主体：按账号分组，账号内串行（per-account 锁），
