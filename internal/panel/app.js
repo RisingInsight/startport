@@ -410,6 +410,7 @@ $('btnLogPin').onclick = () => {
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
   listen: ['listen'], api_key: ['api_key'],
+  package_detail_limit: ['panel', 'package_detail_limit'],
   checkin_hours: ['schedule', 'checkin_hours'], checkin_enabled: ['schedule', 'checkin_enabled'], growth_hours: ['schedule', 'growth_hours'], growth_enabled: ['schedule', 'growth_enabled'],
   travel_hours: ['schedule', 'travel_hours'], travel_enabled: ['schedule', 'travel_enabled'],
   activity_hours: ['schedule', 'activity_hours'], activity_enabled: ['schedule', 'activity_enabled'],
@@ -1487,7 +1488,69 @@ function pkBySource(packs) {
   return [...m.values()].sort((a, b) => b.size - a.size);
 }
 
-function renderPackages(d) {
+const PK_DEFAULT_DETAIL_LIMIT = 5;
+
+function pkDetailLimitValue(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : PK_DEFAULT_DETAIL_LIMIT;
+}
+
+function pkDetailLimit(cfg) {
+  return pkDetailLimitValue(cfg && cfg.panel && cfg.panel.package_detail_limit);
+}
+
+function pkDetailExpiryMs(p) {
+  const raw = Number(p && p.expires_at);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  const text = String((p && p.end_time) || '').trim();
+  if (!text) return null;
+  let iso = text.includes('T') ? text : text.replace(' ', 'T');
+  if (!/(?:Z|[+-]\d\d:\d\d)$/.test(iso)) iso += '+08:00';
+  const parsed = Date.parse(iso);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+// pkDetailGroups 只服务单账号逐包明细：正余额包先按到期时间挑选默认展示项，
+// 其余正余额包与已用完包分别折叠；同一到期时间按面额降序。
+function pkDetailCompare(a, b) {
+  const sizeOf = p => {
+    const n = Number(p && p.size);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const ea = pkDetailExpiryMs(a), eb = pkDetailExpiryMs(b);
+  if (ea == null && eb != null) return 1;
+  if (ea != null && eb == null) return -1;
+  if (ea != null && eb != null && ea !== eb) return ea - eb;
+  return sizeOf(b) - sizeOf(a);
+}
+
+function pkDetailGroups(packs, limit) {
+  const active = [], used = [];
+  let usedSize = 0, restSize = 0, restRemain = 0;
+  for (const p of packs || []) {
+    const remain = Number(p && p.remain);
+    if (remain > 0) {
+      active.push(p);
+      continue;
+    }
+    used.push(p);
+    const size = Number(p && p.size);
+    if (Number.isFinite(size)) usedSize += size;
+  }
+  active.sort(pkDetailCompare);
+  used.sort(pkDetailCompare);
+  const visible = active.slice(0, pkDetailLimitValue(limit));
+  const rest = active.slice(visible.length);
+  for (const p of rest) {
+    const size = Number(p && p.size);
+    if (Number.isFinite(size)) restSize += size;
+    const remain = Number(p && p.remain);
+    if (Number.isFinite(remain)) restRemain += remain;
+  }
+  return { visible, rest, used, restSize, restRemain, usedSize };
+}
+
+function renderPackages(d, detailLimit) {
   const list = (d.accounts || []);
   if (!list.length) {
     $('pkSummary').innerHTML = '<div class="empty">没有账号</div>';
@@ -1547,12 +1610,14 @@ function renderPackages(d) {
   // 逐包明细：每个账号一个表，包的**面额**列是重点
   $('pkDetail').innerHTML = list.map(a => {
     if (a.error) return '';
-    const packs = (a.packages || []);
-    const rows = packs.map(p => {
+    const groups = pkDetailGroups(a.packages || [], detailLimit);
+    const rowOf = (p, rowGroup) => {
       const k = (p.package_code || '') + '|' + (p.name || '(未命名)');
       const sub = (p.sub_product_code || '').replace(/^sp_tcaca_codebuddyide_?/, '') ||
                   (p.package_code || '').replace(/^TCACA_/, '');
-      return '<tr><td class="mark" aria-hidden="true"><i style="background:' +
+      return '<tr' + (rowGroup ? ' class="pk-hidden-row pk-' + rowGroup +
+        '-row" data-pk-row="' + rowGroup + '" hidden' : '') +
+        '><td class="mark" aria-hidden="true"><i style="background:' +
         colorOf(k) + '"></i></td>' +
       '<td>' + esc(p.name || '(未命名)') +
         (sub ? '<div class="note">' + esc(sub) + '</div>' : '') + '</td>' +
@@ -1562,25 +1627,70 @@ function renderPackages(d) {
       '<td class="num">' + esc((p.created_at || '').slice(0, 16).replace('T', ' ') || '—') + '</td>' +
       '<td class="num">' + esc((p.end_time || '').slice(0, 10) || '—') + '</td>' +
       '</tr>';
-    }).join('');
+    };
+    const groupSummary = (group, label, count, size, remain) =>
+      '<tr class="pk-group-summary"><td colspan="7"><button type="button" class="pk-group-toggle"' +
+      ' data-pk-group="' + group + '" data-count="' + count + '" data-size="' + size +
+      '" data-remain="' + remain + '" aria-expanded="false">' + label + '，展开</button></td></tr>';
+    const rows = groups.visible.map(p => rowOf(p, '')).join('');
+    const restSummary = groups.rest.length
+      ? groupSummary('rest', '其余未用完 ' + groups.rest.length + ' 个包（面额合计 ' +
+          fmtTok(groups.restSize) + ' · 剩余 ' + fmtTok(groups.restRemain) + '）',
+          groups.rest.length, groups.restSize, groups.restRemain) +
+        groups.rest.map(p => rowOf(p, 'rest')).join('')
+      : '';
+    const usedSummary = groups.used.length
+      ? groupSummary('used', '已用完 ' + groups.used.length + ' 个包（面额合计 ' +
+          fmtTok(groups.usedSize) + '）', groups.used.length, groups.usedSize, 0) +
+        groups.used.map(p => rowOf(p, 'used')).join('')
+      : '';
     return '<div class="box"><header><h3>' +
       esc(a.nickname || a.uid.slice(0, 8)) + ' · ' + esc(a.realm || '') +
       '</h3><span class="grow"></span><span class="note">余额 ' + fmtTok(a.remain) +
-      ' / 总额 ' + fmtTok(a.size) + ' · ' + packs.length + ' 个包（按面额降序）</span>' +
+      ' / 总额 ' + fmtTok(a.size) + ' · 可用 ' + (groups.visible.length + groups.rest.length) + ' 个包' +
+      (groups.used.length ? ' / 已用完 ' + groups.used.length + ' 个' : '') +
+      ' · 默认展示最早到期 ' + pkDetailLimitValue(detailLimit) + ' 条</span>' +
       '</header><div class="tbl-wrap"><table class="acc"><thead><tr>' +
       '<th class="mark" aria-hidden="true"></th><th>包名 / 来源</th>' +
       '<th class="num">面额</th><th class="num">剩余</th><th class="num">已用</th>' +
       '<th class="num">发放</th><th class="num">到期</th>' +
-      '</tr></thead><tbody>' + rows + '</tbody></table></div></div>';
+      '</tr></thead><tbody>' + rows + restSummary + usedSummary + '</tbody></table></div></div>';
   }).join('');
 }
+
+if ($('pkDetail')) $('pkDetail').addEventListener('click', ev => {
+  const btn = ev.target.closest('button[data-pk-group]');
+  if (!btn) return;
+  const body = btn.closest('tbody');
+  if (!body) return;
+  const group = btn.dataset.pkGroup;
+  const expanded = btn.getAttribute('aria-expanded') === 'true';
+  body.querySelectorAll('tr[data-pk-row="' + group + '"]').forEach(row => { row.hidden = expanded; });
+  const count = btn.dataset.count || '0';
+  const size = btn.dataset.size || '0';
+  const remain = btn.dataset.remain || '0';
+  btn.setAttribute('aria-expanded', String(!expanded));
+  if (group === 'rest') {
+    btn.textContent = expanded
+      ? '其余未用完 ' + count + ' 个包（面额合计 ' + fmtTok(size) + ' · 剩余 ' +
+        fmtTok(remain) + '），展开'
+      : '收起其余未用完 ' + count + ' 个包';
+  } else {
+    btn.textContent = expanded
+      ? '已用完 ' + count + ' 个包（面额合计 ' + fmtTok(size) + '），展开'
+      : '收起已用完 ' + count + ' 个包';
+  }
+});
 
 async function loadPackages() {
   $('pkSummary').innerHTML = '<div class="empty">查询中…（逐账号向上游实时查询）</div>';
   $('pkDetail').innerHTML = '';
   try {
-    const d = await api('packages');
-    renderPackages(d);
+    const [d, c] = await Promise.all([
+      api('packages'),
+      api('config').catch(() => null),
+    ]);
+    renderPackages(d, pkDetailLimit(c && c.config));
   } catch (e) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
   }
