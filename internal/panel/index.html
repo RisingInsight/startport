@@ -292,6 +292,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 #logBox .ln.e, #reqLogBox .ln.e { color: var(--bad); }
 #logBox .ln.w, #reqLogBox .ln.w { color: var(--warn); }
 #reqLogBox { max-height: 360px; }
+#view-logs .box > header { flex-wrap: wrap; }
+#reqSummary, #reqNote { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#reqSummary { flex: 1 1 320px; }
+#reqNote { flex: 0 1 260px; text-align: right; }
 
 /* ── 配置表单 ─────────────────────────────────────────────────────── */
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 20px; }
