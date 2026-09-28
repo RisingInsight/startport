@@ -273,7 +273,7 @@ func (e *entry) healthy(now time.Time) bool {
 // 调用方负责 now 与冷却有效性的判断（本方法只看形态，不看冷却是否已过期）。
 func (e *entry) modelExempt() bool {
 	return len(e.modelCooldowns) > 0 &&
-		!e.disabled && e.breakerUntil.IsZero()
+		!e.disabled && e.until.IsZero() && e.degradeUntil.IsZero() && e.breakerUntil.IsZero()
 }
 
 // modelCooled 报告账号对指定 model 是否正处 6004 模型级冷却（该模型的独立冷却未过期）。
