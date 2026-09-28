@@ -12,7 +12,7 @@ import (
 func TestAddAndTotals(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now, "cn", "uid1", "glm-5.2", Delta{PromptTokens: 100, HasPromptTokens: true, CompletionTokens: 50, HasCompletion: true, Credit: 1.5, HasCredit: true, LatencyMs: 200, HasLatency: true}, true)
+	r.Add(now, "cn", "uid1", "glm-5.2", Delta{PromptTokens: 100, HasPromptTokens: true, CompletionTokens: 50, HasCompletion: true, Credit: 1.5, HasCredit: true, ModelRate: "0.05", LatencyMs: 200, HasLatency: true}, true)
 	// 失败尝试：无 usage → 只计请求数与失败数，token 不加。
 	r.Add(now, "global", "uid1", "claude-4.6", Delta{}, false)
 	// 上游没给 total 时用 pt+ct 兜底，保证总量口径连续。
@@ -28,8 +28,8 @@ func TestAddAndTotals(t *testing.T) {
 	if s.Totals.TotalTokens != 165 {
 		t.Fatalf("tt = %d, want 165（无 total 时按 pt+ct 兜底）", s.Totals.TotalTokens)
 	}
-	if s.Totals.Credits != 1.5 || s.Totals.CreditSamples != 1 || s.Totals.CreditTokens != 150 || s.Totals.CreditsPer1KTokens != 10 {
-		t.Fatalf("credit totals = %+v, want credits=1.5 samples=1 tokens=150 ratio=10", s.Totals)
+	if s.Totals.Credits != 1.5 || s.Totals.CreditSamples != 1 || s.Totals.CreditTokens != 150 || s.Totals.CreditsPer1MTokens != 10000 {
+		t.Fatalf("credit totals = %+v, want credits=1.5 samples=1 tokens=150 ratio=10000", s.Totals)
 	}
 	if s.Totals.AvgLatencyMs != 200 {
 		t.Fatalf("avg latency = %v, want 200", s.Totals.AvgLatencyMs)
@@ -40,8 +40,13 @@ func TestAddAndTotals(t *testing.T) {
 	if s.ByAccount[0].Realm == "" {
 		t.Fatal("by_account 行缺 realm 标注")
 	}
-	if len(s.Deductions) != 1 || s.Deductions[0].CreditSamples != 1 || s.Deductions[0].CreditsPer1KToken != 10 {
-		t.Fatalf("deductions = %+v, want one credit-aware row", s.Deductions)
+	if len(s.CreditByAccount) != 1 || s.CreditByAccount[0].Key != "uid1" ||
+		s.CreditByAccount[0].CreditSamples != 1 || s.CreditByAccount[0].CreditsPer1MTokens != 10000 {
+		t.Fatalf("credit_by_account = %+v, want one uid1 row", s.CreditByAccount)
+	}
+	if len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "glm-5.2" ||
+		s.CreditByModel[0].Rate != "0.05" || s.CreditByModel[0].CreditsPer1MTokens != 10000 {
+		t.Fatalf("credit_by_model = %+v, want one glm-5.2 rate=0.05 row", s.CreditByModel)
 	}
 }
 
@@ -106,11 +111,11 @@ func TestLoadLegacyWithoutCredit(t *testing.T) {
 	}
 	r := New(path)
 	s := r.Snapshot(0, nil)
-	if s.Totals.TotalTokens != 42 || s.Totals.CreditSamples != 0 || s.Totals.CreditsPer1KTokens != 0 {
+	if s.Totals.TotalTokens != 42 || s.Totals.CreditSamples != 0 || s.Totals.CreditsPer1MTokens != 0 {
 		t.Fatalf("legacy totals = %+v, want token-only history", s.Totals)
 	}
-	if len(s.Deductions) != 0 {
-		t.Fatalf("legacy deductions = %+v, want none without credit observation", s.Deductions)
+	if len(s.CreditByAccount) != 0 || len(s.CreditByModel) != 0 {
+		t.Fatalf("legacy credit dimensions = %+v / %+v, want none", s.CreditByAccount, s.CreditByModel)
 	}
 }
 
@@ -118,15 +123,55 @@ func TestLoadLegacyWithoutCredit(t *testing.T) {
 func TestCreditSurvivesRollup(t *testing.T) {
 	r := New("")
 	old := time.Now().AddDate(0, 0, -100)
-	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 100, HasPromptTokens: true, TotalTokens: 100, HasTotal: true, Credit: 1.25, HasCredit: true}, true)
-	r.Add(old.Add(2*time.Hour), "cn", "u", "m", Delta{PromptTokens: 300, HasPromptTokens: true, TotalTokens: 300, HasTotal: true, Credit: 3.75, HasCredit: true}, true)
+	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 100, HasPromptTokens: true, TotalTokens: 100, HasTotal: true, Credit: 1.25, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(old.Add(2*time.Hour), "cn", "u", "m", Delta{PromptTokens: 300, HasPromptTokens: true, TotalTokens: 300, HasTotal: true, Credit: 3.75, HasCredit: true, ModelRate: "0.5"}, true)
 	r.Rollup(time.Now())
 	s := r.Snapshot(0, nil)
-	if s.Totals.Credits != 5 || s.Totals.CreditSamples != 2 || s.Totals.CreditTokens != 400 || s.Totals.CreditsPer1KTokens != 12.5 {
-		t.Fatalf("rolled credit totals = %+v, want credits=5 tokens=400 ratio=12.5", s.Totals)
+	if s.Totals.Credits != 5 || s.Totals.CreditSamples != 2 || s.Totals.CreditTokens != 400 || s.Totals.CreditsPer1MTokens != 12500 {
+		t.Fatalf("rolled credit totals = %+v, want credits=5 tokens=400 ratio=12500", s.Totals)
 	}
-	if len(s.Deductions) != 1 || s.Deductions[0].Scope != "day" || s.Deductions[0].CreditsPer1KToken != 12.5 {
-		t.Fatalf("rolled deductions = %+v, want one day row", s.Deductions)
+	if len(s.CreditByModel) != 1 || s.CreditByModel[0].Rate != "0.5" || s.CreditByModel[0].CreditsPer1MTokens != 12500 {
+		t.Fatalf("rolled credit_by_model = %+v, want one rate-preserving row", s.CreditByModel)
+	}
+}
+
+// 模型维度按“裸模型名 + 生效倍率”合并；同倍率跨账号/时间合并，不同倍率拆行。
+func TestCreditDimensionsRateGrouping(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "cn:glm-5.2", Delta{TotalTokens: 100, HasTotal: true, Credit: 1, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(now.Add(time.Hour), "cn", "u2", "glm-5.2", Delta{TotalTokens: 200, HasTotal: true, Credit: 2, HasCredit: true, ModelRate: "0.5"}, true)
+	r.Add(now.Add(2*time.Hour), "cn", "u2", "glm-5.2", Delta{TotalTokens: 300, HasTotal: true, Credit: 6, HasCredit: true, ModelRate: "0.8"}, true)
+
+	s := r.Snapshot(24, nil)
+	if len(s.CreditByAccount) != 2 || len(s.CreditByModel) != 2 {
+		t.Fatalf("dimensions accounts=%+v models=%+v, want 2 accounts and 2 model-rate rows", s.CreditByAccount, s.CreditByModel)
+	}
+	if s.CreditByModel[0].Key != "glm-5.2" || s.CreditByModel[0].Rate != "0.8" ||
+		s.CreditByModel[0].Credits != 6 || s.CreditByModel[0].CreditTokens != 300 {
+		t.Fatalf("first model row = %+v, want rate=0.8 credits=6 tokens=300", s.CreditByModel[0])
+	}
+	if s.CreditByModel[1].Rate != "0.5" || s.CreditByModel[1].Credits != 3 || s.CreditByModel[1].CreditTokens != 300 {
+		t.Fatalf("merged model row = %+v, want rate=0.5 credits=3 tokens=300", s.CreditByModel[1])
+	}
+}
+
+// 旧桶缺倍率时由当前目录倍率回填，并与新桶同倍率记录合并；目录缺失时保留未知行。
+func TestCreditLegacyRateFallback(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "glm-5.2", Delta{TotalTokens: 100, HasTotal: true, Credit: 1, HasCredit: true}, true)
+	r.Add(now.Add(time.Hour), "cn", "u1", "glm-5.2", Delta{TotalTokens: 200, HasTotal: true, Credit: 2, HasCredit: true, ModelRate: "0.79"}, true)
+
+	s := r.SnapshotWithRates(24, nil, func(realm, model string) string {
+		if realm == "cn" && model == "glm-5.2" {
+			return "0.79"
+		}
+		return ""
+	})
+	if len(s.CreditByModel) != 1 || s.CreditByModel[0].Rate != "0.79" ||
+		s.CreditByModel[0].Credits != 3 || s.CreditByModel[0].CreditTokens != 300 {
+		t.Fatalf("fallback model rows = %+v, want legacy merged into rate=0.79", s.CreditByModel)
 	}
 }
 

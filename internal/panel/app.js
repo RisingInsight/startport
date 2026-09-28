@@ -1243,7 +1243,11 @@ function fmtCreditRatio(v, samples, tokens) {
   if (!samples || !tokens) return '—';
   const n = Number(v || 0);
   if (!Number.isFinite(n)) return '—';
-  return trimFixed(n.toFixed(4)) + ' / 1K';
+  return trimFixed(n.toFixed(4)) + ' / 1M';
+}
+function fmtModelRate(rate) {
+  const s = String(rate || '').trim();
+  return s ? 'x' + s : '—';
 }
 
 function usStat(v, k, cls) {
@@ -1263,9 +1267,8 @@ function usBar(prompt, completion, total) {
 }
 
 /* usRow 生成一行。mid 是插在「名称」之后、请求数之前的额外单元格（如「域」列）。
-   withPerf 控制延迟/速率两列，withCredit 控制积分/换算两列；列开关显式传入，
-   避免调用方改动后与表头错列。 */
-function usRow(name, sub, a, mid, withPerf, withCredit) {
+   withPerf 控制延迟/速率两列；列开关显式传入，避免调用方改动后与表头错列。 */
+function usRow(name, sub, a, mid, withPerf) {
   return '<tr>' +
     '<td class="mark" aria-hidden="true"></td>' +
     '<td>' + esc(name) + (sub ? '<div class="note">' + esc(sub) + '</div>' : '') + '</td>' +
@@ -1275,11 +1278,6 @@ function usRow(name, sub, a, mid, withPerf, withCredit) {
     '<td class="num">' + fmtTok(a.prompt_tokens) + '</td>' +
     '<td class="num">' + fmtTok(a.completion_tokens) + '</td>' +
     '<td class="num">' + fmtTok(a.total_tokens) + '</td>' +
-    (withCredit
-      ? '<td class="num">' + fmtCredit(a.credits) + '</td>' +
-        '<td class="num" title="仅使用积分与 Token 同时存在的匹配样本">' +
-        fmtCreditRatio(a.credits_per_1k_tokens, a.credit_samples, a.credit_tokens) + '</td>'
-      : '') +
     (withPerf
       ? '<td class="num">' + fmtMs(a.avg_latency_ms) + '</td>' +
         '<td class="num">' + fmtRate(a.avg_tokens_per_second) + '</td>'
@@ -1309,56 +1307,56 @@ function renderUsage(d) {
 
   $('usAccBody').innerHTML = (d.by_account || []).map(x =>
     usRow(x.key.slice(0, 8), x.extra || '', x,
-      '<td class="num">' + esc(x.realm || '') + '</td>', true, false)
+      '<td class="num">' + esc(x.realm || '') + '</td>', true)
   ).join('') || '<tr><td colspan="10" class="empty">暂无数据</td></tr>';
 
   $('usModelBody').innerHTML = (d.by_model || []).map(x =>
-    usRow(x.key, '', x, '', false, true)).join('') || '<tr><td colspan="9" class="empty">暂无数据</td></tr>';
+    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
 
   $('usRealmBody').innerHTML = (d.by_realm || []).map(x =>
-    usRow(x.key, '', x, '', false, false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
+    usRow(x.key, '', x, '', false)).join('') || '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
 
-  renderCreditDeductions(d);
+  renderCreditDimensions(d);
   renderUsageChart(d.series || []);
 }
 
-function deductionRange(row) {
-  const t = String(row && row.t || '');
-  if (row && row.scope === 'hour' && /^\d{4}-\d{2}-\d{2}T\d{2}$/.test(t)) {
-    const h = Number(t.slice(11));
-    const end = String(h + 1).padStart(2, '0') + ':00';
-    return t.slice(5, 10) + ' ' + String(h).padStart(2, '0') + ':00-' + end + ' · 1小时';
-  }
-  return (t || '—') + (row && row.scope === 'day' ? ' · 24小时' : '');
-}
-
-function renderCreditDeductions(d) {
+function renderCreditDimensions(d) {
   const t = d.totals || {};
+  const accounts = d.credit_by_account || [];
+  const models = d.credit_by_model || [];
   $('usCreditStats').innerHTML =
     usStat(fmtCredit(t.credits), '扣除积分') +
     usStat(fmtTok(t.credit_tokens), '匹配 Token') +
-    usStat(fmtCreditRatio(t.credits_per_1k_tokens, t.credit_samples, t.credit_tokens), '平均积分 / 1K Token') +
+    usStat(fmtCreditRatio(t.credits_per_1m_tokens, t.credit_samples, t.credit_tokens), '平均积分 / 1M Token') +
     usStat(String(t.credit_samples || 0), '有效积分样本');
 
-  const rows = d.deductions || [];
   $('usCreditNote').textContent =
-    (d.deduction_total || 0) + ' 条 · 最多显示最近 1000 条 · 仅统计本网关已观测请求';
-  $('usCreditBody').innerHTML = rows.map(row => {
-    const account = row.nickname || String(row.uid || '').slice(0, 8) || '—';
-    const tokenTip = Number(row.credit_tokens || 0) === Number(row.total_tokens || 0)
-      ? ''
-      : ' title="比例仅使用与积分同时存在的 ' + fmtTok(row.credit_tokens) + ' Token；该时段总 Token 为 ' + fmtTok(row.total_tokens) + '"';
+    accounts.length + ' 个账号 · ' + models.length + ' 个模型倍率分组 · 仅统计与积分同时观测到的 Token';
+
+  $('usCreditAccBody').innerHTML = accounts.map(row => {
+    const uid = String(row.key || '');
+    const account = row.nickname || uid.slice(0, 8) || '—';
     return '<tr>' +
       '<td class="mark" aria-hidden="true"></td>' +
-      '<td>' + esc(deductionRange(row)) + '</td>' +
-      '<td>' + esc(account) + '<div class="note">' + esc(row.realm || '') + ' · ' + esc(String(row.uid || '').slice(0, 8)) + '</div></td>' +
-      '<td>' + esc(row.model || '—') + '</td>' +
+      '<td>' + esc(account) + '<div class="note">' + esc(row.realm || '') + ' · ' + esc(uid.slice(0, 8)) + '</div></td>' +
       '<td class="num">' + fmtTok(row.requests) + '</td>' +
       '<td class="num">' + fmtCredit(row.credits) + '</td>' +
-      '<td class="num">' + fmtTok(row.total_tokens) + '</td>' +
-      '<td class="num"' + tokenTip + '>' + fmtCreditRatio(row.credits_per_1k_tokens, row.credit_samples, row.credit_tokens) + '</td>' +
+      '<td class="num">' + fmtTok(row.credit_tokens) + '</td>' +
+      '<td class="num">' + fmtCreditRatio(row.credits_per_1m_tokens, row.credit_samples, row.credit_tokens) + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="8" class="empty">暂无积分扣除记录；升级前仅含 Token 的历史不会伪造积分。</td></tr>';
+  }).join('') || '<tr><td colspan="6" class="empty">暂无积分扣除记录；升级前仅含 Token 的历史不会伪造积分。</td></tr>';
+
+  $('usCreditModelBody').innerHTML = models.map(row =>
+    '<tr>' +
+      '<td class="mark" aria-hidden="true"></td>' +
+      '<td>' + esc(row.key || '—') + '</td>' +
+      '<td>' + esc(fmtModelRate(row.rate)) + '</td>' +
+      '<td class="num">' + fmtTok(row.requests) + '</td>' +
+      '<td class="num">' + fmtCredit(row.credits) + '</td>' +
+      '<td class="num">' + fmtTok(row.credit_tokens) + '</td>' +
+      '<td class="num">' + fmtCreditRatio(row.credits_per_1m_tokens, row.credit_samples, row.credit_tokens) + '</td>' +
+    '</tr>'
+  ).join('') || '<tr><td colspan="7" class="empty">暂无积分扣除记录；升级前仅含 Token 的历史不会伪造积分。</td></tr>';
 }
 
 /* renderUsageChart 画堆叠柱状图。
@@ -1496,9 +1494,21 @@ function renderUsageChart(series) {
 
 function fmtTokTip(v) { return fmtTok(v); }
 
+let usageRateWarmAt = 0;
+async function warmUsageModelRates() {
+  if (Date.now() - usageRateWarmAt < 10 * 60 * 1000) return;
+  try {
+    await api('models');
+  } catch (e) {
+    // 倍率回填是可选增强；失败不阻塞用量统计，10 分钟后再试。
+  }
+  usageRateWarmAt = Date.now();
+}
+
 async function loadUsage() {
   const hours = ($('usWindow') && $('usWindow').value) || 72;
   try {
+    await warmUsageModelRates();
     const d = await api('usage?hours=' + encodeURIComponent(hours));
     renderUsage(d);
   } catch (e) {

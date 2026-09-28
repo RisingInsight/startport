@@ -293,11 +293,12 @@ func TestChatRecordsCreditForStreamAndSync(t *testing.T) {
 				t.Fatalf("code=%d body=%s", recorder.Code, recorder.Body)
 			}
 			s := rec.Snapshot(24, nil)
-			if s.Totals.Credits != 1.25 || s.Totals.CreditSamples != 1 || s.Totals.CreditTokens != 10 || s.Totals.CreditsPer1KTokens != 125 {
-				t.Fatalf("usage totals = %+v, want credit=1.25 tokens=10 ratio=125", s.Totals)
+			if s.Totals.Credits != 1.25 || s.Totals.CreditSamples != 1 || s.Totals.CreditTokens != 10 || s.Totals.CreditsPer1MTokens != 125000 {
+				t.Fatalf("usage totals = %+v, want credit=1.25 tokens=10 ratio=125000", s.Totals)
 			}
-			if len(s.Deductions) != 1 || s.Deductions[0].UID != "u1" || s.Deductions[0].Model != "glm-5.2" {
-				t.Fatalf("deductions = %+v", s.Deductions)
+			if len(s.CreditByAccount) != 1 || s.CreditByAccount[0].Key != "u1" ||
+				len(s.CreditByModel) != 1 || s.CreditByModel[0].Key != "glm-5.2" {
+				t.Fatalf("credit dimensions = %+v / %+v", s.CreditByAccount, s.CreditByModel)
 			}
 		})
 	}
