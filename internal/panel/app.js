@@ -431,7 +431,13 @@ async function loadLogs() {
   const box = $('logBox');
   const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 24;
   try {
-    const d = await api('logs');
+    const [d, metrics, requestRows] = await Promise.all([
+      api('logs'),
+      api('request_metrics').catch(() => ({})),
+      api('request_logs?limit=100').catch(() => ({ entries: [] })),
+    ]);
+    const recent = (requestRows.entries && requestRows.entries.length) ? requestRows.entries : (metrics.recent || []);
+    renderRequestMetrics(metrics, recent);
     const entries = (d.entries || []).filter(e => logCh === 'all' || e.ch === logCh);
     box.innerHTML = entries.length
       ? entries.map(e => {
@@ -448,6 +454,60 @@ async function loadLogs() {
       ? '任务 ' + (counts.task || 0) + ' · 对话 ' + (counts.chat || 0) + ' · 系统 ' + (counts.sys || 0)
       : (logCh === 'task' ? '任务' : logCh === 'chat' ? '对话' : '系统') + ' ' + entries.length + ' 行';
   } catch (e) { /* 概览已提示 */ }
+}
+
+function renderRequestMetrics(m, entries) {
+  m = m || {};
+  const a = m.archive || {};
+  $('reqSummary').textContent =
+    '已完成 ' + fmtTok(m.completed) +
+    ' · 成功 ' + (m.success_rate == null ? '—' : Number(m.success_rate).toFixed(1) + '%') +
+    ' · HTTP ' + (m.http_success_rate == null ? '—' : Number(m.http_success_rate).toFixed(1) + '%') +
+    ' · 平均 ' + fmtMs(m.avg_duration_ms) +
+    ' · 进行中 ' + String(m.in_flight || 0);
+  $('reqNote').textContent = a.enabled
+    ? 'JSONL 归档 ' + fmtBytes(a.bytes) + (a.dropped_writes ? ' · 丢弃 ' + a.dropped_writes + ' 条' : '') +
+      (a.last_error ? ' · 错误：' + a.last_error : '')
+    : '仅内存指标，JSONL 归档已关闭';
+
+  $('reqLogBox').innerHTML = (entries || []).map(requestLogLine).join('') ||
+    '<span style="color:var(--ink-3)">暂无请求记录</span>';
+}
+
+function requestLogText(e) {
+  const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+  const outcomeLabel = { success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断' };
+  const token = Number(e && e.total_tokens || 0) ||
+    (Number(e && e.prompt_tokens || 0) + Number(e && e.completion_tokens || 0));
+  let credit = 'credit —';
+  if (e && e.credit_known) {
+    const value = Number(e.credit);
+    if (Number.isFinite(value)) credit = String(Number(value.toFixed(2))) + ' credit';
+  }
+  return [
+    when,
+    String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
+    e && e.model || '—',
+    e && e.account || '—',
+    fmtMs(e && e.duration_ms),
+    fmtTok(token) + ' tok',
+    credit,
+    e && e.request_id || '—',
+  ].join(' | ');
+}
+
+function requestLogLine(e) {
+  const outcome = String(e && e.outcome || '');
+  const cls = outcome === 'http_error' || outcome === 'stream_error' ? ' e'
+    : outcome === 'interrupted' ? ' w' : '';
+  return '<span class="ln' + cls + '">' + esc(requestLogText(e)) + '</span>';
+}
+
+function fmtBytes(bytes) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  return (n / 1024 / 1024).toFixed(1) + ' MB';
 }
 $('btnLogPin').onclick = () => {
   logPin = !logPin;
