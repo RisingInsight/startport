@@ -412,36 +412,48 @@ async function loadLogs() {
 function renderRequestMetrics(m, entries) {
   m = m || {};
   const a = m.archive || {};
-  $('reqStats').innerHTML =
-    usStat(fmtTok(m.completed), '已完成') +
-    usStat(m.success_rate == null ? '—' : Number(m.success_rate).toFixed(1) + '%', '完成成功率') +
-    usStat(m.http_success_rate == null ? '—' : Number(m.http_success_rate).toFixed(1) + '%', 'HTTP 成功率') +
-    usStat(fmtMs(m.avg_duration_ms), '平均耗时') +
-    usStat(String(m.in_flight || 0), '进行中') +
-    usStat(fmtTok(a.files), '归档文件');
+  $('reqSummary').textContent =
+    '已完成 ' + fmtTok(m.completed) +
+    ' · 成功 ' + (m.success_rate == null ? '—' : Number(m.success_rate).toFixed(1) + '%') +
+    ' · HTTP ' + (m.http_success_rate == null ? '—' : Number(m.http_success_rate).toFixed(1) + '%') +
+    ' · 平均 ' + fmtMs(m.avg_duration_ms) +
+    ' · 进行中 ' + String(m.in_flight || 0);
   $('reqNote').textContent = a.enabled
     ? 'JSONL 归档 ' + fmtBytes(a.bytes) + (a.dropped_writes ? ' · 丢弃 ' + a.dropped_writes + ' 条' : '') +
       (a.last_error ? ' · 错误：' + a.last_error : '')
     : '仅内存指标，JSONL 归档已关闭';
 
+  $('reqLogBox').innerHTML = (entries || []).map(requestLogLine).join('') ||
+    '<span style="color:var(--ink-3)">暂无请求记录</span>';
+}
+
+function requestLogText(e) {
+  const when = e && e.time ? new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
   const outcomeLabel = { success: '成功', http_error: 'HTTP 错误', stream_error: '流错误', interrupted: '中断' };
-  $('reqBody').innerHTML = (entries || []).map(e => {
-    const when = e.time ? new Date(e.time).toLocaleString('zh-CN', { hour12: false }) : '—';
-    const token = Number(e.total_tokens || 0) || (Number(e.prompt_tokens || 0) + Number(e.completion_tokens || 0));
-    const credit = e.credit_known ? fmtCredit(e.credit) : '—';
-    return '<tr>' +
-      '<td class="mark" aria-hidden="true"></td>' +
-      '<td class="num">' + esc(when) + '</td>' +
-      '<td class="num">' + esc(e.request_id || '—') + '</td>' +
-      '<td>' + esc(e.account || '—') + '</td>' +
-      '<td>' + esc(e.model || '—') + '</td>' +
-      '<td class="num">' + esc(e.status || '—') + '</td>' +
-      '<td>' + esc(outcomeLabel[e.outcome] || e.outcome || '—') + '</td>' +
-      '<td class="num">' + fmtMs(e.duration_ms) + '</td>' +
-      '<td class="num">' + fmtTok(token) + '</td>' +
-      '<td class="num">' + credit + '</td>' +
-      '</tr>';
-  }).join('') || '<tr><td colspan="10" class="empty">暂无请求记录</td></tr>';
+  const token = Number(e && e.total_tokens || 0) ||
+    (Number(e && e.prompt_tokens || 0) + Number(e && e.completion_tokens || 0));
+  let credit = 'credit —';
+  if (e && e.credit_known) {
+    const value = Number(e.credit);
+    if (Number.isFinite(value)) credit = String(Number(value.toFixed(2))) + ' credit';
+  }
+  return [
+    when,
+    String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
+    e && e.model || '—',
+    e && e.account || '—',
+    fmtMs(e && e.duration_ms),
+    fmtTok(token) + ' tok',
+    credit,
+    e && e.request_id || '—',
+  ].join(' | ');
+}
+
+function requestLogLine(e) {
+  const outcome = String(e && e.outcome || '');
+  const cls = outcome === 'http_error' || outcome === 'stream_error' ? ' e'
+    : outcome === 'interrupted' ? ' w' : '';
+  return '<span class="ln' + cls + '">' + esc(requestLogText(e)) + '</span>';
 }
 
 function fmtBytes(bytes) {

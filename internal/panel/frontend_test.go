@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -121,6 +122,58 @@ try {
 		if !bytes.Contains(out, []byte("SMOKE OK")) {
 			t.Fatalf("app.js smoke %s 未通过:\n%s", hash, out)
 		}
+	}
+}
+
+// 请求指标滚动行必须紧凑、可读，并对失败结果使用日志高亮。
+func TestAppJSRequestLogFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; request log formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('function usStat(');
+const reqStart = src.indexOf('function requestLogText');
+const reqEnd = src.indexOf('function fmtBytes');
+if ([escStart, escEnd, fmtStart, fmtEnd, reqStart, reqEnd].some(v => v < 0)) throw new Error('request log helpers not found');
+const ctx = { Date, Number, String, Math, RegExp, isNaN };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(reqStart, reqEnd) +
+  '\nthis.requestLogText=requestLogText; this.requestLogLine=requestLogLine;',
+  ctx
+);
+const time = new Date(2026, 8, 28, 14, 5, 6).toISOString();
+const good = { time, status: 200, outcome: 'success', model: 'glm-5.3', account: '账号(uid8)', duration_ms: 1250, total_tokens: 2300, credit_known: true, credit: 0.12, request_id: 'req-1' };
+const bad = { ...good, status: 500, outcome: 'http_error', request_id: 'req-2' };
+process.stdout.write(JSON.stringify({
+  good: ctx.requestLogText(good),
+  goodLine: ctx.requestLogLine(good),
+  badLine: ctx.requestLogLine(bad),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "request-log-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("request log formatting node test failed: %v\n%s", err, out)
+	}
+	const text = "14:05:06 | 200 成功 | glm-5.3 | 账号(uid8) | 1.25s | 2.3k tok | 0.12 credit | req-1"
+	want := `{"good":` + strconv.Quote(text) +
+		`,"goodLine":` + strconv.Quote(`<span class="ln">`+text+`</span>`) +
+		`,"badLine":` + strconv.Quote(`<span class="ln e">14:05:06 | 500 HTTP 错误 | glm-5.3 | 账号(uid8) | 1.25s | 2.3k tok | 0.12 credit | req-2</span>`) + `}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("request log formatting=%s want %s", out, want)
 	}
 }
 
