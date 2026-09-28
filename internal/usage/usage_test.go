@@ -12,7 +12,7 @@ import (
 func TestAddAndTotals(t *testing.T) {
 	r := New("")
 	now := time.Now()
-	r.Add(now, "cn", "uid1", "glm-5.2", Delta{PromptTokens: 100, HasPromptTokens: true, CompletionTokens: 50, HasCompletion: true, LatencyMs: 200, HasLatency: true}, true)
+	r.Add(now, "cn", "uid1", "glm-5.2", Delta{PromptTokens: 100, HasPromptTokens: true, CompletionTokens: 50, HasCompletion: true, Credit: 1.5, HasCredit: true, LatencyMs: 200, HasLatency: true}, true)
 	// 失败尝试：无 usage → 只计请求数与失败数，token 不加。
 	r.Add(now, "global", "uid1", "claude-4.6", Delta{}, false)
 	// 上游没给 total 时用 pt+ct 兜底，保证总量口径连续。
@@ -28,6 +28,9 @@ func TestAddAndTotals(t *testing.T) {
 	if s.Totals.TotalTokens != 165 {
 		t.Fatalf("tt = %d, want 165（无 total 时按 pt+ct 兜底）", s.Totals.TotalTokens)
 	}
+	if s.Totals.Credits != 1.5 || s.Totals.CreditSamples != 1 || s.Totals.CreditTokens != 150 || s.Totals.CreditsPer1KTokens != 10 {
+		t.Fatalf("credit totals = %+v, want credits=1.5 samples=1 tokens=150 ratio=10", s.Totals)
+	}
 	if s.Totals.AvgLatencyMs != 200 {
 		t.Fatalf("avg latency = %v, want 200", s.Totals.AvgLatencyMs)
 	}
@@ -36,6 +39,9 @@ func TestAddAndTotals(t *testing.T) {
 	}
 	if s.ByAccount[0].Realm == "" {
 		t.Fatal("by_account 行缺 realm 标注")
+	}
+	if len(s.Deductions) != 1 || s.Deductions[0].CreditSamples != 1 || s.Deductions[0].CreditsPer1KToken != 10 {
+		t.Fatalf("deductions = %+v, want one credit-aware row", s.Deductions)
 	}
 }
 
@@ -86,8 +92,41 @@ func TestFlushLoadRoundtrip(t *testing.T) {
 	}
 	raw, _ := os.ReadFile(path)
 	var f file
-	if err := json.Unmarshal(raw, &f); err != nil || f.Version != 1 || len(f.Buckets) != 1 {
+	if err := json.Unmarshal(raw, &f); err != nil || f.Version != fileVersion || len(f.Buckets) != 1 {
 		t.Fatalf("落盘文件异常: err=%v buckets=%d", err, len(f.Buckets))
+	}
+}
+
+// 版本 1 文件没有积分字段：按零值恢复，旧 Token 数据保持可见且不产生伪比例。
+func TestLoadLegacyWithoutCredit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	legacy := `{"version":1,"saved":"2026-09-28T00:00:00+08:00","buckets":[{"s":"h:2026-09-28T10","r":"cn","u":"u1","m":"glm-5.2","q":1,"p":42,"t":42}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := New(path)
+	s := r.Snapshot(0, nil)
+	if s.Totals.TotalTokens != 42 || s.Totals.CreditSamples != 0 || s.Totals.CreditsPer1KTokens != 0 {
+		t.Fatalf("legacy totals = %+v, want token-only history", s.Totals)
+	}
+	if len(s.Deductions) != 0 {
+		t.Fatalf("legacy deductions = %+v, want none without credit observation", s.Deductions)
+	}
+}
+
+// 小时桶折叠为日桶时必须保留积分、样本数和匹配 Token，比例不能因 Rollup 漂移。
+func TestCreditSurvivesRollup(t *testing.T) {
+	r := New("")
+	old := time.Now().AddDate(0, 0, -100)
+	r.Add(old, "cn", "u", "m", Delta{PromptTokens: 100, HasPromptTokens: true, TotalTokens: 100, HasTotal: true, Credit: 1.25, HasCredit: true}, true)
+	r.Add(old.Add(2*time.Hour), "cn", "u", "m", Delta{PromptTokens: 300, HasPromptTokens: true, TotalTokens: 300, HasTotal: true, Credit: 3.75, HasCredit: true}, true)
+	r.Rollup(time.Now())
+	s := r.Snapshot(0, nil)
+	if s.Totals.Credits != 5 || s.Totals.CreditSamples != 2 || s.Totals.CreditTokens != 400 || s.Totals.CreditsPer1KTokens != 12.5 {
+		t.Fatalf("rolled credit totals = %+v, want credits=5 tokens=400 ratio=12.5", s.Totals)
+	}
+	if len(s.Deductions) != 1 || s.Deductions[0].Scope != "day" || s.Deductions[0].CreditsPer1KToken != 12.5 {
+		t.Fatalf("rolled deductions = %+v, want one day row", s.Deductions)
 	}
 }
 

@@ -628,6 +628,25 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
 
       <div class="box">
+        <header>
+          <h3>积分扣除历史</h3>
+          <span class="grow"></span>
+          <span class="note" id="usCreditNote">—</span>
+        </header>
+        <div class="stats" id="usCreditStats"></div>
+        <div class="tbl-wrap">
+          <table class="acc">
+            <thead><tr>
+              <th class="mark" aria-hidden="true"></th><th>时间段</th><th>账号</th><th>模型</th>
+              <th class="num">请求</th><th class="num">扣除积分</th>
+              <th class="num">消耗 Token</th><th class="num">积分 / 1K Token</th>
+            </tr></thead>
+            <tbody id="usCreditBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
         <header><h3>按账号</h3><span class="grow"></span>
           <span class="note">请求数含失败尝试</span></header>
         <div class="tbl-wrap">
@@ -651,6 +670,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               <th class="mark" aria-hidden="true"></th><th>模型</th>
               <th class="num">请求</th><th class="num">失败</th>
               <th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>
+              <th class="num">积分</th><th class="num">积分 / 1K Token</th>
             </tr></thead>
             <tbody id="usModelBody"></tbody>
           </table>

@@ -124,6 +124,55 @@ try {
 	}
 }
 
+// 积分扣除明细的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
+func TestAppJSCreditDeductionFormatting(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; credit formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function trimFixed');
+const end = src.indexOf('function usStat');
+const rangeStart = src.indexOf('function deductionRange');
+const rangeEnd = src.indexOf('function renderCreditDeductions');
+if (start < 0 || end < 0 || rangeStart < 0 || rangeEnd < 0) throw new Error('credit helpers not found');
+const ctx = { Number, String, RegExp };
+vm.createContext(ctx);
+vm.runInContext(
+  src.slice(start, end) + src.slice(rangeStart, rangeEnd) +
+  '\nthis.fmtCredit=fmtCredit; this.fmtCreditRatio=fmtCreditRatio; this.deductionRange=deductionRange;',
+  ctx
+);
+process.stdout.write(JSON.stringify({
+  credit: ctx.fmtCredit(1.25),
+  zero: ctx.fmtCredit(0),
+  hundred: ctx.fmtCredit(100),
+  ratio: ctx.fmtCreditRatio(12.5, 2, 400),
+  noSamples: ctx.fmtCreditRatio(12.5, 0, 400),
+  noTokens: ctx.fmtCreditRatio(12.5, 2, 0),
+  hour: ctx.deductionRange({ t: '2026-09-28T23', scope: 'hour' }),
+  day: ctx.deductionRange({ t: '2026-09-28', scope: 'day' }),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "credit-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("credit formatting node test failed: %v\n%s", err, out)
+	}
+	const want = `{"credit":"1.25","zero":"0","hundred":"100","ratio":"12.5 / 1K","noSamples":"—","noTokens":"—","hour":"09-28 23:00-24:00 · 1小时","day":"2026-09-28 · 24小时"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("credit formatting=%s want %s", out, want)
+	}
+}
+
 // 同到期时间按面额降序；其余未用完包与零/负余额包分别聚合。
 func TestAppJSDetailGroups(t *testing.T) {
 	node, err := exec.LookPath("node")
