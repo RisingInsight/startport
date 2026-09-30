@@ -312,6 +312,14 @@ func main() {
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 
+	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
+	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
+	// ModelRate 恒返回空串——积分保底的目录兜底在这段空窗期内形同虚设，触底号
+	// 会被当成「收费未知」放行并打穿（实测：重启后 2 分钟，97 分的账号打收费
+	// 模型归零；倍率表当时尚未建立）。
+	// 异步执行：不阻塞监听启动；失败仅记日志（下一轮懒触发或本轮重试仍可补上）。
+	go warmModelRates(ctx, up, p)
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           h,
@@ -338,6 +346,46 @@ func main() {
 		log.Fatalf("http: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// warmModelRates 启动预热各域模型积分倍率表（供积分保底的目录兜底判定）。
+//
+// 为什么需要：倍率表只在 FetchModels（CN）/ FetchGlobalModelInfos（global）成功时
+// 填充，两者都是懒触发（被 /v1/models 或面板模型页访问才跑）。重启后到首次触发
+// 之间的空窗期里 ModelRate 恒返回空串，保底的目录兜底判不出收费，触底号会被
+// 当成「收费未知」放行并打穿（实测：重启后 2 分钟，97 分的账号打收费模型归零）。
+//
+// 失败处理：单域失败只记 WARN（不阻塞、不致命——后续懒触发仍会补上）；global 域
+// 仅在其路由开关开启时预热（逃生门关锁时按 CN 处理，无需探测）。
+func warmModelRates(ctx context.Context, up *upstream.Client, p *pool.Pool) {
+	// 预热不得拖住进程退出：ctx 取消（SIGINT/SIGTERM）时立刻放弃剩余域。
+	if ctx.Err() != nil {
+		return
+	}
+	// CN：有可用 CN 账号才拉（与面板 models 同口径，避免无谓上游调用）。
+	if uids := p.AvailableUIDsForRealm("cn"); len(uids) > 0 {
+		if a := p.AuthByUID(uids[0]); a != nil {
+			if _, err := up.FetchModels(a); err != nil {
+				log.Printf("WARN: [upstream] warm model rates (cn): %v", err)
+			} else {
+				log.Printf("[upstream] warm model rates: cn ok")
+			}
+		}
+	}
+	// global：独立目录端点（workbuddy.ai），倍率按 "global" 域键存储。
+	if up.GlobalEnabled && ctx.Err() == nil {
+		if uids := p.AvailableUIDsForRealm("global"); len(uids) > 0 {
+			if a := p.AuthByUID(uids[0]); a != nil {
+				// FetchGlobalModelInfos 无错误返回（内部负缓存自行节流），
+				// 仅按结果条数判断是否拿到目录。
+				if infos := up.FetchGlobalModelInfos(a); len(infos) == 0 {
+					log.Printf("WARN: [upstream] warm model rates (global): empty model list")
+				} else {
+					log.Printf("[upstream] warm model rates: global ok (%d models)", len(infos))
+				}
+			}
+		}
+	}
 }
 
 // panelListenPath 从 listen 地址提取 ":port" 形式，用于启动日志拼面板 URL
