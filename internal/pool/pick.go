@@ -1,4 +1,4 @@
-// 选号：Pick 簇（healthy 成本分层 + 最早到期优先/普通加权 + 全冷却兜底 + 在途占满过滤）。
+// 选号：Pick 簇（healthy 成本分层 + 快过期虚拟实例权重 + 全冷却兜底 + 在途占满过滤）。
 package pool
 
 import (
@@ -152,7 +152,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	for _, e := range cands {
 		ti, ci := costTier(e)
 		if ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now), tier: ti, cost1k: ci})
+			ws = append(ws, weighted{e: e, w: p.routingWeightOf(e, maxCredits, now), tier: ti, cost1k: ci})
 		}
 	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
@@ -196,62 +196,29 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		cands = cands[:5]
 	}
 	var e *entry
-	// 最早到期优先（WorkDaddy 口径）：只在成本层内、配置窗口内存在有效批次的账号中
-	// 排序；同到期时间按该批次剩余积分降序。防并发撞号仍优先过滤 minPickGap 内的账号，
-	// 优先级候选全部刚被用时才从中选最早者，避免把请求硬撞到同一账号。
-	if p.preferExpiring {
-		priority := make([]*entry, 0, len(candsAll))
-		for _, c := range candsAll {
-			if c.creditsExpiring <= 0 || c.creditsEarliestRemaining <= 0 ||
-				c.creditsEarliestExpiry.IsZero() || !c.creditsEarliestExpiry.After(now) {
-				continue
-			}
-			priority = append(priority, c)
-		}
-		sort.SliceStable(priority, func(i, j int) bool {
-			if !priority[i].creditsEarliestExpiry.Equal(priority[j].creditsEarliestExpiry) {
-				return priority[i].creditsEarliestExpiry.Before(priority[j].creditsEarliestExpiry)
-			}
-			if priority[i].creditsEarliestRemaining != priority[j].creditsEarliestRemaining {
-				return priority[i].creditsEarliestRemaining > priority[j].creditsEarliestRemaining
-			}
-			return priority[i].a.UID < priority[j].a.UID
-		})
-		for _, c := range priority {
-			if now.Sub(c.lastUsed) >= minPickGap {
-				e = c
-				break
-			}
-		}
-		if e == nil && len(priority) > 0 {
-			e = priority[0]
+	// 防并发撞号：在持锁内基于「上次选中时刻」过滤，但同一批并发 goroutine 会串行进入
+	// 本函数（写锁），每个进入者都把 lastUsed 置为 now —— 于是同一瞬间的第 2..N 个
+	// 进入者看到前一个账号 lastUsed==now（距今 0 < minPickGap），被自然挤向其他账号。
+	// 关键：lastUsed 在锁内赋值，使时间窗口判定在并发下可重入。
+	eligible := make([]*entry, 0, len(cands))
+	for _, c := range cands {
+		if now.Sub(c.lastUsed) >= minPickGap {
+			eligible = append(eligible, c)
 		}
 	}
-	if e == nil {
-		// 防并发撞号：在持锁内基于「上次选中时刻」过滤，但同一批并发 goroutine 会串行进入
-		// 本函数（写锁），每个进入者都把 lastUsed 置为 now —— 于是同一瞬间的第 2..N 个
-		// 进入者看到前一个账号 lastUsed==now（距今 0 < minPickGap），被自然挤向其他账号。
-		// 关键：lastUsed 在锁内赋值，使时间窗口判定在并发下可重入。
-		eligible := make([]*entry, 0, len(cands))
-		for _, c := range cands {
-			if now.Sub(c.lastUsed) >= minPickGap {
-				eligible = append(eligible, c)
+	if len(eligible) == 0 {
+		// top5 全部刚被用过：LRU 兜底，在**全候选 candsAll**（非仅 top5）里选最旧者。
+		// 用 usedSeq 单调序号而非 lastUsed 墙钟比较：Windows 等平台 time.Now() 精度
+		// ~0.5ms，快速连续选号时所有 lastUsed 完全相等，Before 全 false 会恒选
+		// candsAll[0] 导致集中。usedSeq 严格全序，与时间精度无关。
+		e = candsAll[0]
+		for _, c := range candsAll[1:] {
+			if c.usedSeq < e.usedSeq {
+				e = c
 			}
 		}
-		if len(eligible) == 0 {
-			// top5 全部刚被用过：LRU 兜底，在**全候选 candsAll**（非仅 top5）里选最旧者。
-			// 用 usedSeq 单调序号而非 lastUsed 墙钟比较：Windows 等平台 time.Now() 精度
-			// ~0.5ms，快速连续选号时所有 lastUsed 完全相等，Before 全 false 会恒选
-			// candsAll[0] 导致集中。usedSeq 严格全序，与时间精度无关。
-			e = candsAll[0]
-			for _, c := range candsAll[1:] {
-				if c.usedSeq < e.usedSeq {
-					e = c
-				}
-			}
-		} else {
-			e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
-		}
+	} else {
+		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
 	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
@@ -367,7 +334,7 @@ func (p *Pool) pickWeighted(cands []*entry) *entry {
 	weights := make([]int64, len(cands))
 	var total int64
 	for i, e := range cands {
-		w := p.weightOf(e, maxCredits, now)
+		w := p.routingWeightOf(e, maxCredits, now)
 		weights[i] = int64(w * scale)
 		total += weights[i]
 	}
@@ -413,6 +380,24 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 	// 3.（原「成功率 ×3」因子已删，对齐上游 success-ema-review：errTotal 是终身
 	// 累计、只增不减，成功率 = successCount/(successCount+errTotal) 会让早期出过错
 	// 的号被永久压权且永不恢复；瞬时健康信号已由冷却/熔断/连败降权承接。）
+	return w
+}
+
+// expiringNow 报告账号是否存在当前仍有效的快过期积分批次。
+func expiringNow(e *entry, now time.Time) bool {
+	return e.creditsExpiring > 0 &&
+		e.creditsEarliestRemaining > 0 &&
+		!e.creditsEarliestExpiry.IsZero() &&
+		e.creditsEarliestExpiry.After(now)
+}
+
+// routingWeightOf 在普通账号权重上叠加快过期虚拟实例数量。prefer_expiring=false
+// 或账号无有效快过期批次时，实例数恒为 1，结果与旧 weightOf 完全一致。
+func (p *Pool) routingWeightOf(e *entry, maxCredits int64, now time.Time) float64 {
+	w := p.weightOf(e, maxCredits, now)
+	if p.preferExpiring && expiringNow(e, now) {
+		return w * expiringVirtualSlots
+	}
 	return w
 }
 
