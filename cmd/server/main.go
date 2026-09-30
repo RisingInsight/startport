@@ -132,6 +132,13 @@ func main() {
 	}
 
 	up := upstream.New()
+
+	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
+	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
+	// （kimi-k3-1 实案：全池无观测 → 保底全放行 → 两笔打穿并硬冷却到次日 04:00）。
+	// 位于 up 装配之后：倍率表由探测下发，闭包每次调用读实时快照。
+	p.SetModelRateOf(func(realm, model string) string { return up.ModelRate(realm, model) })
+
 	// 短 RPC 总时长上限（refresh/checkin/balance/FetchModels），语义不变。
 	up.HTTP.Timeout = time.Duration(cfg.Upstream.TimeoutSeconds) * time.Second
 	// 聊天 SSE 首字节前（响应头）上限：cfg 已 normalize（缺省回落 timeout_seconds）。
