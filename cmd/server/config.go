@@ -164,6 +164,11 @@ type Config struct {
 		// 错误策略）。默认 "30m"（≤48 次/天/模型）；"0" 关停（完全回到现状行为）；
 		// 空值回落默认。
 		CostExploreInterval string `json:"cost_explore_interval"`
+		// CreditFloor 积分保底：账号余额低于该值时，对实测收费模型（tier 2）不再
+		// 参与选号——防止收费请求把余额打穿、连免费模型都 402 冷却到次日签到。
+		// tier 0（免费）/ tier 1（无观测）不受限；签到回血越过 floor 自动恢复。
+		// 默认 0 = 关闭；负值钳 0。
+		CreditFloor int64 `json:"credit_floor"`
 	} `json:"pool"`
 
 	SessionSticky struct {
@@ -464,6 +469,10 @@ func (c *Config) normalize() error {
 	}
 	if c.CostExploreIntervalDur < 0 {
 		c.CostExploreIntervalDur = 0
+	}
+	// 积分保底：负值钳 0（= 关闭）。0 是合法默认（关闭），无需空值回落。
+	if c.Pool.CreditFloor < 0 {
+		c.Pool.CreditFloor = 0
 	}
 	if c.Pool.BreakerThreshold <= 0 {
 		c.Pool.BreakerThreshold = 3
