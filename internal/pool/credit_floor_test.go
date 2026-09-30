@@ -316,6 +316,50 @@ func TestCreditFloorLocalLedgerFreeBeatsCatalogPaid(t *testing.T) {
 	}
 }
 
+// TestCreditFloorBlocksFallbackPath 全冷却兜底路径同样受保底约束。
+// 背景：floor 把健康号全拦掉 → cands 为空 → 走
+// pickEarliestExpiryLocked 兜底，而兜底原本不看保底 → 触底号被「捞回来」继续接
+// 收费模型，表现为同一条 floor WARN 反复刷同一个号（credits=1 < floor=150 仍持续
+// 中选）。兜底是最后一道选号路径，保底在它之前挡不住就等于没挡。
+func TestCreditFloorBlocksFallbackPath(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.SetCreditFloor(150)
+	p.SetModelRateOf(rates(map[string]map[string]string{"global": {"kimi-k3": "1.62"}}))
+
+	poor := &auth.Auth{UID: "poor"}
+	auth.BackfillRealmFor(poor, "global")
+	p.Add(poor)
+	p.SetCredits("poor", 1, 0)
+	// 置入软冷却：让 healthy 候选为空，强制走兜底路径。
+	p.Cooldown("poor", CoolSoft, 2*time.Minute, "test")
+
+	if a := p.PickExcludingForRealm(nil, "kimi-k3", "global"); a != nil {
+		t.Fatalf("兜底路径应受保底约束：触底号 credits=1 < floor=150 不得被捞出，got %v", a)
+	}
+}
+
+// TestCreditFloorFallbackAllowsFreeModel 兜底路径对**免费**模型照常放行：保底只拦
+// 收费，不得让触底号连免费模型也接不到（那等于变相禁用）。
+func TestCreditFloorFallbackAllowsFreeModel(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.SetCostExploreInterval(0)
+	p.SetCreditFloor(150)
+	p.SetModelRateOf(rates(map[string]map[string]string{"global": {"hy3": "0.00"}}))
+
+	poor := &auth.Auth{UID: "poor"}
+	auth.BackfillRealmFor(poor, "global")
+	p.Add(poor)
+	p.SetCredits("poor", 1, 0)
+	p.Cooldown("poor", CoolSoft, 2*time.Minute, "test")
+
+	if a := p.PickExcludingForRealm(nil, "hy3", "global"); a == nil {
+		t.Fatal("兜底路径对免费模型应放行触底号，got nil")
+	}
+}
+
 // TestCreditFloorStickyBlockedByCatalogRate 粘性路径同判据：粘性号触底 + 目录判
 // 收费 → PickByUIDForModel 返回 nil，handler 解绑换号（避免钉在打穿的号上）。
 func TestCreditFloorStickyBlockedByCatalogRate(t *testing.T) {

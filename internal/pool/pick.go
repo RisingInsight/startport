@@ -77,7 +77,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm)
+		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -290,7 +290,12 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm string) *auth.Auth {
+//
+// 积分保底同样在此生效（model 非空时）：floor 把健康号全部拦掉后 cands 为空会走到
+// 这里，若兜底不看保底，触底号会被「捞回来」继续接收费模型——表现为同一条
+// floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
+// 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -304,6 +309,9 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 		if e.coolKind == CoolHard && !e.until.IsZero() && now.Before(e.until) {
 			continue // 余额耗尽号（处于有效 hard 冷却期）不参与兜底：等签到恢复，调了必 402
+		}
+		if p.floorBlockedForRealmModel(e, model, realm, now) {
+			continue // 积分保底：触底号不接收费模型（兜底路径同判据）
 		}
 		if p.inFlightFull(e) {
 			continue
