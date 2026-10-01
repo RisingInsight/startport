@@ -1698,10 +1698,13 @@ function renderExpiry(d) {
     const week = bs.filter(b => expDaysLeft(b.date, today) <= 7)
       .reduce((s, b) => s + b.remain, 0);
     // 危险度：≤3 天红（不抓紧就真没了）、≤7 天琥珀、更远绿。
+    // 上游扣包是 FEFO（按失效时刻升序，实测两号口径一致）：这些快过期批次正是
+    // 被消耗得最快的，日均需耗给的是「哪怕单靠这个账号的自然流量也能对齐」的参照。
     const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
     const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
+    const more = bs.length > 4 ? '　等 ' + bs.length + ' 批' : '';
     const rest = bs.slice(1, 4).map(b =>
-      '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　');
+      '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
     return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
       '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
       '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
@@ -1712,7 +1715,11 @@ function renderExpiry(d) {
       '</span></div>';
   }).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
-  $('expNote').textContent = list.length + ' 个账号 · 实时查询上游';
+  // 数据新鲜度透明化：走缓存时标注年龄，免得把旧数据误当实时。
+  const ageMin = lastPackages ? Math.floor((Date.now() - lastPackagesAt) / 60000) : 0;
+  $('expNote').textContent = (lastPackagesAt && ageMin > 0)
+    ? list.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，可点「检查」刷新'
+    : list.length + ' 个账号 · 实时查询上游';
   $('expBox').hidden = false;
 }
 
