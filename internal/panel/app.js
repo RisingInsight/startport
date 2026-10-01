@@ -1486,6 +1486,64 @@ function pkBySource(packs) {
   return [...m.values()].sort((a, b) => b.size - a.size);
 }
 
+/* 逐包明细的排序规则（选择持久化在 localStorage，跨会话记住）：
+   end_asc   到期升序（默认）——快过期的包排最前，提醒优先消耗；无到期时间的
+             包（上游没下发 end_time）没有可比的日期，统一垫底，不掺进日期序里；
+   size_desc 面额降序——原来的展示口径，看「钱从哪来」。 */
+const LS_PK_SORT = 'pkSortMode';
+let pkSortMode = localStorage.getItem(LS_PK_SORT) || 'end_asc';
+
+// 无到期时间的包一律垫底：无论哪种规则，日期缺失都不该参与比较（NaN 会把
+// 比较器搅成不稳定序）。返回值 true = 无到期。
+function pkNoEnd(p) { return !(p.end_time || ''); }
+
+function pkSortPacks(packs) {
+  const cmpEnd = (x, y) => {
+    const nx = pkNoEnd(x), ny = pkNoEnd(y);
+    if (nx !== ny) return nx ? 1 : -1;          // 无到期垫底
+    if (nx && ny) return 0;                      // 都无到期：交给次级键
+    const ex = (x.end_time || '').slice(0, 10);
+    const ey = (y.end_time || '').slice(0, 10);
+    if (ex !== ey) return ex < ey ? -1 : 1;      // 越近越靠上
+    return 0;
+  };
+  const sorted = packs.slice();                  // 不动上游原数组
+  if (pkSortMode === 'size_desc') {
+    sorted.sort((x, y) => {
+      const dx = Number(x.size || 0), dy = Number(y.size || 0);
+      if (dx !== dy) return dy - dx;
+      return cmpEnd(x, y);                       // 同面额：按到期升序收尾
+    });
+  } else {
+    sorted.sort((x, y) => {
+      const e = cmpEnd(x, y);
+      if (e !== 0) return e;
+      return Number(y.size || 0) - Number(x.size || 0);  // 同到期：面额大的在前
+    });
+  }
+  return sorted;
+}
+
+const PK_SORT_LABELS = { end_asc: '按到期升序 · 近的在前', size_desc: '按面额降序' };
+
+// 最近一次拉到的积分构成数据：切换排序规则时直接重排，不重新请求上游。
+let lastPackages = null;
+
+// 排序规则控件：恢复上次选择并绑定切换（选择持久化在 localStorage，跨会话记住）。
+if ($('pkSort')) {
+  $('pkSort').value = pkSortMode;
+  if ($('pkSort').value !== pkSortMode) {        // localStorage 里存了废弃值：回落默认并清掉
+    pkSortMode = 'end_asc';
+    localStorage.removeItem(LS_PK_SORT);
+    $('pkSort').value = pkSortMode;
+  }
+  $('pkSort').onchange = () => {
+    pkSortMode = $('pkSort').value;
+    localStorage.setItem(LS_PK_SORT, pkSortMode);
+    if (lastPackages) renderPackages(lastPackages);   // 数据在内存，直接重排
+  };
+}
+
 function renderPackages(d) {
   const list = (d.accounts || []);
   if (!list.length) {
@@ -1543,10 +1601,10 @@ function renderPackages(d) {
 
   $('pkNote').textContent = list.length + ' 个账号 · 实时查询上游';
 
-  // 逐包明细：每个账号一个表，包的**面额**列是重点
+  // 逐包明细：每个账号一个表，排序规则由视图顶部的选择器决定（默认到期近的在前）
   $('pkDetail').innerHTML = list.map(a => {
     if (a.error) return '';
-    const packs = (a.packages || []);
+    const packs = pkSortPacks(a.packages || []);
     const rows = packs.map(p => {
       const k = (p.package_code || '') + '|' + (p.name || '(未命名)');
       const sub = (p.sub_product_code || '').replace(/^sp_tcaca_codebuddyide_?/, '') ||
@@ -1565,7 +1623,8 @@ function renderPackages(d) {
     return '<div class="box"><header><h3>' +
       esc(a.nickname || a.uid.slice(0, 8)) + ' · ' + esc(a.realm || '') +
       '</h3><span class="grow"></span><span class="note">余额 ' + fmtTok(a.remain) +
-      ' / 总额 ' + fmtTok(a.size) + ' · ' + packs.length + ' 个包（按面额降序）</span>' +
+      ' / 总额 ' + fmtTok(a.size) + ' · ' + packs.length + ' 个包（' +
+      esc(PK_SORT_LABELS[pkSortMode] || '') + '）</span>' +
       '</header><div class="tbl-wrap"><table class="acc"><thead><tr>' +
       '<th class="mark" aria-hidden="true"></th><th>包名 / 来源</th>' +
       '<th class="num">面额</th><th class="num">剩余</th><th class="num">已用</th>' +
@@ -1579,6 +1638,7 @@ async function loadPackages() {
   $('pkDetail').innerHTML = '';
   try {
     const d = await api('packages');
+    lastPackages = d;                            // 缓存供排序切换即时重排
     renderPackages(d);
   } catch (e) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
