@@ -3,6 +3,7 @@ package pool
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1736,5 +1737,110 @@ func TestTokenUsagePersistsAcrossReload(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "AccessToken") || strings.Contains(string(raw), "RefreshToken") {
 		t.Fatalf("state.json contains credential field: %s", raw)
+	}
+}
+
+func TestPickPrefersExpiringByVirtualWeight(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "later"})
+	p.Add(&auth.Auth{UID: "soon"})
+	p.Add(&auth.Auth{UID: "none"})
+
+	now := time.Now()
+	p.SetCreditsDetailed("later", 100, 100, 100, now.Add(48*time.Hour), 100)
+	p.SetCreditsDetailed("soon", 100, 100, 100, now.Add(2*time.Hour), 100)
+	p.SetCreditsDetailed("none", 100, 100, 0, time.Time{}, 0)
+
+	// 3:1 虚拟实例是软偏好而非硬优先。用确定性随机源统计长期分布：两个快过期
+	// 账号的合计份额应显著高于普通账号，同时普通账号仍保留少量流量。
+	rng := rand.New(rand.NewPCG(1, 2))
+	p.SetRandomSource(func(n int64) int64 { return rng.Int64N(n) })
+	counts := map[string]int{}
+	for i := 0; i < 2000; i++ {
+		got := p.Pick()
+		if got == nil {
+			t.Fatal("pick returned nil")
+		}
+		counts[got.UID]++
+	}
+	expiring := counts["soon"] + counts["later"]
+	if expiring < 1500 || counts["none"] == 0 {
+		t.Fatalf("virtual weight distribution=%v, want expiring majority and regular non-zero", counts)
+	}
+}
+
+func TestPickExpiringTieUsesExistingWeight(t *testing.T) {
+	withNoPickGap(t)
+	p := New("")
+	p.Add(&auth.Auth{UID: "small"})
+	p.Add(&auth.Auth{UID: "large"})
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+
+	at := time.Now().Add(time.Hour)
+	p.SetCreditsDetailed("small", 10, 10, 10, at, 10)
+	p.SetCreditsDetailed("large", 50, 50, 50, at, 50)
+
+	got := p.Pick()
+	if got == nil || got.UID != "large" {
+		t.Fatalf("pick=%v want large", got)
+	}
+}
+
+func TestPreferExpiringDisabledRestoresWeight(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "a"})
+	p.Add(&auth.Auth{UID: "b"})
+	now := time.Now()
+	p.SetCreditsDetailed("a", 100, 100, 50, now.Add(time.Hour), 50)
+	p.SetCreditsDetailed("b", 100, 100, 0, time.Time{}, 0)
+
+	p.mu.Lock()
+	we := p.routingWeightOf(p.byUID["a"], 100, now)
+	wn := p.routingWeightOf(p.byUID["b"], 100, now)
+	p.mu.Unlock()
+	if we != wn*expiringVirtualSlots {
+		t.Fatalf("enabled expiring weight=%v want %v", we, wn*expiringVirtualSlots)
+	}
+
+	p.SetPreferExpiring(false)
+
+	p.mu.Lock()
+	wa := p.routingWeightOf(p.byUID["a"], 100, now)
+	wb := p.routingWeightOf(p.byUID["b"], 100, now)
+	p.mu.Unlock()
+	if wa != wb {
+		t.Fatalf("disabled expiring weights differ: %v/%v", wa, wb)
+	}
+}
+
+func TestCreditExpirySnapshotConsumptionAndClear(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	now := time.Now()
+	p.SetCreditsDetailed("u1", 100, 100, 50, now.Add(time.Hour), 40)
+
+	st, _ := p.Status("u1")
+	if st.CreditsExpiring != 50 || st.CreditsEarliestRemaining != 40 || st.CreditsEarliestExpiry.IsZero() {
+		t.Fatalf("initial snapshot=%+v", st)
+	}
+
+	p.NoteModelCost("u1", "m", 10, 1000)
+	st, _ = p.Status("u1")
+	if st.Credits != 90 || st.CreditsExpiring != 40 || st.CreditsEarliestRemaining != 30 {
+		t.Fatalf("after consume=%+v", st)
+	}
+
+	p.NoteModelCost("u1", "m", 40, 1000)
+	st, _ = p.Status("u1")
+	if st.Credits != 50 || st.CreditsExpiring != 0 || st.CreditsEarliestRemaining != 0 || !st.CreditsEarliestExpiry.IsZero() {
+		t.Fatalf("after exhaustion=%+v", st)
+	}
+
+	p.SetCreditsDetailed("u1", 50, 50, 10, now.Add(time.Hour), 10)
+	p.SetCreditsDetailed("u1", 50, 50, 0, time.Time{}, 0)
+	st, _ = p.Status("u1")
+	if st.CreditsExpiring != 0 || st.CreditsEarliestRemaining != 0 || !st.CreditsEarliestExpiry.IsZero() {
+		t.Fatalf("zero refresh did not clear snapshot=%+v", st)
 	}
 }
