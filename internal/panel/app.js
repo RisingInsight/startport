@@ -126,6 +126,14 @@ $('btnKey').onclick = async () => {
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
 
 /* ── 路由 ─────────────────────────────────────────────────────────── */
+/* 积分包明细共享缓存：「积分构成」视图与首页「积分到期提醒」卡片共用同一份
+   /panel/api/packages 数据（逐账号实时查上游，能省一次是一次）。声明在路由区
+   是因为 go() 的初始调用就会触发首页卡片的渲染，必须先于它就位。 */
+let lastPackages = null;
+let lastPackagesAt = 0;
+let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
+const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
+
 const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
 function go(v) {
   view = v;
@@ -137,6 +145,7 @@ function go(v) {
   if (v === 'logs') loadLogs();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
+  if (v === 'accounts') loadExpiry();
   if (v === 'taskscenter') reattachQueueView();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
@@ -1526,9 +1535,6 @@ function pkSortPacks(packs) {
 
 const PK_SORT_LABELS = { end_asc: '按到期升序 · 近的在前', size_desc: '按面额降序' };
 
-// 最近一次拉到的积分构成数据：切换排序规则时直接重排，不重新请求上游。
-let lastPackages = null;
-
 // 排序规则控件：恢复上次选择并绑定切换（选择持久化在 localStorage，跨会话记住）。
 if ($('pkSort')) {
   $('pkSort').value = pkSortMode;
@@ -1639,10 +1645,97 @@ async function loadPackages() {
   try {
     const d = await api('packages');
     lastPackages = d;                            // 缓存供排序切换即时重排
+    lastPackagesAt = Date.now();
     renderPackages(d);
   } catch (e) {
     $('pkSummary').innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
   }
 }
+
+/* ── 积分到期提醒（首页卡片）────────────────────────────────────────── */
+/* 积分不是永久的：签到/任务发的裂变包约一个月失效。只看「剩余积分 ÷ 日消耗」
+   会系统性偏乐观——用不完的部分到期直接蒸发。这里把「最近要过期的是哪批、
+   有多少、到期前每天要至少消耗多少」顶到首页，数据源与「积分构成」共用
+   （lastPackages 缓存，EXP_FRESH_MS 内复用，不重复打上游）。 */
+
+// expBatches 把某账号的包聚合成「到期日 → 该日作废积分」升序列表。
+// 只统计 remain>0 且有到期时间的包——没余额/长期包到期没有任何影响。
+function expBatches(packs) {
+  const byDay = new Map();
+  for (const p of packs || []) {
+    const r = Number(p.remain || 0);
+    const t = (p.end_time || '').slice(0, 10);
+    if (r <= 0 || !t) continue;
+    byDay.set(t, (byDay.get(t) || 0) + r);
+  }
+  return [...byDay.entries()]
+    .map(([date, remain]) => ({ date, remain }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+function expDaysLeft(dateStr, today) {
+  return Math.round((new Date(dateStr + 'T00:00:00') - today) / 86400000);
+}
+
+function renderExpiry(d) {
+  const list = (d.accounts || []);
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const rows = list.map(a => {
+    if (a.error) {
+      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
+        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-main err">查询失败：' + esc(a.error) + '</span></div>';
+    }
+    const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
+    if (!bs.length) {
+      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
+        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+        '<span class="exp-main">7 天内无到期积分</span></div>';
+    }
+    const first = bs[0];
+    const days = expDaysLeft(first.date, today);
+    const daily = Math.ceil(first.remain / Math.max(1, days));
+    const week = bs.filter(b => expDaysLeft(b.date, today) <= 7)
+      .reduce((s, b) => s + b.remain, 0);
+    // 危险度：≤3 天红（不抓紧就真没了）、≤7 天琥珀、更远绿。
+    const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
+    const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
+    const rest = bs.slice(1, 4).map(b =>
+      '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　');
+    return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
+      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
+      '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
+      '）· 该批 <b>' + fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
+      fmtTok(daily) + '</b>' +
+      (week > first.remain ? ' · 7 天内合计 ' + fmtTok(week) : '') +
+      (rest ? '<div class="note">' + rest + '</div>' : '') +
+      '</span></div>';
+  }).join('');
+  $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
+  $('expNote').textContent = list.length + ' 个账号 · 实时查询上游';
+  $('expBox').hidden = false;
+}
+
+async function loadExpiry(force) {
+  if (!$('expBox')) return;
+  if (expFetching) return;
+  const fresh = lastPackages && (Date.now() - lastPackagesAt) < EXP_FRESH_MS;
+  if (fresh && !force) { renderExpiry(lastPackages); return; }
+  expFetching = true;
+  $('expBox').hidden = false;
+  if (!$('expList').children.length) $('expList').innerHTML = '<div class="empty">查询中…（逐账号向上游实时查询）</div>';
+  $('expNote').textContent = '查询中…';
+  try {
+    const d = await api('packages');
+    lastPackages = d;                            // 与「积分构成」视图共用同一份缓存
+    lastPackagesAt = Date.now();
+    renderExpiry(d);
+  } catch (e) {
+    $('expNote').textContent = '查询失败：' + esc(e.message);
+  }
+  expFetching = false;
+}
+
+if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 
 if ($('btnPk')) $('btnPk').onclick = loadPackages;
