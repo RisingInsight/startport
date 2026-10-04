@@ -542,6 +542,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	tried := map[string]bool{}
 	var lastErr error
+	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
+	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
+	var modelBlock pool.ModelBlockStatus
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
@@ -726,6 +729,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
+			// 记下"是不是模型级阻塞"。选号返回 nil 有两种完全不同的成因：
+			//   (a) 池子真的没有可用号（账号级冷却/在途占满/积分保底）；
+			//   (b) 号都在，但每个号都对这个模型处于模型级冷却（11102/6004）。
+			// 两者此前都报 no_healthy_account，导致「模型不可用」被读成「号全挂了」。
+			// 在这里取一次快照，供下方错误构造区分（issue #102 附带发现 1）。
+			modelBlock = h.cfg.Pool.ModelBlocked(bareModel)
 			break
 		}
 		st.uid = acct.UID
@@ -1066,6 +1075,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// gateway_hint（末端透传）：上游错误按 Kind + 原文 + 请求形态判定；本地调度类
 	// 错误（无上游原文）固定 no_healthy_account hint。
 	hint := upstream.NoHealthyAccountHint()
+	// upstreamMsgPassed 记录 error.message 是否已被上游原文占据：模型级阻塞分支
+	// 据此决定要不要覆盖 msg（上游原文优先，含 requestId）。
+	upstreamMsgPassed := false
 	var ue *upstream.Error
 	if errors.As(lastErr, &ue) {
 		hint = h.hintOf(ue.Kind, ue.Msg, bareModel, reqHasImage, ue)
@@ -1082,11 +1094,43 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				code = "waf_ip_blocked"
 				msg = "waf ip-level block: upstream firewall is blocking the gateway IP, rotation stopped; retry after the block window expires"
 			}
+		case upstream.ErrModelBlocked:
+			// 11102「该后端无此模型」：上游原文（下方统一透传）已经写清了原因，但
+			// code 此前停在默认的 no_healthy_account —— 那是"服务端过载"的语义，
+			// 客户端据此会不断重试（#81 里就是 503 → 客户端自动重试 5 次），而真正
+			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
+			code = "model_unavailable"
+			status = http.StatusBadRequest
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
 			msg = s
+			upstreamMsgPassed = true
 		}
+	}
+	// 模型级阻塞覆盖上面的通用文案（放在最后 = 优先级最高）。
+	//
+	// 为什么能覆盖 code 而不丢信息：modelBlock.Reason 就是 BlockModelBackoff 存下的
+	// 上游原因，已在 hint 里原样带出，所以覆盖 message 不会丢掉上游信息，反而补上
+	// 了上游不会告诉客户端的两件事——「有几个号被挡」和「最早什么时候解封」。
+	//
+	// 用 400 而非 503：这是"你选的这个模型当前不可用"，不是"服务端暂时过载"。
+	// 换号重试必然同样失败，客户端不该按可重试错误处理。
+	if modelBlock.Blocked {
+		code = "model_unavailable"
+		// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
+		// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
+		if !upstreamMsgPassed {
+			msg = "model is unavailable on every account (per-model cooldown), try another model"
+		}
+		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
+		if !modelBlock.Until.IsZero() {
+			hint += "; earliest unblock at " + modelBlock.Until.Format(time.RFC3339)
+		}
+		if s := strings.TrimSpace(modelBlock.Reason); s != "" {
+			hint += "; upstream: " + s
+		}
+		status = http.StatusBadRequest
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
