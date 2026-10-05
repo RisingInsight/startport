@@ -42,13 +42,14 @@ func travelDay(t time.Time) string {
 }
 
 // RunTravelNow 立即对池内所有可用账号执行一趟旅行巡检。
-// 禁用账号跳过；暂停选号（paused）账号同样跳过——旅行会发起对话流量，
-// 与「让位」语义矛盾；401/查询失败只跳过该账号本轮（不强刷 token，交 22:00 keepalive）；
+// 禁用账号跳过；暂停选号（paused）账号照常参与——旅行是纯 RPC（状态/派出/
+// 领奖 + 领养前置上报），不发模型对话，与「让位防风控」不冲突；
+// 401/查询失败只跳过该账号本轮（不强刷 token，交 22:00 keepalive）；
 // 账号间限速 travelAccountDelay。
 func (s *Scheduler) RunTravelNow() {
 	first := true
 	for _, st := range s.cfg.Pool.List() {
-		if st.Disabled || st.Paused {
+		if st.Disabled {
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)

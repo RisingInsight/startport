@@ -18,8 +18,9 @@ func (s *Scheduler) RunBlackcatNow() {
 		return
 	}
 	for _, st := range s.cfg.Pool.List() {
-		// 暂停选号（paused）账号跳过：夜猫子补的是 glm-5.2 短对话，产生真实
-		// 对话流量——轮换让位的号不该在 23:00 又被拉出来发消息。
+		// 暂停选号（paused）账号跳过：夜猫子是全任务体系中唯一「整任务都是
+		// 真实模型对话」的（RunNightChats 逐条 ChatStream 发 glm-5.2 短对话），
+		// 与「让位防风控」正面冲突。旅行/成长任务都是纯上报或领奖 RPC，照常跑。
 		if st.Disabled || st.Paused {
 			continue
 		}

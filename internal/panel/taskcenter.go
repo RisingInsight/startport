@@ -61,10 +61,7 @@ func (p *Panel) tasksScanAll(w http.ResponseWriter, r *http.Request) {
 	items := make([]scanAccountItem, len(states))
 	var wg sync.WaitGroup
 	for i, st := range states {
-		// 暂停选号（paused）账号不进任务中心扫描：它的待办不会被队列执行
-		//（下方 startGrowthQueue 同口径跳过），扫出来只会误导「有待办可跑」。
-		// 单账号手动入口（账号行「任务」按钮）不受此限——用户显式点名仍可跑。
-		if st.Disabled || st.Paused {
+		if st.Disabled {
 			continue
 		}
 		wg.Add(1)
@@ -205,9 +202,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	for _, st := range states {
-		// 暂停选号（paused）账号不进执行队列：Sequential 族任务要发真实对话，
-		// 让位的号不能被自动队列拉出来跑（与 travel/blackcat 同口径）。
-		if st.Disabled || st.Paused {
+		if st.Disabled {
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(st.UID)
