@@ -156,3 +156,26 @@ func TestModelBlockedThenClear(t *testing.T) {
 		t.Fatalf("清除后不应再阻塞：%+v", st)
 	}
 }
+
+// TestModelBlockedPausedDoesNotMaskBlock 暂停号不构成「能服务」的证明：
+// 除暂停号外全部模型冷却时仍应判定阻塞（合并 #113 时补的口径——
+// 否则一个暂停的健康号会掩盖「其余号全被模型级冷却挡住」）。
+func TestModelBlockedPausedDoesNotMaskBlock(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.Add(&auth.Auth{UID: "u2"})
+	p.mu.Lock()
+	p.byUID["u1"].modelCooldowns = map[string]modelCooldown{
+		"glm-5.3": {Until: time.Now().Add(time.Hour), Reason: "11102 ..."},
+	}
+	p.byUID["u2"].paused = true // 唯一「健康」的号在暂停让位
+	p.mu.Unlock()
+
+	st := p.ModelBlocked("glm-5.3")
+	if !st.Blocked {
+		t.Fatalf("暂停号不得掩盖模型级阻塞：%+v", st)
+	}
+	if st.Count != 1 {
+		t.Errorf("Count=%d want 1（暂停号不计入）", st.Count)
+	}
+}

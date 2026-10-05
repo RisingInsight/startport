@@ -330,8 +330,10 @@ func (p *Pool) ModelBlocked(model string) ModelBlockStatus {
 
 	var st ModelBlockStatus
 	for _, e := range p.byUID {
-		if e.disabled {
-			continue // 禁用号不参与：它的不可用与模型无关
+		// 暂停选号（paused）号与禁用号同口径跳过：它此刻不可选，「能服务」的
+		// 证明不成立——否则一个暂停的健康号会掩盖「其余号全被模型级冷却挡住」。
+		if e.disabled || e.paused {
+			continue // 禁用/暂停号不参与：它们的不可用与模型无关
 		}
 		if !e.modelCooled(now, model) {
 			// 还有账号能服务这个模型 → 不是模型级阻塞。
