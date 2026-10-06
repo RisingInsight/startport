@@ -217,7 +217,18 @@ function trangeQuery(id, rolling) {
     q.set('from', sec(trangeMidnight()));
     return q;
   }
-  if (st.preset === '0') return q;
+  // 全部历史：滚动端点（用量）必须**显式**传 hours=0。
+  //
+  // 后端对「什么都不给」的缺省是 72 小时（见 panel.go 的说明：
+  // 「都不给：等同于 hours=72（保持旧调用方行为）」），所以这里返回空 query 会被
+  // 当成「近 3 天」—— 正是 issue #121 报的现象：选了「全部历史」，数字却和
+  // 「近 3 天」一模一样。
+  //
+  // 非滚动端点（请求记录）没有缺省窗口：不传 from/to 即"不限起点"，保持空 query。
+  if (st.preset === '0') {
+    if (rolling) q.set('hours', '0');
+    return q;
+  }
   if (rolling) { q.set('hours', st.preset); return q; }
   q.set('from', sec(new Date(Date.now() - Number(st.preset) * 3600 * 1000)));
   return q;

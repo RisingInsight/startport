@@ -501,6 +501,7 @@ process.stdout.write(JSON.stringify({
   rolling24: q('24', true),
   rolling72: q('72', true),
   rolling0: q('0', true),
+  log0: q('0', false),
   log24From: approx(q('24', false), Math.floor((now - 24 * 3600e3) / 1000)),
   log24HasHours: /hours=/.test(q('24', false)),
   log7dFrom: approx(q('168', false), Math.floor((now - 168 * 3600e3) / 1000)),
@@ -530,7 +531,11 @@ process.stdout.write(JSON.stringify({
 		return strconv.FormatInt(time.Date(2026, 9, 30, h, m, 0, 0, time.Local).Unix(), 10)
 	}
 	want := `{"todayIsMidnight":true,"todayNoTo":true,` +
-		`"rolling24":"hours=24","rolling72":"hours=72","rolling0":"",` +
+		// rolling0 必须是 "hours=0"（显式全部历史）。此前期望值是空串——那恰好把
+		// issue #121 的错误行为固化成了断言：空 query 会被后端的 72 小时缺省接管，
+		// 于是「全部历史」显示成「近 3 天」。
+		// log0 仍为空：请求记录端点没有缺省窗口，不传 from/to 就是全部历史。
+		`"rolling24":"hours=24","rolling72":"hours=72","rolling0":"hours=0","log0":"",` +
 		`"log24From":true,"log24HasHours":false,"log7dFrom":true,` +
 		`"custom":"from=` + local(9, 0) + `&to=` + local(18, 30) + `",` +
 		`"labelCustom":"9-30 09:00 → 9-30 18:30","labelToday":"今天"}`
