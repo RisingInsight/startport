@@ -2182,6 +2182,15 @@ function renderUsageChart(series) {
     const hTot = ih * (p.tt / max);
     const hP = p.tt ? hTot * (p.pt / p.tt) : 0;
     const hC = Math.max(p.tt && p.ct ? 1 : 0, hTot - hP);
+    // 每根柱子包一个 <g>，把 <title> 放进去。
+    //
+    // 为什么必须包裹：SVG 里 <title> 描述的是它的**父元素**。此前 <title> 是
+    // <rect> 的兄弟节点（rect 自闭合，无法包含子节点），于是全部平铺在 <svg>
+    // 根下 —— 整张图只有一个 tooltip（浏览器取第一个），悬停任何柱子都显示同一
+    // 份数据（issue #128）。包进 <g> 后 tooltip 跟随该柱，且堆叠的两段
+    //（prompt + completion）共用同一个提示。
+    out += '<g><title>' + esc(p.raw) + '  ' + fmtTok(p.pt) + ' prompt / ' +
+           fmtTok(p.ct) + ' completion / ' + p.req + ' 次</title>';
     // 圆角只给堆叠顶端（贴轴的底边保持方角，柱子才像"立"在基线上）。
     // 类名用 usbar 而不是 bar：账号池的积分条是 .bar{height:3px}，而 SVG2 里
     // height 是 rect 的 CSS 几何属性，同名类会把每根柱子压成 3px 高（踩过）。
@@ -2191,8 +2200,7 @@ function renderUsageChart(series) {
     if (hC > 0) out += '<rect class="usbar" x="' + x.toFixed(2) + '" y="' + (yBase - hP - hC).toFixed(2) +
       '" width="' + bw.toFixed(2) + '" height="' + hC.toFixed(2) +
       '" fill="url(#usGradC)" rx="1.5"/>';
-    out += '<title>' + esc(p.raw) + '  ' + fmtTok(p.pt) + ' prompt / ' +
-           fmtTok(p.ct) + ' completion / ' + p.req + ' 次</title>';
+    out += '</g>';
   }
 
   // 峰值标注：柱子够窄时文字压在柱顶，够宽时贴右侧避免和柱体重叠。
