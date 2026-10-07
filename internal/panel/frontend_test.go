@@ -772,3 +772,67 @@ process.stdout.write(JSON.stringify([
 		t.Fatalf("collectConfig=%s want %s", strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestAppJSExpirySortedByExpiry 到期提醒按「最近到期」升序，且不分域（issue #125）。
+//
+// 后端 /panel/api/packages 是按**余额降序**返回的，恰好把 CN 账号都排在前面、
+// global 排在末尾，看上去像"按域分组"，实际只是余额顺序。本用例刻意按这个形态构造
+// 输入（余额高的到期最晚、global 余额最低），若前端不重排就会保持该顺序而失败。
+//
+// 日期按「今天 +N 天」生成而不是写死：写死的话过了那天用例就会自己失效。
+func TestAppJSExpirySortedByExpiry(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; expiry sort test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function expBatches');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+const sink = { innerHTML: '', textContent: '', hidden: true };
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: () => sink,
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderExpiry = renderExpiry;', ctx);
+const iso = n => {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
+  const p = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+};
+const pack = (days, amount) => ({ end_time: iso(days) + ' 00:00:00', remain: amount });
+// 模拟后端顺序：余额降序 → CN 高余额在前且到期最晚，global 最少且最快到期。
+const d = { accounts: [
+  { uid: 'a', nickname: 'cn-late',  realm: 'cn',     packages: [pack(16, 900)] },
+  { uid: 'b', nickname: 'cn-mid',   realm: 'cn',     packages: [pack(12, 700)] },
+  { uid: 'c', nickname: 'gl-soon',  realm: 'global', packages: [pack(2, 500)] },
+  { uid: 'd', nickname: 'no-expiry', realm: 'cn',    packages: [pack(-3, 100)] },
+  { uid: 'e', nickname: 'broken',   realm: 'cn',     error: 'offline' },
+] };
+ctx.renderExpiry(d);
+const names = [...sink.innerHTML.matchAll(/<span class="exp-nm">([^<]*)<\/span>/g)].map(m => m[1]);
+process.stdout.write(JSON.stringify(names));`
+	f, err := os.CreateTemp(t.TempDir(), "expsort-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("expiry sort node test failed: %v\n%s", err, out)
+	}
+	// 最快到期的排最前（跨域）；无 7 天内到期的与查询失败的排最后。
+	const want = `["gl-soon","cn-mid","cn-late","no-expiry","broken"]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("expiry order=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}

@@ -480,6 +480,8 @@ async function loadOverview(quiet) {
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
     $('sDisabled').textContent = d.disabled;
+    // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
+    if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
     const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
   const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
   $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
@@ -2752,7 +2754,30 @@ function expDaysLeft(dateStr, today) {
 function renderExpiry(d) {
   const list = (d.accounts || []);
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const rows = list.map(a => {
+  // 按「最近到期」升序排（issue #125）。
+  //
+  // 后端 /panel/api/packages 是按**余额降序**返回的，恰好把 CN 账号都排在前面、
+  // global 排在末尾，看起来像"按域分组"，其实只是余额顺序。这里再排一次，让
+  // "最快过期的排最前"这个唯一重要的顺序成立，且不分域。
+  //
+  // 排序键用最早到期批次的日期（expBatches 已按日期升序，故 [0] 即最早）。
+  // 查询失败的账号、以及 7 天内无到期的账号没有可比较的到期时间，统一排在最后，
+  // 保持它们原本的相对顺序（稳定排序）。
+  const keyed = list.map(a => {
+    let key = null;
+    if (!a.error) {
+      const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
+      if (bs.length) key = bs[0].date;
+    }
+    return { a, key };
+  });
+  keyed.sort((x, y) => {
+    if (x.key === y.key) return 0;
+    if (x.key === null) return 1;
+    if (y.key === null) return -1;
+    return x.key < y.key ? -1 : 1;
+  });
+  const rows = keyed.map(({ a }) => {
     if (a.error) {
       return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
         '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
