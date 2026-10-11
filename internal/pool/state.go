@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/logfmt"
 )
 
 func (p *Pool) Disable(uid, reason string) {
@@ -133,6 +133,7 @@ func (p *Pool) ReenableIfCredits(uid string, remain, total int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if e, ok := p.byUID[uid]; ok {
+		e.noteAuthoritativeCredits(remain)
 		if remain > 0 && !e.disabled {
 			p.reviveCoolingLocked(e, remain, total)
 		} else {
@@ -187,6 +188,17 @@ func (p *Pool) NoteSuccess(uid string) {
 	}
 }
 
+// noteAuthoritativeCredits 记录一次「上游权威余额」观测。值发生变化（结算 / 发放奖励）
+// 时把本机观测消耗归零——那部分已被权威值涵盖；值未变（上游尚未结算）则保留累计，
+// 让面板在余额暂时不动时仍能看到消耗。调用方需已持有 p.mu。
+func (e *entry) noteAuthoritativeCredits(credits int64) {
+	if credits != e.creditsAuth {
+		e.creditsAuth = credits
+		e.creditsObserved = 0
+		e.creditsFrac = 0
+	}
+}
+
 // NoteModelCost 记录一次实测扣费观测，更新该 (账号, 模型) 的成本账本，并顺带
 // 扣减账号余额（credits/creditsExpiring/最早到期批次）。credit 为上游 usage.credit（本次真实
 // 扣费=消耗量），tokens 为本次请求的 token 总数（prompt+completion，用于折算单位
@@ -221,24 +233,35 @@ func (p *Pool) NoteModelCost(uid, model string, credit float64, tokens int) {
 		return
 	}
 	if credit > 0 {
-		d := int64(credit + 0.5) // 四舍五入
-		if d > e.credits {
-			d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
-		}
-		e.credits -= d
-		if e.creditsExpiring > 0 {
-			if d > e.creditsExpiring {
-				e.creditsExpiring = 0
-			} else {
-				e.creditsExpiring -= d
+		// 本机观测消耗：带小数累计，跨余额刷新稳定（只在权威值变化时归零），
+		// 供面板展示——上游对账延迟时余额不动，但消耗仍可见。
+		e.creditsObserved += credit
+		// 本地扣减（选号插值）以整数粒度作用在 credits 与快过期快照上。
+		// 零头单独累计：旧实现 int64(credit+0.5) 逐笔四舍五入，单笔 <0.5 的扣费
+		// （实测 glm-5.3-flash ~0.4）会被全部抹成 0，永远扣不掉。
+		e.creditsFrac += credit
+		d := int64(e.creditsFrac)
+		if d > 0 {
+			e.creditsFrac -= float64(d)
+			if d > e.credits {
+				d = e.credits // 钳 0：扣穿（对账延迟/消费早于记账）不产生负余额
+				e.creditsFrac = 0
 			}
-		}
-		if e.creditsEarliestRemaining > 0 {
-			if d >= e.creditsEarliestRemaining {
-				e.creditsEarliestRemaining = 0
-				e.creditsEarliestExpiry = time.Time{}
-			} else {
-				e.creditsEarliestRemaining -= d
+			e.credits -= d
+			if e.creditsExpiring > 0 {
+				if d > e.creditsExpiring {
+					e.creditsExpiring = 0
+				} else {
+					e.creditsExpiring -= d
+				}
+			}
+			if e.creditsEarliestRemaining > 0 {
+				if d >= e.creditsEarliestRemaining {
+					e.creditsEarliestRemaining = 0
+					e.creditsEarliestExpiry = time.Time{}
+				} else {
+					e.creditsEarliestRemaining -= d
+				}
 			}
 		}
 	}
@@ -551,6 +574,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Nickname:                 e.a.Nickname,
 		Credits:                  e.credits,
 		CreditsTotal:             e.creditsTotal,
+		CreditsObserved:          e.creditsObserved,
 		CreditsExpiring:          e.creditsExpiring,
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,

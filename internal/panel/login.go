@@ -1,8 +1,8 @@
 // login.go 面板内嵌的 WorkBuddy CN OAuth 设备授权流程（cmd/login 的进程内移植）。
 //
-//	POST /panel/api/login/start → 拿 state+authUrl，state 存进程内（不再落 /tmp，
+//	POST /startport/api/login/start → 拿 state+authUrl，state 存进程内（不再落 /tmp，
 //	  原方案在 Windows 上不可用），返回授权 URL；
-//	GET  /panel/api/login/poll   → 面板前端每 3s 轮询本接口；未完成返回 done=false，
+//	GET  /startport/api/login/poll   → 面板前端每 3s 轮询本接口；未完成返回 done=false，
 //	  完成后取 uid/nickname、凭证落盘 auths/workbuddy-<uid>.json、热加载进池
 //	  （pool.Add + Revive），并顺带签到 + 余额刷新 —— 免重启加载新账号。
 //
@@ -20,7 +20,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/RisingInsight/startport/internal/auth"
 )
 
 const (

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/pool"
+	"github.com/RisingInsight/startport/internal/upstream"
 )
 
 func TestNextFire(t *testing.T) {
@@ -425,6 +425,38 @@ func TestRunBalanceRefreshNowUpdatesCreditsAndRevives(t *testing.T) {
 	if st2, _ := p.Status("u2"); !st2.Disabled {
 		t.Errorf("u2 must stay disabled")
 	}
+}
+
+// 启动时关闭（interval=0）、运行期热开启必须真正生效：此前 StartBalanceRefresh 在
+// interval<=0 时 early-return 不启 goroutine，热开启只改值没有消费者（调查员 #2）。
+func TestBalanceRefreshHotEnable(t *testing.T) {
+	f := &fakeUpstream{resourceRemain: 555}
+	srv := f.server()
+	defer srv.Close()
+
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt", ExpiresAt: 9999999999})
+
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// 以 interval=0（关闭态）启动——修复前这里直接 return，永不启动后台循环。
+	s.StartBalanceRefresh(ctx, 0)
+	// 运行期热开启：设一个很短的间隔，poke 唤醒等待中的循环。
+	s.SetBalanceInterval(20 * time.Millisecond)
+
+	// 轮询等待后台循环真正跑一轮（u1 的 credits 被刷成 555）。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if st, _ := p.Status("u1"); st.Credits == 555 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("热开启后余额刷新未生效（credits 未更新）——后台 goroutine 未启动")
 }
 
 // TestNextWakeGrowthSlot growth 排程进候选 + 禁用退场（每日自动执行成长任务队列）。

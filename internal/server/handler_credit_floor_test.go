@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/upstream"
 )
 
 // TestStatusCreditFloor /status 透出 pool 层的 credit_floor 生效值：

@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/RisingInsight/startport/internal/auth"
 )
 
 // degradeReason 连败降权（issue #114）写 reason 的固定文案：与冷却域的
@@ -65,6 +65,10 @@ type Status struct {
 	Nickname     string `json:"nickname,omitempty"`
 	Credits      int64  `json:"credits"`
 	CreditsTotal int64  `json:"credits_total,omitempty"` // 积分总额度（各套餐聚合）；0 = 未知（旧 state/查询失败）
+	// CreditsObserved 自上次上游权威余额变化以来，本机按每笔 usage.credit 累计观测到的
+	// 消耗（带小数）。上游对账有延迟时，余额可能暂时不变，本字段让面板仍能看到消耗。
+	// 仅展示用——不参与选号，也不改写 Credits。
+	CreditsObserved float64 `json:"credits_observed,omitempty"`
 	// CreditsExpiring / CreditsEarliestExpiry / CreditsEarliestRemaining 描述当前积分中
 	// 的到期压力。CreditsExpiring 是配置窗口内的剩余积分；后两者是全部未来到期批次中
 	// 最早的一批及其剩余量，供 WorkDaddy 同口径的“最早到期优先”路由使用。
@@ -183,6 +187,19 @@ type entry struct {
 	a            *auth.Auth
 	credits      int64
 	creditsTotal int64 // 积分总额度（UserResource 聚合；0 = 未知）
+	// creditsAuth 最近一次「上游权威余额」；creditsObserved 是自那以后本机累计观测到的
+	// 消耗（来自每笔 usage.credit，带小数累计）。
+	//
+	// 为什么单独记而不是直接改 credits：上游对账有延迟——实测某 CN 账号 33 笔请求
+	// 上游上报 usage.credit 合计 6.11，但余额查询仍返回 4150（各积分包 used=0）。
+	// 若把本地扣减写进 credits，5 分钟一次的余额刷新会把它抹掉（显示跳动）；
+	// 若让本地扣减长期压过权威值，一旦上游从不结算会把 credits 拖到 0 并误触发
+	// 积分保底（账号被误排除出选号 → 503）。故 credits 保持权威、只把观测消耗
+	// 单独透出给面板展示——不改选号语义，也不隐瞒消耗。
+	creditsAuth     int64
+	creditsObserved float64
+	// creditsFrac 未满 1 积分的零头（逐笔四舍五入会把 <0.5 的扣费全丢掉）。
+	creditsFrac float64
 	// creditsExpiring 配置窗口内即将过期的可用积分子集，是 credits 的一部分。
 	// creditsEarliestExpiry / creditsEarliestRemaining 是全部未来到期批次中的最早一批；
 	// 两者均由签到/余额刷新更新，供 earliest-expiry 路由和状态观测使用。

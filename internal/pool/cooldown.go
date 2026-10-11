@@ -92,6 +92,7 @@ func (p *Pool) SetCreditsDetailed(uid string, credits, total, expiring int64, ea
 		}
 		e.credits = credits
 		e.creditsTotal = total
+		e.noteAuthoritativeCredits(credits)
 		e.creditsExpiring = expiring
 		e.creditsEarliestExpiry = earliestAt
 		e.creditsEarliestRemaining = earliestRemaining

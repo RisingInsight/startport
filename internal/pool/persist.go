@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/RisingInsight/startport/internal/auth"
 )
 
 var flushInterval = 5 * time.Second
@@ -40,12 +40,26 @@ type StoreSnapshotter interface {
 //
 // 每种情形都打一条对应的恢复来源日志，便于对账。必须在 SyncToDir 之前调用
 // （SyncToDir 只增删不入值：值只能来自本地 load 或本函数采用快照）。
+// storeAndPath 持锁取「持久化后端 + state 文件指针」的快照。
+//
+// 背景（调查员 #8）：这两个字段此前在恢复路径上是**无锁直读**的，正确性靠
+// "启动期先装配完再起服务、之后不再写"的隐式顺序保证——顺序一变或出现并发调用
+// 就是数据竞争。本 getter 让读取点显式受锁保护。
+//
+// 注意：`saveLocked` / `load` 等 *Locked 系列**已在持锁上下文**，不可调用本函数
+// （sync.RWMutex 不可重入，RLock 会死锁）；它们直接读字段即是安全的。
+func (p *Pool) storeAndPath() (StoreSnapshotter, string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.store, p.stateFp
+}
+
 func (p *Pool) RestoreFromSnapshot() {
-	store := p.store
-	if store == nil || p.stateFp == "" {
+	store, stateFp := p.storeAndPath()
+	if store == nil || stateFp == "" {
 		return
 	}
-	localInfo, localErr := os.Stat(p.stateFp)
+	localInfo, localErr := os.Stat(stateFp)
 	raw, ok := store.LoadState()
 	if !ok {
 		if localErr == nil {

@@ -1,7 +1,7 @@
 services:
-  wb2api:
+  starport:
     build: .
-    container_name: workbuddy2api
+    container_name: starport
     restart: unless-stopped
     # 容器默认以 app 用户（uid 10001）运行。宿主机挂载目录属主不同会导致
     # 「写入 auths/*.json.tmp 失败 permission denied」，三种解法任选：
@@ -11,10 +11,30 @@ services:
     #   2) sudo chown -R 10001:10001 ./auths ./data ./config.json
     #   3) user: "0:0" 以 root 运行（省事但容器逃逸面更大，自担）
     user: "${PUID:-10001}:${PGID:-10001}"
+    # ---- 容器硬化（安全官 F-014）----
+    # no-new-privileges：禁止进程通过 setuid/setgid 提权（容器逃逸的常见跳板）。
+    # cap_drop: ALL：本服务只监听 7863（>1024，不需要 CAP_NET_BIND_SERVICE），
+    #   也不改用户/改网络配置，全部 capability 都可以丢掉。
+    # read_only：根文件系统只读；可写目录全部由下面的 volumes / tmpfs 提供。
+    #   已核对程序写路径：auths/ data/ config.json 均在挂载卷内；
+    #   唯一的容器内临时文件是 cmd/login 的 os.TempDir()（→ /tmp，已给 tmpfs）。
+    #   若某天出现 "read-only file system" 报错，注释掉 read_only + tmpfs 两行即可回退。
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
     environment:
       - TZ=Asia/Shanghai
+      # 容器内必须监听 0.0.0.0，宿主端口映射才通（容器内的 127.0.0.1 无法被
+      # Docker 端口转发命中）。对外暴露面由下面的 ports 绑定在宿主机侧收紧。
+      - STARPORT_LISTEN=0.0.0.0:7863
     ports:
-      - "7863:7863"
+      # 仅绑定宿主机回环：默认只有本机能访问。如需局域网访问，改为 "7863:7863"
+      # 并**务必**在 config.json 设置强 api_key（否则同网段任何人可调用与改配置）。
+      - "127.0.0.1:7863:7863"
     volumes:
       - ./auths:/app/auths
       - ./data:/app/data

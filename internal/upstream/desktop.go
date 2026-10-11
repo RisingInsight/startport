@@ -33,7 +33,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/RisingInsight/startport/internal/auth"
 )
 
 const (
@@ -416,8 +416,30 @@ func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpe
 // 解析**服务端返回的 requestId**（data.id，如 cmb-xxxx / 32hex）并返回。
 // expert_actual_use 等 JOIN 事件的 requestId 必须是该服务端 id——自造 UUID 不计数
 // （客户端 resolveRealRequestId 同款语义，Sunny row 2113 实证）。
+// maskSecret 调试输出掩码：保留前 8 字符便于比对，其余以 "…" 截断。
+// 防 STARPORT_DEBUG_CHAT 打印请求头时把 Authorization 等明文 token 洗进
+// stdout → docker logs 被持久化采集。按 rune（而非字节）截断：避免多字节
+// 字符被拦腰切碎产生非法 UTF-8 乱码；对 ASCII token（JWT/Bearer）语义等同
+// "保留前 8 字节"。
+func maskSecret(v string) string {
+	r := []rune(v)
+	if len(r) <= 8 {
+		return "…"
+	}
+	return string(r[:8]) + "…"
+}
+
+// debugHeaders 调试输出时需要掩码值的敏感请求头集合。
+// （防御性覆盖：chat 请求按红线不携带 X-Refresh-Token，但刷新端点等调试路径若复用
+// 本打印逻辑，同名头同样不外泄。）
+var debugHeaders = map[string]bool{
+	"Authorization":   true,
+	"X-Refresh-Token": true,
+	"X-Device-Token":  true,
+}
+
 func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversationID, requestID string, err error) {
-	conversationID = fmt.Sprintf("wb2api-conv-%d", time.Now().UnixNano())
+	conversationID = fmt.Sprintf("starport-conv-%d", time.Now().UnixNano())
 	body := map[string]any{
 		"model": "fast-model",
 		"messages": []any{
@@ -456,10 +478,15 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 	if expertID != "" {
 		h.Set("X-Expert-Id", expertID)
 	}
-	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+	if os.Getenv("STARPORT_DEBUG_CHAT") != "" {
 		fmt.Printf("[dbg] URL=%s\n", req.URL)
 		for k := range req.Header {
-			fmt.Printf("[dbg] %s: %s\n", k, req.Header.Get(k))
+			v := req.Header.Get(k)
+			// 敏感头（Authorization 等）值掩码后输出，防明文 token 进容器日志。
+			if debugHeaders[k] {
+				v = maskSecret(v)
+			}
+			fmt.Printf("[dbg] %s: %s\n", k, v)
 		}
 	}
 	resp, err := c.HTTP.Do(req)
@@ -467,7 +494,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+	if os.Getenv("STARPORT_DEBUG_CHAT") != "" {
 		fmt.Printf("[dbg] status=%d enc=%q\n", resp.StatusCode, resp.Header.Get("Content-Encoding"))
 	}
 	if resp.StatusCode != 200 {
@@ -482,7 +509,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 		n, rerr := resp.Body.Read(tmp)
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
-			if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+			if os.Getenv("STARPORT_DEBUG_CHAT") != "" {
 				dbg := string(tmp[:n])
 				if len(dbg) > 120 {
 					dbg = dbg[:120]
@@ -497,7 +524,7 @@ func (c *Client) DesktopChatWithExpert(a *auth.Auth, expertID string) (conversat
 				rest := buf[abs+6:]
 				if end := bytes.IndexByte(rest, '"'); end > 0 {
 					id := string(rest[:end])
-					if os.Getenv("WB2A_DEBUG_CHAT") != "" {
+					if os.Getenv("STARPORT_DEBUG_CHAT") != "" {
 						fmt.Printf("[dbg-id] %q match=%v\n", id, idRegex.MatchString(id))
 					}
 					if idRegex.MatchString(id) {

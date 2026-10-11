@@ -40,7 +40,7 @@ func TestAppJSSyntax(t *testing.T) {
 func TestIndexHTMLNoInlineScript(t *testing.T) {
 	p := newTestPanel()
 	rec := httptest.NewRecorder()
-	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/startport/", nil))
 	body := rec.Body.String()
 
 	rest := body
@@ -660,7 +660,8 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
-// 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表。
+// 精确剩余天数聚合、账号内按总余额钳制、无到期批次不进入图表，
+// 以及临期固定档（1 天内 / 7 天内，含已到期）单独归集、不重复计数。
 func TestAppJSExpirySummary(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -675,20 +676,23 @@ if (start < 0 || end < 0) throw new Error('expiry summary functions not found');
 const ctx = { Date, Math, Number, String, Map, Array, Object, isFinite };
 vm.createContext(ctx);
 vm.runInContext(src.slice(start, end) + '\nthis.summarizeCreditDays = summarizeCreditDays; this.pkAccountColorMap = pkAccountColorMap;', ctx);
-const day = 86400000, now = 100000;
+const day = 86400000, now = 1700000000000;
 const out = ctx.summarizeCreditDays([
   { uid: 'a', remain: 100, packages: [
     { name: 'soon-a', remain: 30, expires_at: now + day },
-    { name: 'later', remain: 70, expires_at: now + 7 * day },
+    { name: 'week', remain: 20, expires_at: now + 5 * day },
+    { name: 'later', remain: 50, expires_at: now + 31 * day },
   ] },
   { uid: 'b', remain: 55, packages: [
     { name: 'soon-b', remain: 20, expires_at: now + day },
+    { name: 'expired-b', remain: 35, expires_at: now - day },
     { name: 'unknown', remain: 5, end_time: '' },
   ] },
   { uid: 'err', error: 'offline' },
 ], now);
 process.stdout.write(JSON.stringify({
   rows: out.rows.map(row => ({ days: row.days, credits: row.credits })),
+  tiers: out.tiers.map(t => ({ label: t.label, credits: t.credits, segments: t.segments.length })),
   accountCount: out.accountCount,
   unavailable: out.unavailable,
   colorA: ctx.pkAccountColorMap([{ uid: 'b' }, { uid: 'a' }]).get('a'),
@@ -706,7 +710,9 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("expiry summary node test failed: %v\n%s", err, out)
 	}
-	const want = `{"rows":[{"days":1,"credits":50},{"days":7,"credits":70}],"accountCount":3,"unavailable":1,"colorA":"#4f8cff","colorB":"#25b08b"}`
+	// days<=1 的三段（soon-a 30、soon-b 20、expired-b 35）进「1 天内」；
+	// week(5 天/20) 进「7 天内」；later(31 天/50) 留在普通分桶。三者互斥、不重复计数。
+	const want = `{"rows":[{"days":31,"credits":50}],"tiers":[{"label":"1 天内","credits":85,"segments":3},{"label":"7 天内","credits":20,"segments":1}],"accountCount":3,"unavailable":1,"colorA":"#4f8cff","colorB":"#25b08b"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("expiry summary=%s want %s", out, want)
 	}
@@ -775,7 +781,7 @@ process.stdout.write(JSON.stringify([
 
 // TestAppJSExpirySortedByExpiry 到期提醒按「最近到期」升序，且不分域（issue #125）。
 //
-// 后端 /panel/api/packages 是按**余额降序**返回的，恰好把 CN 账号都排在前面、
+// 后端 /startport/api/packages 是按**余额降序**返回的，恰好把 CN 账号都排在前面、
 // global 排在末尾，看上去像"按域分组"，实际只是余额顺序。本用例刻意按这个形态构造
 // 输入（余额高的到期最晚、global 余额最低），若前端不重排就会保持该顺序而失败。
 //
@@ -901,5 +907,81 @@ process.stdout.write(JSON.stringify({
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("chart tooltip structure=%s\nwant %s（groups 应等于数据点数，loose 应为 0）",
 			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSAttnExpiryAlert E2 积分预警的取数口径。
+//
+// renderAttn 此前直接拿 overview 的 credits_earliest_remaining（该批剩余积分量）
+// 当「天数」与 7 比较，语义全错。改由 attnEarliestExpiry 三级降级取数：
+// ① lastPackages 共享缓存有该账号的实时包明细 → 与到期卡完全同口径（同一
+//    expBatches/expDaysLeft，过滤已到期批次后取最早）；
+// ② 退回 overview 的 credits_earliest_expiry，按日历日差折算天数；零值
+//    "0001-01-01T00:00:00Z" 视为无数据（Go 的 omitempty 对非指针 time.Time 无效）；
+// ③ 都没有 → null，不产生预警条目。
+//
+// 切片锚点与 TestAppJSExpirySortedByExpiry 保持一致：attnEarliestExpiry 必须落在
+// 'function expBatches' 与 'async function loadExpiry' 之间（位置红线，用例内校验）。
+func TestAppJSAttnExpiryAlert(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; attn expiry test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function expBatches');
+const end = src.indexOf('async function loadExpiry');
+if (start < 0 || end < 0 || end < start) throw new Error('expiry region not found');
+const fnAt = src.indexOf('function attnEarliestExpiry');
+if (fnAt < start || fnAt > end) throw new Error('attnEarliestExpiry must live inside expiry region');
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: () => ({ innerHTML: '', textContent: '', hidden: true }),
+  Date, Math, Number, String, Map, Array, Object, isNaN,
+  lastPackages: null, lastPackagesAt: 0,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.attnEarliestExpiry = attnEarliestExpiry;', ctx);
+const iso = n => {
+  const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() + n);
+  const p = x => String(x).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+};
+const out = [];
+// ① 缓存有该账号且最早批次 5 天后 → 与到期卡同口径 {days:5}。
+ctx.lastPackages = { accounts: [
+  { uid: 'a', packages: [{ end_time: iso(5) + ' 00:00:00', remain: 1234 }] },
+  { uid: 'err', error: 'offline', packages: [{ end_time: iso(1) + ' 00:00:00', remain: 99 }] },
+] };
+out.push(ctx.attnEarliestExpiry({ uid: 'a' }));
+// 查询失败的账号不吃缓存明细，退回 overview 汇总（未来 1 天）。
+out.push(ctx.attnEarliestExpiry({ uid: 'err', credits_earliest_expiry: iso(1) + 'T12:00:00',
+  credits_earliest_remaining: 99 }));
+// ② 缓存无数据 + overview 零值时间 → null（不产生预警）。
+ctx.lastPackages = null;
+out.push(ctx.attnEarliestExpiry({ uid: 'a', credits_earliest_expiry: '0001-01-01T00:00:00Z',
+  credits_earliest_remaining: 500 }));
+// ③ overview 未来 3 天 → 按日历日差折算 days:3。
+const fut = new Date(); fut.setDate(fut.getDate() + 3); fut.setHours(12, 0, 0, 0);
+out.push(ctx.attnEarliestExpiry({ uid: 'a', credits_earliest_expiry: fut.toISOString(),
+  credits_earliest_remaining: 888 }));
+process.stdout.write(JSON.stringify(out));`
+	f, err := os.CreateTemp(t.TempDir(), "attnexp-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("attn expiry node test failed: %v\n%s", err, out)
+	}
+	const want = `[{"days":5,"remain":1234},{"days":1,"remain":99},null,{"days":3,"remain":888}]`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("attn expiry results=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }

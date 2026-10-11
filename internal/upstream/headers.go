@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/session"
 )
 
 const (
@@ -186,6 +186,10 @@ func (c *Client) injectCodeBuddyRequest(req *http.Request) {
 // messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
 type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
+	// CacheConvID prompt_cache_key 会话段的兜底源：ConversationID 为空时用它（内容派生、
+	// 会话内稳定）。**只用于缓存键**，不参与任何出站头——头仍严格透传客户端原值。
+	// 缺了它，无会话键客户端的缓存键会退化成每账号一个定值，同账号所有会话互相覆盖。
+	CacheConvID           string
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
 }

@@ -23,7 +23,7 @@ func TestModelProbesEndpoint(t *testing.T) {
 
 	get := func(cfg Config) *httptest.ResponseRecorder {
 		p := New(cfg)
-		req := httptest.NewRequest("GET", "/panel/api/model_probes", nil)
+		req := httptest.NewRequest("GET", "/startport/api/model_probes", nil)
 		req.Header.Set("Authorization", "Bearer test-key")
 		rec := httptest.NewRecorder()
 		p.ServeHTTP(rec, req)

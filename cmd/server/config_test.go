@@ -11,7 +11,7 @@ import (
 
 func TestDefault(t *testing.T) {
 	c := Default()
-	if c.Listen != ":7863" {
+	if c.Listen != "127.0.0.1:7863" {
 		t.Errorf("listen=%s", c.Listen)
 	}
 	if err := c.normalize(); err != nil {
@@ -19,6 +19,49 @@ func TestDefault(t *testing.T) {
 	}
 	if c.SoftRateDur.Seconds() != 600 {
 		t.Errorf("soft=%v want 600s", c.SoftRateDur)
+	}
+}
+
+// 安全默认：占位符/弱口令被识别为隐患，回环监听被正确判定。
+func TestAPIKeySafety(t *testing.T) {
+	// 占位符/弱口令 → placeholder=true
+	for _, k := range []string{"test_key", "changeme", "password", "123456", "API_KEY"} {
+		c := Default()
+		c.APIKey = k
+		if ph, _ := c.APIKeyWeakness(); !ph {
+			t.Errorf("APIKeyWeakness(%q) placeholder=false, want true", k)
+		}
+	}
+	// 空 key → 不算弱口令（语义是"未启用鉴权"）
+	c := Default()
+	if ph, short := c.APIKeyWeakness(); ph || short {
+		t.Errorf("empty key flagged: ph=%v short=%v", ph, short)
+	}
+	// 非占位符但过短 → tooShort
+	c.APIKey = "abc123"
+	if ph, short := c.APIKeyWeakness(); ph || !short {
+		t.Errorf("short key: ph=%v short=%v, want ph=false short=true", ph, short)
+	}
+	// 长随机串 → 通过
+	c.APIKey = "sk-MqBGMN598WNTQCQftZ-M0aqd"
+	if ph, short := c.APIKeyWeakness(); ph || short {
+		t.Errorf("strong key flagged: ph=%v short=%v", ph, short)
+	}
+
+	// 回环监听判定
+	for _, addr := range []string{"127.0.0.1:7863", "localhost:7863", "[::1]:7863"} {
+		c := Default()
+		c.Listen = addr
+		if !c.ListenIsLoopback() {
+			t.Errorf("ListenIsLoopback(%q)=false, want true", addr)
+		}
+	}
+	for _, addr := range []string{":7863", "0.0.0.0:7863", "192.168.1.5:7863"} {
+		c := Default()
+		c.Listen = addr
+		if c.ListenIsLoopback() {
+			t.Errorf("ListenIsLoopback(%q)=true, want false", addr)
+		}
 	}
 }
 
@@ -97,8 +140,8 @@ func TestLoadFile(t *testing.T) {
 }
 
 func TestEnvOverride(t *testing.T) {
-	t.Setenv("WB2A_LISTEN", ":7777")
-	t.Setenv("WB2A_API_KEY", "envkey")
+	t.Setenv("STARPORT_LISTEN", ":7777")
+	t.Setenv("STARPORT_API_KEY", "envkey")
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
@@ -337,8 +380,8 @@ func TestUpstreamExplicitHeaderIdle(t *testing.T) {
 }
 
 func TestUpstreamEnvOverride(t *testing.T) {
-	t.Setenv("WB2A_HEADER_TIMEOUT_SECONDS", "45")
-	t.Setenv("WB2A_IDLE_TIMEOUT_SECONDS", "900")
+	t.Setenv("STARPORT_HEADER_TIMEOUT_SECONDS", "45")
+	t.Setenv("STARPORT_IDLE_TIMEOUT_SECONDS", "900")
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
@@ -611,7 +654,7 @@ func TestWriteDefault(t *testing.T) {
 	if c.APIKey != key {
 		t.Errorf("api_key=%q want %q", c.APIKey, key)
 	}
-	if c.Listen != ":7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
+	if c.Listen != "127.0.0.1:7863" || c.AuthDir != "./auths" || c.StateFile != "./data/state.json" {
 		t.Errorf("generated defaults off: %+v", c)
 	}
 	if len(c.Schedule.CheckinHours) == 0 || !c.Schedule.CheckinEnabled {
@@ -737,7 +780,7 @@ func TestPromptFileOverride(t *testing.T) {
 
 // TestPromptEnvOverride env 覆盖 prompt.mode 与 prompt.file。
 func TestPromptEnvOverride(t *testing.T) {
-	t.Setenv("WB2A_PROMPT_MODE", "passthrough")
+	t.Setenv("STARPORT_PROMPT_MODE", "passthrough")
 	c, err := Load("")
 	if err != nil {
 		t.Fatal(err)
@@ -764,7 +807,7 @@ func TestPromptLegacyConfigNoImpact(t *testing.T) {
 	}
 }
 
-// TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env WB2A_USER_AGENT 均生效，
+// TestUpstreamUserAgentConfig 配置 upstream.user_agent 与 env STARPORT_USER_AGENT 均生效，
 // 缺省空串保持现状（headers 层回落到 clientUA）。
 func TestUpstreamUserAgentConfig(t *testing.T) {
 	// JSON 配置
@@ -783,7 +826,7 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 		t.Errorf("default user_agent=%q want empty (err=%v)", c2.Upstream.UserAgent, err)
 	}
 	// env 覆盖
-	t.Setenv("WB2A_USER_AGENT", "EnvAgent/9")
+	t.Setenv("STARPORT_USER_AGENT", "EnvAgent/9")
 	c3, err := Load("")
 	if err != nil {
 		t.Fatal(err)

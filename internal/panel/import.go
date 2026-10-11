@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/RisingInsight/startport/internal/auth"
 )
 
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。
@@ -36,7 +36,7 @@ type cockpitAccount struct {
 
 // importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。
 //
-//	POST /panel/api/import/cockpit
+//	POST /startport/api/import/cockpit
 //	Content-Type: multipart/form-data
 //	Body: file=<json>
 //

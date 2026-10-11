@@ -1,4 +1,4 @@
-// main.go workbuddy2api 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
+// main.go starport 入口：加载配置、构建 pool、起调度器与 HTTP 服务。
 package main
 
 import (
@@ -10,28 +10,96 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/server"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/livecfg"
+	"github.com/RisingInsight/startport/internal/panel"
+	"github.com/RisingInsight/startport/internal/pool"
+	"github.com/RisingInsight/startport/internal/redisstore"
+	"github.com/RisingInsight/startport/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/scheduler"
+	"github.com/RisingInsight/startport/internal/server"
+	"github.com/RisingInsight/startport/internal/session"
+	"github.com/RisingInsight/startport/internal/upstream"
+	"github.com/RisingInsight/startport/internal/update"
+	"github.com/RisingInsight/startport/internal/usage"
 )
 
-// appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
-const appVersion = "1.13.0-panel"
+// appVersion 网关版本（StarPort 独立版本线起点），透出到 /startport/api/overview。
+//
+// 用 var 而非 const：const 无法被 `go build -ldflags -X` 注入，CI 也就无法把
+// git tag 打成二进制版本号（自动更新的「版本源」必须可注入）。默认值保留源码
+// 版本，本地裸构建（不带 -X）行为与改动前完全一致。
+var appVersion = "1.0.0"
+
+// appCommit / appBuildTime 构建期元信息，由 CI 经 -ldflags -X 注入（本地构建为空）。
+// 仅用于启动日志与 /startport/api/overview 观测，不参与任何路由或出站决策。
+var (
+	appCommit    = ""
+	appBuildTime = ""
+)
+
+// versionString 组合版本号与构建元信息，供启动日志透出（无 commit 时只回版本号）。
+func versionString() string {
+	s := appVersion
+	if appCommit != "" {
+		s += " (" + appCommit
+		if appBuildTime != "" {
+			s += ", " + appBuildTime
+		}
+		s += ")"
+	}
+	return s
+}
+
+// maskKeyForLog 对密钥做日志掩码：保留前 6 位便于识别，其余打星（F-007：避免
+// 明文密钥写入 stdout/容器日志）。空串返回空串。
+func maskKeyForLog(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) <= 6 {
+		return "****"
+	}
+	return s[:6] + "****"
+}
+
+// checkAPIKeySafety 启动期安全默认校验：
+//   - 占位符 / 已知弱口令 → 拒绝启动（fail fast，避免"照抄示例就上线"被白嫖）；
+//   - 密钥过短 → 告警（不阻断，兼容既有短密钥部署）；
+//   - 空密钥 + 非回环监听 → 醒目告警（此时任何能连到该端口的人都能调用与改配置）；
+//   - 非回环监听 + 无请求体上限 → 醒目告警（chatCompletions 的 io.ReadAll 无上限
+//     读入，单个超大请求即可耗尽内存；只告警不改默认——agent 大上下文/多图 base64
+//     可达几十上百 MB，改默认上限会制造 413 新故障源）。
+func checkAPIKeySafety(cfg *Config) {
+	placeholder, tooShort := cfg.APIKeyWeakness()
+	if placeholder {
+		log.Fatalf("api_key %q 是占位符/弱口令，拒绝启动。"+
+			"请改成长随机串（例如 `openssl rand -base64 24`），或留空并确保仅本机访问。", cfg.APIKey)
+	}
+	if tooShort {
+		log.Printf("WARN: api_key 长度不足 %d（当前 %d 字符），建议换成长随机串。",
+			minAPIKeyLen, len(strings.TrimSpace(cfg.APIKey)))
+	}
+	if strings.TrimSpace(cfg.APIKey) == "" && !cfg.ListenIsLoopback() {
+		log.Printf("WARN: 未设置 api_key 且监听 %s 非本机回环——网关对同网段/公网完全开放"+
+			"（任何人可调用接口并改配置）。请设置 api_key，或把 listen 改为 127.0.0.1:7863。", cfg.Listen)
+	}
+	if !cfg.ListenIsLoopback() && cfg.Server.MaxBodyMB <= 0 {
+		log.Printf("[WARN] 监听地址 %s 非本机回环且未设置请求体上限（server.max_body_mb）："+
+			"单个超大请求即可耗尽内存；公网/局域网部署建议在 config.json 设置 server.max_body_mb（如 256）", cfg.Listen)
+	}
+}
 
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
@@ -49,6 +117,8 @@ func stateSibling(stateFile, name string) string {
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
+	openBrowserFlag := flag.Bool("open", true,
+		"启动后自动打开默认浏览器到管理面板（Docker 容器内自动跳过；-open=false 关闭）")
 	flag.Parse()
 
 	cfg, err := Load(*cfgPath)
@@ -58,7 +128,7 @@ func main() {
 			// 首次运行：目录下没有配置 → 自动落一份推荐配置（含随机 api_key）再加载。
 			// 双击 exe / 裸跑 docker 即开，无需先手工复制样例。
 			if key, werr := WriteDefault(*cfgPath); werr == nil {
-				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，记录在该文件里，可自行修改）", *cfgPath, key)
+				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，完整值记录在该文件里，可自行修改）", *cfgPath, maskKeyForLog(key))
 				cfg, err = Load(*cfgPath)
 			}
 			if err != nil {
@@ -68,13 +138,17 @@ func main() {
 			}
 		}
 		if err != nil {
-			log.Fatalf("load config: %v", err)
+			fatalExit("load config: %v", err)
 		}
 	}
 
+	// 安全默认校验：占位符/弱口令直接拒绝启动（防"照抄示例就上线"被白嫖）；
+	// 空密钥 + 非回环监听给出醒目告警（此时网关对同网段/公网完全开放）。
+	checkAPIKeySafety(cfg)
+
 	auths, err := auth.LoadDir(cfg.AuthDir)
 	if err != nil {
-		log.Fatalf("load auths: %v", err)
+		fatalExit("load auths: %v", err)
 	}
 	log.Printf("loaded %d account(s) from %s", len(auths), cfg.AuthDir)
 
@@ -162,6 +236,15 @@ func main() {
 	// global realm 路由（config global 段）：上游侧开关（第一道闸）+ base 覆盖；
 	// auth 侧开关（auth.SetGlobalEnabled）是第二道闸，两者同 config global.enabled。
 	up.GlobalEnabled = cfg.Global.Enabled
+	// SSRF 防护（安全官 F-009）：这两个 base 是用户可配且出站带账号 Bearer，
+	// 必须校验——否则可配成攻击者主机（token 外发）或 169.254.169.254（打内网）。
+	// 空串 = 用内置默认，合法。校验失败直接启动失败，绝不 fail-open。
+	if err := upstream.ValidateOutboundBase(cfg.Global.ChatBase, "global.chat_base"); err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	if err := upstream.ValidateOutboundBase(cfg.Global.BillingBase, "global.billing_base"); err != nil {
+		log.Fatalf("config: %v", err)
+	}
 	up.ChatBaseGlobal = cfg.Global.ChatBase
 	up.BillingBaseGlobal = cfg.Global.BillingBase
 	auth.SetGlobalEnabled(cfg.Global.Enabled)
@@ -230,7 +313,7 @@ func main() {
 	}
 
 	// 管理面板日志镜像：标准 log（stderr）与 chat 表格日志（stdout）双路复制进
-	// 面板环形缓冲，供 /panel/api/logs 读取；控制台输出行为完全不变。
+	// 面板环形缓冲，供 /startport/api/logs 读取；控制台输出行为完全不变。
 	// live 承载可热改字段（api_key/soft_rate/脱敏开关），面板保存配置时在线替换。
 	live := livecfg.New(livecfg.Snapshot{
 		APIKey:               cfg.APIKey,
@@ -262,6 +345,31 @@ func main() {
 		log.Printf("[reqlog] 请求指标已启用；JSONL 归档已关闭")
 	}
 
+	// 更新检查器（安全官 F-003）：仅「检查 + 提示」，固定可信源、版本单调、失败静默；
+	// **绝不自动下载或执行**产物。单调性状态与 state 文件同目录（跨重启防回放）。
+	upd := update.New(update.Config{
+		Current:   appVersion,
+		Interval:  cfg.UpdateCheckInterval,
+		Enabled:   cfg.Update.CheckEnabled,
+		StatePath: stateSibling(cfg.StateFile, "update-state.json"),
+	})
+	if cfg.Update.CheckEnabled {
+		log.Printf("[update] 版本检查已启用：每 %s 检查一次（仅提示，不自动下载）", cfg.UpdateCheckInterval)
+	} else {
+		log.Printf("[update] 版本检查已关闭（update.check_enabled=false）")
+	}
+
+	// 可信代理白名单（安全官 F-008）：解析失败直接启动失败——安全配置不能
+	// fail-open（静默退回"无条件采信转发头"正是本项要修的缺陷）。
+	trustedProxies, err := server.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	if err != nil {
+		log.Fatalf("config: %v", err)
+	}
+	server.SetTrustedProxies(trustedProxies)
+	if len(trustedProxies) > 0 {
+		log.Printf("[server] 可信代理白名单已生效（%d 条）：仅这些来源的 X-Forwarded-For/X-Real-IP 会被采信", len(trustedProxies))
+	}
+
 	pn := panel.New(panel.Config{
 		Pool:        p,
 		Usage:       rec,
@@ -274,6 +382,7 @@ func main() {
 		StickyCount: sessCount,
 		Version:     appVersion,
 		Live:        live,
+		Update:      upd,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -299,6 +408,7 @@ func main() {
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,
 		SoftCooldown: cfg.SoftRateDur,
+		MaxBodyBytes: cfg.ServerMaxBodyBytes,
 		Panel:        pn,
 		Live:         live,
 		Usage:        rec,
@@ -316,6 +426,7 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	upd.Start(ctx)
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，
@@ -343,16 +454,143 @@ func main() {
 	go func() {
 		<-ctx.Done()
 		p.Flush() // 信号触发：先落盘再做优雅停机
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// 30s 而非更短：活跃 SSE 流合法时长可达数分钟（本文件上方 IdleTimeout 注释），
+		// Shutdown 期间在途流仍在排空——30s 平衡"重启速度"与"长流不硬掐"：
+		// 正常排空通常秒级返回；真有挂死连接时最多多等 30s 后由 Close 确定性退出。
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			// Shutdown 超时（context deadline）= 仍有残留连接未排空：Close 立即
+			// 掐断它们并关闭监听器，确保进程确定性退出（不悬挂、不泄漏资源）。
+			_ = srv.Close()
+			log.Printf("graceful shutdown timed out (%v), forced close; in-flight connections dropped", err)
+		}
 	}()
 
-	log.Printf("workbuddy2api listening on %s (api_key=%v)，管理面板 http://127.0.0.1%s/panel/", cfg.Listen, cfg.APIKey != "", panelListenPath(cfg.Listen))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatalf("http: %v", err)
+	// 先显式绑定端口再对外宣告"已就绪"：端口被占用能 fail fast（而非 Serve 时才报）。
+	ln, err := net.Listen("tcp", cfg.Listen)
+	if err != nil {
+		// 端口被占用且探测到就是本网关 → 已有一个实例在跑（"重复双击"是常见操作）。
+		// 此时不报错，直接打开浏览器指向已在运行的实例——"再双击一次 = 再看一眼面板"。
+		if isAddrInUse(err) && ourServiceRunning(cfg.Listen) {
+			url := panelURL(cfg.Listen)
+			log.Printf("检测到网关已在运行（%s），直接打开管理面板", url)
+			if shouldAutoOpen(*openBrowserFlag) {
+				autoOpenPanel(url) // 同步：确保浏览器已唤起再退出
+			}
+			return
+		}
+		if isAddrInUse(err) {
+			fatalExit("端口 %s 已被占用——可能已有一个 starport 实例在运行，或该端口被其它程序占用。\n"+
+				"    排查：任务栏/窗口列表里找 starport 的控制台窗口；或改 config.json 的 listen 换端口。\n"+
+				"    原始错误：%v", cfg.Listen, err)
+		}
+		fatalExit("listen %s: %v", cfg.Listen, err)
+	}
+	log.Printf("starport %s listening on %s (api_key=%v)，管理面板 %s",
+		versionString(), cfg.Listen, cfg.APIKey != "", panelURL(cfg.Listen))
+	if shouldAutoOpen(*openBrowserFlag) {
+		go autoOpenPanel(panelURL(cfg.Listen))
+	}
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		fatalExit("http: %v", err)
 	}
 	log.Printf("bye")
+}
+
+// probeHostPort 把 listen 地址转成可直连的 host:port（通配 host 回落 127.0.0.1）。
+func probeHostPort(listen string) string {
+	port := panelListenPath(listen) // ":7863"
+	host := strings.TrimSuffix(listen, port)
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "127.0.0.1"
+	}
+	return host + port
+}
+
+// panelURL 由 listen 地址推出可访问的面板 URL。
+func panelURL(listen string) string { return "http://" + probeHostPort(listen) + "/startport/" }
+
+// isAddrInUse 判断监听失败是否因端口被占用（Windows 与 Unix 措辞不同，双通道识别）。
+func isAddrInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "only one usage of each socket address") || // Windows
+		strings.Contains(s, "address already in use") // Unix
+}
+
+// ourServiceRunning 探测该地址上是否已有**本网关**在跑：GET /healthz 校验 service 标识。
+// 用 service 字段而非"端口能连上"作判据——避免把别人的服务误认成自己。
+func ourServiceRunning(listen string) bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + probeHostPort(listen) + "/healthz")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(body), `"service":"`+server.ServiceName+`"`)
+}
+
+// fatalExit 启动期致命错误：打印后退出。若处于交互式控制台（且不在 Docker 内），
+// 先等一次回车再退出——否则双击启动时控制台窗口会一闪而过、用户什么都看不到
+// （"双击没反应"的根因）。
+func fatalExit(format string, args ...any) {
+	log.Printf("FATAL: "+format, args...)
+	if shouldAutoOpen(true) && stdinIsTerminal() {
+		fmt.Fprint(os.Stderr, "按回车键退出…")
+		_, _ = fmt.Scanln()
+	}
+	os.Exit(1)
+}
+
+// stdinIsTerminal 报告 stdin 是否为交互式终端（重定向 / 管道时为 false）。
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// shouldAutoOpen 是否自动打开浏览器：显式关闭时否；Docker 容器内否（无浏览器，
+// 且自动打开只会刷一条无意义错误）；其余情况是。
+func shouldAutoOpen(flagVal bool) bool {
+	if !flagVal {
+		return false
+	}
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return false
+	}
+	return true
+}
+
+// autoOpenPanel 稍等端口就绪后打开默认浏览器（跨平台）。失败只记日志，不影响服务。
+func autoOpenPanel(url string) {
+	time.Sleep(400 * time.Millisecond)
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default:
+		cmd = exec.Command("xdg-open", url)
+	}
+	if err := cmd.Start(); err != nil {
+		log.Printf("[open] 自动打开浏览器失败（请手动访问 %s）: %v", url, err)
+		return
+	}
+	log.Printf("[open] 已打开管理面板 %s", url)
 }
 
 // warmModelRates 启动预热各域模型积分倍率表（供积分保底的目录兜底判定）。
@@ -432,6 +670,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
+	scrubSecretSentinels(incoming)
 	merged := mergeConfigMaps(cur, incoming)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
@@ -534,7 +773,26 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
+	out = append(out, "update.check_enabled", "update.check_interval_hours")
 	return out
+}
+
+// scrubSecretSentinels 删除面板提交里值为脱敏哨兵（panel.SecretSentinel）的敏感键，
+// 使随后的深合并保留磁盘上的原值——防止「GET 回显的掩码被当成新密钥写回」。
+func scrubSecretSentinels(incoming map[string]any) {
+	if v, ok := incoming["api_key"].(string); ok && v == panel.SecretSentinel {
+		delete(incoming, "api_key")
+	}
+	if up, ok := incoming["upstream"].(map[string]any); ok {
+		if v, ok := up["device_token"].(string); ok && v == panel.SecretSentinel {
+			delete(up, "device_token")
+		}
+	}
+	if us, ok := incoming["upstash"].(map[string]any); ok {
+		if v, ok := us["token"].(string); ok && v == panel.SecretSentinel {
+			delete(us, "token")
+		}
+	}
 }
 
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。

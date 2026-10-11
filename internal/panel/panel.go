@@ -5,12 +5,13 @@
 // 设计约束：
 //   - 前端 go:embed 单文件（index.html），无任何外部构建依赖，与二进制同体部署；
 //   - 鉴权复用网关 api_key（Bearer），与 /v1/* 同一口径；api_key 为空 = 不鉴权
-//     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /panel/api/*；
+//     （仅本机/私网使用）。面板 HTML 本身无秘密，可匿名加载，密钥只发给 /startport/api/*；
 //   - 不改写既有池语义：所有运维操作落到 pool 已有入口（Revive/Disable/Remove...），
 //     添加账号走 auth.SaveAtomic + pool.Add，重启后与 auths/ 目录天然对齐。
 package panel
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -21,14 +22,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/scheduler"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/httpauth"
+	"github.com/RisingInsight/startport/internal/livecfg"
+	"github.com/RisingInsight/startport/internal/pool"
+	"github.com/RisingInsight/startport/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/scheduler"
+	"github.com/RisingInsight/startport/internal/update"
+	"github.com/RisingInsight/startport/internal/upstream"
+	"github.com/RisingInsight/startport/internal/usage"
 )
 
 // Config 面板依赖（main 装配注入）。
@@ -65,9 +67,13 @@ type Config struct {
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
 	ProbeFile string
+
+	// Update 版本检查器（nil = 不提供更新信息）。只做「检查 + 提示」，
+	// 不自动下载——安全边界见 internal/update 包注释。
+	Update *update.Checker
 }
 
-// Panel 管理面板 handler。挂载方式：外层 mux Handle("/panel/", panel)，
+// Panel 管理面板 handler。挂载方式：外层 mux Handle("/startport/", panel)，
 // 本 mux 的 pattern 均带 /panel 前缀（外层不做前缀剥离）。
 type Panel struct {
 	cfg     Config
@@ -147,45 +153,46 @@ func New(cfg Config) *Panel {
 func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
-	p.mux.HandleFunc("GET /panel/{$}", p.index)
-	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
-	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
-	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
-	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
-	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
-	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
-	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
-	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
-	p.mux.HandleFunc("GET /panel/api/login/regions", p.withAuth(p.loginRegions))
-	p.mux.HandleFunc("POST /panel/api/import/cockpit", p.withAuth(p.importCockpit))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
-	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept_all", p.withAuth(p.taskAcceptAll))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
-	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
-	p.mux.HandleFunc("POST /panel/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
-	p.mux.HandleFunc("POST /panel/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
-	p.mux.HandleFunc("GET /panel/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
-	p.mux.HandleFunc("GET /panel/api/school/vouchers", p.withAuth(p.schoolVouchers))
-	p.mux.HandleFunc("POST /panel/api/checkin_all", p.withAuth(p.checkinAll))
-	p.mux.HandleFunc("POST /panel/api/travel_all", p.withAuth(p.travelAll))
-	p.mux.HandleFunc("POST /panel/api/activity_all", p.withAuth(p.activityAll))
-	p.mux.HandleFunc("POST /panel/api/keepalive_all", p.withAuth(p.keepaliveAll))
-	p.mux.HandleFunc("POST /panel/api/balance_all", p.withAuth(p.balanceAll))
-	p.mux.HandleFunc("GET /panel/api/packages", p.withAuth(p.packages))
-	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
-	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
-	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
-	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
-	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
+	p.mux.HandleFunc("GET /startport/{$}", p.index)
+	p.mux.HandleFunc("GET /startport/app.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/api/overview", p.withAuth(p.overview))
+	p.mux.HandleFunc("GET /startport/api/logs", p.withAuth(p.logsHandler))
+	p.mux.HandleFunc("GET /startport/api/request_metrics", p.withAuth(p.requestMetrics))
+	p.mux.HandleFunc("GET /startport/api/request_logs", p.withAuth(p.requestLogs))
+	p.mux.HandleFunc("GET /startport/api/models", p.withAuth(p.models))
+	p.mux.HandleFunc("POST /startport/api/login/start", p.withAuth(p.loginStart))
+	p.mux.HandleFunc("GET /startport/api/login/poll", p.withAuth(p.loginPoll))
+	p.mux.HandleFunc("GET /startport/api/login/regions", p.withAuth(p.loginRegions))
+	p.mux.HandleFunc("POST /startport/api/import/cockpit", p.withAuth(p.importCockpit))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/revive", p.withAuth(p.accountRevive))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/pause", p.withAuth(p.accountPause))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
+	p.mux.HandleFunc("GET /startport/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/tasks/accept_all", p.withAuth(p.taskAcceptAll))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/tasks/claim", p.withAuth(p.accountTaskClaim))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/tasks/auto", p.withAuth(p.accountTaskAuto))
+	p.mux.HandleFunc("POST /startport/api/accounts/{uid}/tasks/auto_all", p.withAuth(p.accountTaskAutoAll))
+	p.mux.HandleFunc("POST /startport/api/tasks/scan_all", p.withAuth(p.tasksScanAll))
+	p.mux.HandleFunc("POST /startport/api/tasks/run_queue", p.withAuth(p.tasksRunQueue))
+	p.mux.HandleFunc("GET /startport/api/tasks/queue", p.withAuth(p.tasksQueueStatus))
+	p.mux.HandleFunc("GET /startport/api/school/vouchers", p.withAuth(p.schoolVouchers))
+	p.mux.HandleFunc("POST /startport/api/checkin_all", p.withAuth(p.checkinAll))
+	p.mux.HandleFunc("POST /startport/api/travel_all", p.withAuth(p.travelAll))
+	p.mux.HandleFunc("POST /startport/api/activity_all", p.withAuth(p.activityAll))
+	p.mux.HandleFunc("POST /startport/api/keepalive_all", p.withAuth(p.keepaliveAll))
+	p.mux.HandleFunc("POST /startport/api/balance_all", p.withAuth(p.balanceAll))
+	p.mux.HandleFunc("GET /startport/api/packages", p.withAuth(p.packages))
+	p.mux.HandleFunc("GET /startport/api/usage", p.withAuth(p.usage))
+	p.mux.HandleFunc("POST /startport/api/usage/save", p.withAuth(p.usageSave))
+	p.mux.HandleFunc("GET /startport/api/model_probes", p.withAuth(p.modelProbes))
+	p.mux.HandleFunc("GET /startport/api/update", p.withAuth(p.updateInfo))
+	p.mux.HandleFunc("GET /startport/api/config", p.withAuth(p.getConfig))
+	p.mux.HandleFunc("POST /startport/api/config", p.withAuth(p.saveConfig))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
@@ -253,7 +260,40 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
+		// update 版本检查摘要（只读缓存，零网络 I/O——避免拖慢高频的 overview）。
+		// 前端据此决定是否显示更新横幅。
+		"update": updateSummary(p.cfg.Update),
 	})
+}
+
+// updateSummary 组装 overview 里的更新摘要（只读缓存，不发网络请求）。
+func updateSummary(c *update.Checker) map[string]any {
+	if c == nil {
+		return map[string]any{"enabled": false, "available": false}
+	}
+	info := c.Cached()
+	return map[string]any{
+		"enabled":   info.Enabled,
+		"available": info.Available,
+		"current":   info.Current,
+		"latest":    info.Latest,
+	}
+}
+
+// updateInfo 版本检查详情端点。默认返回**只读缓存**（零网络 I/O，秒回）；
+// ?refresh=1 时同步执行一次真实检查（可能阻塞至 HTTP 超时，供「立即检查」按钮）。
+func (p *Panel) updateInfo(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Update == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false})
+		return
+	}
+	if r.URL.Query().Get("refresh") != "" {
+		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+		defer cancel()
+		writeJSON(w, http.StatusOK, p.cfg.Update.Refresh(ctx))
+		return
+	}
+	writeJSON(w, http.StatusOK, p.cfg.Update.Cached())
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。
@@ -522,6 +562,10 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
 	if a.IsEnterprise() {
 		checkinMsg = "企业账号无签到体系（已跳过签到，仅刷新额度）"
+	} else if a.IsGlobal() {
+		// 国际版上游（global billing 域）无 daily-checkin 端点，调用必失败；
+		// 调度器 RunCheckinNow 已按 IsGlobal 跳过（scheduler.go:464），此处对齐防御。
+		checkinMsg = "国际版账号无签到体系（已跳过签到，仅刷新余额）"
 	} else if err := p.cfg.Upstream.DailyCheckin(a); err != nil {
 		checkinMsg = err.Error() // "今天已签到"等业务错误照常查余额
 		// 幂等拒绝同样是「今日已签」，标记后按钮显示「已签」。

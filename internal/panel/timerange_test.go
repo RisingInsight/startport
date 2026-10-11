@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/RisingInsight/startport/internal/pool"
+	"github.com/RisingInsight/startport/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/usage"
 )
 
 // parseTimeParam 是「今天 / 自定义」区间的唯一入口：前端默认发 unix 秒，手工
@@ -55,7 +55,7 @@ func TestUsageHandlerAcceptsExplicitRange(t *testing.T) {
 
 	get := func(query string) map[string]any {
 		t.Helper()
-		req := httptest.NewRequest("GET", "/panel/api/usage"+query, nil)
+		req := httptest.NewRequest("GET", "/startport/api/usage"+query, nil)
 		req.Header.Set("Authorization", "Bearer k")
 		rr := httptest.NewRecorder()
 		p.ServeHTTP(rr, req)
@@ -107,7 +107,7 @@ func TestRequestLogsEmptyRangeReturnsArray(t *testing.T) {
 
 	p := New(Config{Version: "test", APIKey: "k", Pool: pool.New(""), RequestLog: rec})
 	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
-	req := httptest.NewRequest("GET", "/panel/api/request_logs?from="+future, nil)
+	req := httptest.NewRequest("GET", "/startport/api/request_logs?from="+future, nil)
 	req.Header.Set("Authorization", "Bearer k")
 	rr := httptest.NewRecorder()
 	p.ServeHTTP(rr, req)
