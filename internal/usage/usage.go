@@ -68,6 +68,10 @@ type bucket struct {
 	CRT   int64   `json:"ct,omitempty"` // 同时具备 credit 与 token 的 Token 合计
 	CH    int64   `json:"ch,omitempty"` // 前缀缓存命中 token 累计（上游回该维度才累计）
 	CM    int64   `json:"cm,omitempty"` // 前缀缓存未命中 token 累计
+	// TTFBMs / TTFBN 首字节耗时累计与样本数。缓存是否生效的最直接指标
+	// （TTFB 主要由上游 prefill 决定，命中率越高越快）；总延迟还被生成阶段稀释。
+	TTFBMs int64 `json:"tm,omitempty"`
+	TTFBN  int64 `json:"tn,omitempty"`
 }
 
 // file 落盘结构。
@@ -79,11 +83,19 @@ type file struct {
 
 // Recorder 并发安全的用量记录器。
 type Recorder struct {
+	// mu 只保护 buckets/dirty 两个内存字段，持锁时间必须短（Record 在每请求路径上）。
 	mu      sync.Mutex
 	path    string
 	buckets map[string]*bucket // key: scope|realm|uid|model|rate
 	dirty   bool
 	started time.Time
+
+	// writeMu 串行化整段落盘（快照 + 写 tmp + rename）。与 mu 分离的原因：
+	// 落盘涉及磁盘 IO，若并入 mu 会阻塞每请求的 Record；而若不串行化，后台
+	// ticker 与面板 Save() 会并发写同一个 <path>.tmp 并互相 rename，把半截
+	// 内容换成正式文件（静默损坏 usage.json）。两把锁的获取顺序恒为
+	// writeMu → mu（Record 只取 mu），不存在反向获取，无死锁。
+	writeMu sync.Mutex
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -156,6 +168,10 @@ type Delta struct {
 	HasLatency       bool
 	TokensPerSecond  float64
 	HasTPS           bool
+	// TTFBMs 首字节耗时（ms）。与 LatencyMs 分开记：TTFB 直接反映上游 prefill
+	// （受前缀缓存命中影响），是缓存是否生效的最直接指标；总延迟还被生成阶段稀释。
+	TTFBMs  int64
+	HasTTFB bool
 }
 
 // Add 记录一次请求尝试。
@@ -222,6 +238,10 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		b.TPS += d.TokensPerSecond
 		b.TPSN++
 	}
+	if d.HasTTFB {
+		b.TTFBMs += d.TTFBMs
+		b.TTFBN++
+	}
 	r.dirty = true
 }
 
@@ -275,6 +295,8 @@ func (r *Recorder) Rollup(now time.Time) {
 			dst.CRT += src.CRT
 			dst.CH += src.CH
 			dst.CM += src.CM
+			dst.TTFBMs += src.TTFBMs
+			dst.TTFBN += src.TTFBN
 		}
 		delete(r.buckets, m.from)
 	}
@@ -310,6 +332,11 @@ func (r *Recorder) flush(force bool) {
 	if r == nil || r.path == "" {
 		return
 	}
+	// 整段落盘串行化（见 Recorder.writeMu 注释）：并发 flush 不再同时写同一个
+	// <path>.tmp 并互相 rename。Record 走 mu，不被本锁阻塞。
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.mu.Lock()
 	if !r.dirty && !force {
 		r.mu.Unlock()
@@ -319,26 +346,39 @@ func (r *Recorder) flush(force bool) {
 	for _, b := range r.buckets {
 		snap.Buckets = append(snap.Buckets, *b)
 	}
+	// 先清 dirty 再落盘：若本次落盘失败（下方任一 return 前经 markDirty 回滚），
+	// 恢复 dirty=true 让下一轮重试，避免"已清标记但没写成功"导致快照被永久丢弃。
 	r.dirty = false
 	r.mu.Unlock()
 
 	raw, err := json.Marshal(snap)
 	if err != nil {
 		log.Printf("[usage] 序列化失败: %v", err)
+		r.markDirty()
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o755); err != nil {
 		log.Printf("[usage] 建目录失败: %v", err)
+		r.markDirty()
 		return
 	}
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
 		log.Printf("[usage] 写临时文件失败: %v", err)
+		r.markDirty()
 		return
 	}
 	if err := os.Rename(tmp, r.path); err != nil {
 		log.Printf("[usage] 原子替换失败: %v", err)
+		r.markDirty()
 	}
+}
+
+// markDirty 在落盘失败后回滚 dirty 标记，使快照在下一轮 flush 重试（持 mu）。
+func (r *Recorder) markDirty() {
+	r.mu.Lock()
+	r.dirty = true
+	r.mu.Unlock()
 }
 
 // Save 立即落盘（面板「刷新」或关闭前调用）。
@@ -362,6 +402,7 @@ type Agg struct {
 	CacheHitRate       float64 `json:"cache_hit_rate,omitempty"`
 	AvgLatencyMs       float64 `json:"avg_latency_ms"`
 	AvgTPS             float64 `json:"avg_tokens_per_second"`
+	AvgTTFBMs          float64 `json:"avg_ttfb_ms,omitempty"`
 }
 
 // aggAcc 是聚合过程中的累加器：Agg 只放已算好的结果，均值需要样本数才能
@@ -372,6 +413,8 @@ type aggAcc struct {
 	latSamples int64
 	tpsSum     float64
 	tpsSamples int64
+	ttfbSum    int64
+	ttfbSamples int64
 }
 
 func (g *aggAcc) add(b *bucket) {
@@ -389,6 +432,8 @@ func (g *aggAcc) add(b *bucket) {
 	g.latSamples += b.LatN
 	g.tpsSum += b.TPS
 	g.tpsSamples += b.TPSN
+	g.ttfbSum += b.TTFBMs
+	g.ttfbSamples += b.TTFBN
 }
 
 func (g *aggAcc) finish() Agg {
@@ -398,6 +443,9 @@ func (g *aggAcc) finish() Agg {
 	}
 	if g.tpsSamples > 0 {
 		a.AvgTPS = g.tpsSum / float64(g.tpsSamples)
+	}
+	if g.ttfbSamples > 0 {
+		a.AvgTTFBMs = float64(g.ttfbSum) / float64(g.ttfbSamples)
 	}
 	if g.CreditTokens > 0 {
 		a.CreditsPer1MTokens = g.Credits / float64(g.CreditTokens) * 1_000_000

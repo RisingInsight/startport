@@ -16,16 +16,16 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/session"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/usage"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/httpauth"
+	"github.com/RisingInsight/startport/internal/livecfg"
+	"github.com/RisingInsight/startport/internal/logfmt"
+	"github.com/RisingInsight/startport/internal/pool"
+	"github.com/RisingInsight/startport/internal/prompt"
+	"github.com/RisingInsight/startport/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/session"
+	"github.com/RisingInsight/startport/internal/upstream"
+	"github.com/RisingInsight/startport/internal/usage"
 )
 
 // Config handler 依赖。
@@ -42,8 +42,11 @@ type Config struct {
 	RedisMode    string
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
+	// MaxBodyBytes 入站请求体上限（字节）；0 = 不限制（缺省，保持既有行为）。
+	// 来自 config.server.max_body_mb；正值时经 http.MaxBytesReader 施加，超限 413。
+	MaxBodyBytes int64
 
-	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
+	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /startport/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
 	Panel http.Handler
 
@@ -108,7 +111,7 @@ const notFoundCooldown = 60 * time.Second
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
-const ServiceName = "workbuddy2api"
+const ServiceName = "starport"
 
 // Handler 主路由。
 type Handler struct {
@@ -140,7 +143,7 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
-		h.mux.Handle("/panel/", cfg.Panel) // /panel → /panel/ 由 ServeMux 自动重定向
+		h.mux.Handle("/startport/", cfg.Panel) // /panel → /startport/ 由 ServeMux 自动重定向
 	}
 	return h
 }
@@ -447,7 +450,7 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 
 // fetchDynamicModels 从第一个可用 CN 账号拉模型列表（含 contextWindow/maxTokens），
 // 缓存 10min。
-// 选号与 /panel/api/models 完全同口径（AvailableUIDsForRealm("cn") 首个 + AuthByUID），
+// 选号与 /startport/api/models 完全同口径（AvailableUIDsForRealm("cn") 首个 + AuthByUID），
 // 而非 Pool.Pick()：Pick 无 realm 过滤，混合池里可能选中 global 号去打 CN 端点，
 // 表现为偶发失败/面板与 /v1/models 两套目录（PR #38 报告并给出的选号修复）。
 // 缓存 + 5min 负缓存按既有语义**保留**（#38 原案整体删除缓存被拒）：公开端点逐请求
@@ -509,13 +512,25 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
-	clientIP := upstream.ExtractClientIP(r)
-	// 请求体无大小上限（max_body_mb 已移除，对齐上游）：完整读入，超限类问题交由
+	clientIP := resolveClientIP(r, trustedProxies)
+	// 请求体大小：默认无上限（max_body_mb=0，对齐上游）：完整读入，超限类问题交由
 	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
-	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
-	// 读 body 出错就地 400，不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
-	body, err := io.ReadAll(r.Body)
+	// 防御语义保留在读错误路径——截断只可能来自客户端自己断流，读 body 出错就地 400，
+	// 不把半截 JSON 喂上游 unmarshal 报 unexpected EOF 冤枉罚号。
+	// 配置了 server.max_body_mb（>0）时经 http.MaxBytesReader 施加硬上限，超限 413
+	// ——公网/多租户部署防「单个超大 body 打爆内存」（安全官 F-011）。
+	var bodyReader io.Reader = r.Body
+	if h.cfg.MaxBodyBytes > 0 {
+		bodyReader = http.MaxBytesReader(w, r.Body, h.cfg.MaxBodyBytes)
+	}
+	body, err := io.ReadAll(bodyReader)
 	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "invalid_request",
+				fmt.Sprintf("request body exceeds limit of %d bytes", h.cfg.MaxBodyBytes))
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
@@ -667,6 +682,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				HasLatency:       delta.HasLatencyMs,
 				TokensPerSecond:  delta.TokensPerSecond,
 				HasTPS:           delta.HasTokensPerSecond,
+				TTFBMs:           ttfb.Milliseconds(),
+				HasTTFB:          ttfb > 0,
 			}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
 		}
 	}
@@ -705,7 +722,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//     粘性 key 进程内稳定生成；粘性 key 也空时走轮级兜底（TurnKey/TurnRequestID），
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
+	chatMeta := upstream.ChatMeta{
+		ConversationID: session.ResolveConversationID(body),
+		// 缓存键的会话段兜底：客户端没给 conversation_id 时用内容派生键（会话内稳定），
+		// 避免 prompt_cache_key 退化成每账号定值、同账号各会话互相覆盖缓存。
+		CacheConvID: session.DeriveStableKey(body),
+	}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
@@ -1031,7 +1053,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			rc.Close()
 			return
 		}
-		resp, err := upstream.Aggregate(rc)
+		// 非流式同样要测 TTFB：这里也把上游 SSE 完整读一遍，只是聚合后一次性返回。
+		// 用与流式相同的 stats reader 包裹，首个 data 帧到达时刻即 TTFB。
+		// 此前这里给 recordAttempt 硬传 0，导致 stream:false 客户端**永远没有 TTFB
+		// 观测**——面板的 TTFB 趋势图对非流式客户端全空。
+		aggStats := newChatStatsReaderSince(rc, st.start)
+		resp, err := upstream.Aggregate(aggStats)
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
@@ -1048,7 +1075,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.cacheHit, st.cacheMiss, st.hasCache = int64(hit), int64(miss), true
 			}
 		}
-		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, 0)
+		recordAttempt(acct.UID, usageDeltaFromResponse(resp), credit, hasCredit, attemptStarted, aggStats.TTFB())
+		// 表格日志同样带上 TTFB（此前非流式恒为 0 → 日志显示 "-"）。
+		st.ttfb = aggStats.TTFB()
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
 		}

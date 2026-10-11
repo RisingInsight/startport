@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -15,10 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/RisingInsight/startport/internal/logfmt"
+	"github.com/RisingInsight/startport/internal/pool"
+	"github.com/RisingInsight/startport/internal/reqlog"
 )
 
 // maxUserAgentLen 归档与面板展示保留的 UA 字节上限。UA 是客户端完全可控的
@@ -34,7 +32,7 @@ var chatSeq atomic.Int64
 var chatLogEnabled = true
 
 // chatLogOut 聊天表格日志的输出目标。生产默认 os.Stdout；main 在启用管理面板时
-// 经 SetChatLogOutput 注入 MultiWriter，把每行镜像进 /panel/api/logs 的环形缓冲，
+// 经 SetChatLogOutput 注入 MultiWriter，把每行镜像进 /startport/api/logs 的环形缓冲，
 // stdout 行为不变。需在开始服务前调用一次（无并发竞争窗口）。
 var chatLogOut io.Writer = os.Stdout
 
@@ -362,22 +360,13 @@ func (t *requestTrace) captureClientInfo(r *http.Request) {
 
 // clientIPForLog 提取用于日志展示的客户端 IP。
 //
-// 与 upstream.ExtractClientIP 的差别：后者只认代理头（X-Forwarded-For 首段 →
-// X-Real-IP），因为它的用途是把客户端 IP **透传给上游**，回落到网关自身地址会
-// 污染上游风控判据；日志场景相反——直连（无反代）时 RemoteAddr 就是唯一线索，
-// 必须回落，否则面板里所有来源都显示 "-"。代理头优先保证反代后拿到真实客户端。
+// 走 resolveClientIP：**仅当直连来源命中可信代理白名单时才采信转发头**，否则用
+// RemoteAddr。无条件采信 XFF 会让攻击者用一个请求头就伪造日志来源（安全官 F-008），
+// 也让上游风控判据被污染（该值会经 passthrough_ip 透传上游）。
+//
+// 直连（无反代）时 RemoteAddr 就是唯一线索，必须回落——否则面板里所有来源都显示 "-"。
 func clientIPForLog(r *http.Request) string {
-	if r == nil {
-		return ""
-	}
-	if ip := upstream.ExtractClientIP(r); ip != "" {
-		return ip
-	}
-	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
-	if err != nil {
-		return strings.TrimSpace(r.RemoteAddr)
-	}
-	return host
+	return resolveClientIP(r, trustedProxies)
 }
 
 // dashIfEmpty 空串统一显示 "-"（来源字段未采集时不留空白列）。

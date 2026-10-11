@@ -11,10 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/logfmt"
+	"github.com/RisingInsight/startport/internal/pool"
+	"github.com/RisingInsight/startport/internal/upstream"
 )
 
 // Config 调度器依赖。
@@ -540,7 +540,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 			}
 		}
 		first = false
-		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
+		cid := fmt.Sprintf("starport-%d", time.Now().UnixMilli())
 		if err := s.cfg.Upstream.ReportChatActivity(a, cid, ""); err != nil {
 			log.Printf("activity %s: %v", logfmt.Label(a.UID, a.Nickname), err)
 			continue
@@ -643,9 +643,10 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 // 独立于 Run 的小时制排程：余额是分钟级观测量，不值得为它扩展 nextFire 的粒度。
 // 运行期可用 SetBalanceInterval 热改间隔（下一轮生效）。
 func (s *Scheduler) StartBalanceRefresh(ctx context.Context, interval time.Duration) {
-	if interval <= 0 {
-		return
-	}
+	// 无论 interval 是否为 0 都启动循环：循环体自身在 cur<=0 时阻塞等待 rearmBalance，
+	// 于是「启动时关闭、运行期经面板热改开启」能真正生效。此前 interval<=0 直接
+	// early-return，关闭启动的进程永远没有消费者 goroutine，SetBalanceInterval 只改值
+	// 无济于事（热开关形同虚设，须重启才生效——调查员 #2）。
 	s.balanceInterval.Store(int64(interval))
 	go func() {
 		var logged time.Duration

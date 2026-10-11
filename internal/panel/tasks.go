@@ -10,11 +10,21 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/RisingInsight/startport/internal/auth"
 )
 
 // acceptBatchGap 批量接受的批间节流（对齐脚本 1.05s 口径，避免上游风控）。
 var acceptBatchGap = 1050 * time.Millisecond
+
+// guardGrowthRealm 国际版无成长任务体系（上游 global 域无 growth 端点，调用必失败）：
+// 统一 400 拦截，对齐企业版在 accountCheckin 的防御模式。返回 true 表示已拦截。
+func guardGrowthRealm(w http.ResponseWriter, a *auth.Auth) bool {
+	if a.IsGlobal() {
+		writeErr(w, http.StatusBadRequest, "国际版账号无成长任务/签到体系（上游无对应端点）")
+		return true
+	}
+	return false
+}
 
 // accountByUID 取账号凭证；不存在时写 404 并返回 nil。
 func (p *Panel) accountByUID(w http.ResponseWriter, uid string) *auth.Auth {
@@ -31,6 +41,9 @@ func (p *Panel) accountTasks(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if guardGrowthRealm(w, a) {
 		return
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
@@ -62,6 +75,9 @@ func (p *Panel) accountTaskAccept(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		return
 	}
+	if guardGrowthRealm(w, a) {
+		return
+	}
 	var body struct {
 		TaskCodes []string `json:"task_codes"`
 	}
@@ -87,6 +103,9 @@ func (p *Panel) taskAcceptAll(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if guardGrowthRealm(w, a) {
 		return
 	}
 	tasks, err := p.cfg.Upstream.ListTasks(a)
@@ -154,6 +173,9 @@ func (p *Panel) accountTaskClaim(w http.ResponseWriter, r *http.Request) {
 	uid := r.PathValue("uid")
 	a := p.accountByUID(w, uid)
 	if a == nil {
+		return
+	}
+	if guardGrowthRealm(w, a) {
 		return
 	}
 	var body struct {

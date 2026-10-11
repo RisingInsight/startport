@@ -20,8 +20,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/logfmt"
 )
 
 // ErrKind 错误分类，pool 据此决定冷却时长。
@@ -784,7 +784,7 @@ func (c *Client) chatBase(a *auth.Auth) string {
 
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
-func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+func (c *Client) prepareBody(body []byte, realm, uid, conversationID, cacheConvID string) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
@@ -795,7 +795,16 @@ func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []b
 	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
 	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
 	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
-	body = InjectPromptCacheKey(body, uid, conversationID)
+	//
+	// 会话段取 conversationID，为空时回落 cacheConvID（内容派生、会话内稳定）。
+	// 不回落的话，无会话键客户端（只发 messages、既无 conversation_id 也无 metadata
+	// 的 OpenAI 兼容客户端）会让 buildCacheKey 的会话段变成定值 → 同账号所有会话共用
+	// 同一个上游缓存槽、互相覆盖 → 前缀缓存抖动。
+	conv := conversationID
+	if conv == "" {
+		conv = cacheConvID
+	}
+	body = InjectPromptCacheKey(body, uid, conv)
 	return body
 }
 
@@ -1019,7 +1028,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID, meta.CacheConvID)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}

@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
+	"github.com/RisingInsight/startport/internal/redisstore"
 )
 
 // entry 单条会话绑定。
@@ -205,8 +205,18 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 }
 
 // touch 滚动 lastActive 并异步镜像（只在快路径命中时写最后一次）。
+//
+// 写锁内必须重读校验：快路径是 RLock 读出 uid、释放锁后再调本函数；期间并发的
+// Bind（成功重绑到别的号）/ Unbind（解绑）会改写或删除该键。若无条件覆写，touch
+// 会把会话回退到旧 uid、或复活刚被解绑的键（丢失更新，调查员 #4）。仅当键仍存在
+// 且 uid 未变时才续期。
 func (r *Router) touch(key, uid string, now time.Time) {
 	r.mu.Lock()
+	cur, ok := r.entries[key]
+	if !ok || cur.uid != uid {
+		r.mu.Unlock()
+		return
+	}
 	r.entries[key] = entry{uid: uid, lastActive: now}
 	r.mu.Unlock()
 	r.cfg.Store.SetBind(key, uid, r.cfg.TTL)
@@ -389,6 +399,27 @@ const derivedKeyPrefix = "d-"
 //   - 同一会话多轮请求 → 同一键 → 稳定粘住同一账号（上游 prompt 缓存命中）。
 //
 // 取不到用户文本（纯图片等）时返回空串：不粘性，退回普通轮换（安全降级）。
+// DeriveStableKey 返回 body 的**内容派生会话键**（首条 system 文本 + 首条 user 内容
+// 签名），会话内稳定。与 ExtractKey 的派生回退相比**不设 user_id 抑制闸**：那道闸是
+// 粘性路由的契约（user 维度粒度过粗，会把同一 user 的并行对话钉到同一账号），而
+// 缓存键与账号选择无关——用户维度标识不该抑制它。
+//
+// 用途：上游 prompt_cache_key 的会话段兜底。客户端既无 conversation_id 也无
+// metadata 会话键时，ResolveConversationID 返回空，缓存键会退化成「每账号一个定值」
+// ——该账号上所有会话共用同一个上游缓存槽、互相覆盖（前缀缓存抖动，费用与 TTFB
+// 双升）。本函数给出一个会话内稳定、跨会话互不相同的兜底段。
+// 无 messages / 无 user 消息 → ""（调用方保持原有定值语义）。
+func DeriveStableKey(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	return deriveKey(obj)
+}
+
 func deriveKey(obj map[string]any) string {
 	msgs, ok := obj["messages"].([]any)
 	if !ok || len(msgs) == 0 {

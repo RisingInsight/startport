@@ -2,8 +2,10 @@ package usage
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -99,6 +101,127 @@ func TestFlushLoadRoundtrip(t *testing.T) {
 	var f file
 	if err := json.Unmarshal(raw, &f); err != nil || f.Version != fileVersion || len(f.Buckets) != 1 {
 		t.Fatalf("落盘文件异常: err=%v buckets=%d", err, len(f.Buckets))
+	}
+}
+
+// 并发落盘回归：后台 flush 与面板 Save() 若并发写同一个 <path>.tmp 并互相 rename，
+// 会把半截内容换成正式文件（usage.json 静默损坏）。修复后由 writeMu 串行化整段
+// 落盘，任意并发下产物都必须是完整可解析的 JSON。
+func TestConcurrentFlushKeepsFileIntact(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	r := New(path)
+	var wg sync.WaitGroup
+	// 多个 goroutine 反复 Save，模拟后台 ticker 与面板「刷新」并发触发。
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				r.Save()
+			}
+		}()
+	}
+	// 一个写者持续 Add（与落盘并发），每次用不同 model 撑大落盘体积，
+	// 让并发写 tmp 更容易暴露撕裂（mu 与 writeMu 分离后仍须无竞争）。
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for j := 0; j < 500; j++ {
+			r.Add(time.Now(), "cn", "u1", fmt.Sprintf("m-%d", j),
+				Delta{PromptTokens: 1, HasPromptTokens: true, TotalTokens: 1, HasTotal: true}, true)
+		}
+	}()
+	wg.Wait()
+	r.Save()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读回落盘文件失败: %v", err)
+	}
+	var f file
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("并发落盘后文件损坏（非法 JSON，长度 %d）: %v", len(raw), err)
+	}
+	if f.Version != fileVersion {
+		t.Fatalf("落盘版本 = %d, want %d", f.Version, fileVersion)
+	}
+}
+
+// 落盘失败必须回滚 dirty：否则「已清标记但没写成功」会让快照被永久丢弃
+// （下次 flush 因 !dirty 直接跳过，直到再有新写入）。此处确定性注入失败路径。
+func TestFlushFailureRestoresDirty(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "usage.json")
+	r := New(good)
+	r.Add(time.Now(), "cn", "u1", "m", Delta{PromptTokens: 7, HasPromptTokens: true, TotalTokens: 7, HasTotal: true}, true)
+
+	// 把 path 指向「父级是普通文件」的位置，使 MkdirAll 必失败。
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.path = filepath.Join(blocker, "sub", "usage.json")
+	r.Save() // 走失败分支
+
+	r.mu.Lock()
+	dirtyAfterFail := r.dirty
+	r.mu.Unlock()
+	if !dirtyAfterFail {
+		t.Fatalf("落盘失败后 dirty 未回滚，快照将被永久丢弃")
+	}
+
+	// 恢复可写路径后，同一份数据必须能成功落盘。
+	r.path = good
+	r.Save()
+	raw, err := os.ReadFile(good)
+	if err != nil {
+		t.Fatalf("恢复路径后仍未落盘: %v", err)
+	}
+	var f file
+	if err := json.Unmarshal(raw, &f); err != nil {
+		t.Fatalf("落盘内容非法 JSON: %v", err)
+	}
+	if len(f.Buckets) != 1 || f.Buckets[0].TT != 7 {
+		t.Fatalf("落盘数据 = %+v, want 1 bucket tt=7", f.Buckets)
+	}
+}
+
+// TTFB 必须按桶累计、出现在汇总与时序点里（缓存是否生效的直接指标）。
+// 与延迟分开记：TTFB 只反映上游 prefill，总延迟会被生成阶段稀释。
+func TestTTFBTrackedInTotalsAndSeries(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	base := Delta{PromptTokens: 100, HasPromptTokens: true, TotalTokens: 100, HasTotal: true}
+	d1 := base
+	d1.TTFBMs, d1.HasTTFB = 4000, true
+	d2 := base
+	d2.TTFBMs, d2.HasTTFB = 6000, true
+	r.Add(now, "cn", "u1", "m", d1, true)
+	r.Add(now, "cn", "u1", "m", d2, true)
+
+	s := r.Snapshot(24, nil)
+	if s.Totals.AvgTTFBMs != 5000 {
+		t.Fatalf("totals avg_ttfb_ms = %v, want 5000", s.Totals.AvgTTFBMs)
+	}
+	if len(s.Series) == 0 {
+		t.Fatal("series 为空")
+	}
+	if s.Series[0].AvgTTFBMs != 5000 {
+		t.Fatalf("series avg_ttfb_ms = %v, want 5000", s.Series[0].AvgTTFBMs)
+	}
+}
+
+// 未带 TTFB 观测（HasTTFB=false）时不得计入均值——否则失败尝试会把均值拉低。
+func TestTTFBAbsentNotCounted(t *testing.T) {
+	r := New("")
+	now := time.Now()
+	r.Add(now, "cn", "u1", "m", Delta{PromptTokens: 10, HasPromptTokens: true}, true)
+	d := Delta{PromptTokens: 10, HasPromptTokens: true, TTFBMs: 3000, HasTTFB: true}
+	r.Add(now, "cn", "u1", "m", d, true)
+
+	s := r.Snapshot(24, nil)
+	if s.Totals.AvgTTFBMs != 3000 {
+		t.Fatalf("avg_ttfb_ms = %v, want 3000（无观测的那笔不应计入分母）", s.Totals.AvgTTFBMs)
 	}
 }
 

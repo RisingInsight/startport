@@ -1,6 +1,6 @@
 // ring.go 固定容量的结构化日志环形缓冲（并发安全，实现 io.Writer）。
 // main 把 log 包输出与 chat 表格日志经 MultiWriter 镜像进来，面板
-// /panel/api/logs 读取快照；超出容量的旧行按 FIFO 淘汰。
+// /startport/api/logs 读取快照；超出容量的旧行按 FIFO 淘汰。
 //
 // 每行入环时按前缀规则归类频道（chat=对话请求表格行 / task=任务动作 /
 // sys=系统与其它），面板日志视图按频道筛选——对话流量大时任务结果不被冲掉。

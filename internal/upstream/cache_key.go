@@ -24,7 +24,7 @@ import (
 //  3. 都没有 → 用入站 conversationID 参数（来自 X-Conversation-ID 头解析）
 //
 // 安全约束——按账号隔离：
-//   - 生成键格式 `wb2a-<uid8>-<convHex>`
+//   - 生成键格式 `starport-<uid8>-<convHex>`
 //   - uid8 是账号 UID 前 8 字符，跨账号绝不相同 → 跨账号缓存键绝不碰撞
 //   - 跨账号复用同一 cache key 会让上游命中错账号的前缀缓存、泄露对方对话，故 uid 是硬隔离因子
 //
@@ -60,7 +60,7 @@ func InjectPromptCacheKey(body []byte, uid, conversationID string) []byte {
 	return out
 }
 
-// buildCacheKey 生成 `wb2a-<uid8>-<convHex>` 格式的稳定 cache key。
+// buildCacheKey 生成 `starport-<uid8>-<convHex>` 格式的稳定 cache key。
 //
 // uid8 提供账号隔离段；convHex = sha256(uid + conversationID)[:16] 的 hex 提供会话段
 // （同账号同会话稳定、不同会话不同）。会话源为空时 convHex 仍由 uid 单独哈希，
@@ -75,7 +75,7 @@ func buildCacheKey(uid, conversation string) string {
 	}
 	sum := sha256.Sum256([]byte(uid + "|" + conversation))
 	convHex := hex.EncodeToString(sum[:16])
-	return "wb2a-" + uid8 + "-" + convHex
+	return "starport-" + uid8 + "-" + convHex
 }
 
 // strField 从 map 取 string 字段，非 string 或空串返回 ""。

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/redisstore"
+	"github.com/RisingInsight/startport/internal/redisstore"
 )
 
 // countingStore 记录镜像调用次数的假 Store（不联网）。
@@ -51,6 +51,68 @@ func routerWith(store redisstore.Store, avail []string, ttl time.Duration) *Rout
 		Store:     store,
 		Available: func() []string { return avail },
 	})
+}
+
+// DeriveStableKey：同一会话多轮稳定、不同会话互不相同，且**不受 user_id 抑制闸**
+// 影响——那道闸是粘性路由的契约，缓存键与账号选择无关，不该被它拦掉。
+func TestDeriveStableKey(t *testing.T) {
+	turn1 := `{"messages":[{"role":"system","content":"S"},{"role":"user","content":"第一问"}]}`
+	turn2 := `{"messages":[{"role":"system","content":"S"},{"role":"user","content":"第一问"},{"role":"assistant","content":"答"},{"role":"user","content":"第二问"}]}`
+	other := `{"messages":[{"role":"system","content":"S"},{"role":"user","content":"另一个会话"}]}`
+
+	k1, k2, ko := DeriveStableKey([]byte(turn1)), DeriveStableKey([]byte(turn2)), DeriveStableKey([]byte(other))
+	if k1 == "" || k2 == "" || ko == "" {
+		t.Fatalf("keys should be non-empty: %q %q %q", k1, k2, ko)
+	}
+	if k1 != k2 {
+		t.Errorf("同一会话多轮应稳定: turn1=%q turn2=%q", k1, k2)
+	}
+	if k1 == ko {
+		t.Errorf("不同会话应不同: %q == %q", k1, ko)
+	}
+
+	// user_id 抑制闸只作用于粘性（ExtractKey）；派生缓存键必须仍可用。
+	withUser := `{"user_id":"u1","messages":[{"role":"system","content":"S"},{"role":"user","content":"第一问"}]}`
+	if got := DeriveStableKey([]byte(withUser)); got != k1 {
+		t.Errorf("带 user_id 时派生键应仍可用（缓存键不受粘性闸约束）: %q want %q", got, k1)
+	}
+	if ExtractKey([]byte(withUser)) != "" {
+		t.Errorf("ExtractKey 对带 user_id 的请求应保持抑制（粘性契约不变）")
+	}
+
+	if DeriveStableKey([]byte(`{"messages":[]}`)) != "" || DeriveStableKey(nil) != "" {
+		t.Errorf("无 messages / 无 user 消息应返回空串")
+	}
+}
+
+// touch 不得用陈旧 uid 覆写并发改写过的绑定（丢失更新，调查员 #4）。
+func TestTouchDoesNotReviveStaleBinding(t *testing.T) {
+	st := newCountingStore()
+	r := routerWith(st, []string{"a", "b"}, time.Minute)
+
+	// 场景 1：快路径读出 uid=a 后，绑定被并发改到 b —— 陈旧 touch(a) 不得退回 a。
+	r.Bind("k1", "a")
+	r.Bind("k1", "b") // 并发重绑（如「粘性跟随最终成功号」）
+	r.touch("k1", "a", time.Now())
+	if got := r.entries["k1"].uid; got != "b" {
+		t.Fatalf("stale touch revived old binding: entries[k1].uid=%q, want b", got)
+	}
+
+	// 场景 2：快路径读出 uid=a 后，绑定被并发解绑 —— 陈旧 touch(a) 不得复活该键。
+	r.Bind("k2", "a")
+	r.Unbind("k2")
+	r.touch("k2", "a", time.Now())
+	if _, exists := r.entries["k2"]; exists {
+		t.Fatalf("stale touch revived unbound key: entries[k2]=%+v", r.entries["k2"])
+	}
+
+	// 场景 3（正向）：uid 未变时 touch 正常续期。
+	r.Bind("k3", "a")
+	before := r.entries["k3"].lastActive
+	r.touch("k3", "a", time.Now().Add(time.Second))
+	if !r.entries["k3"].lastActive.After(before) {
+		t.Fatalf("touch did not refresh lastActive for unchanged uid")
+	}
 }
 
 func TestWeightedVirtualCandidatesBiasNewSessions(t *testing.T) {

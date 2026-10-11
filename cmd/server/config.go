@@ -6,18 +6,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/prompt"
+	"github.com/RisingInsight/startport/internal/prompt"
 )
 
 // Config 顶层配置。
 type Config struct {
-	Listen    string `json:"listen"`     // ":7863"
+	Listen    string `json:"listen"`     // "127.0.0.1:7863"（默认仅本机回环）
 	APIKey    string `json:"api_key"`    // 空 = 不鉴权
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
@@ -51,6 +52,22 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+		// MaxBodyMB 入站请求体大小上限（MiB）。0 = 不限制（缺省，保持既有行为：
+		// 大上下文/多图 base64 会话不受网关侧 413 影响，见 issue #41/#100）。
+		// 设为正值时经 http.MaxBytesReader 施加，超限返回 413——主要用于公网/
+		// 多租户部署防止「单个超大 body 打爆内存」（安全官 F-011）。
+		MaxBodyMB int `json:"max_body_mb"`
+		// TrustedProxies 可信反向代理网段（CIDR 或单 IP，如 "127.0.0.1"、
+		// "10.0.0.0/8"、"172.18.0.0/16"）。**空 = 从不采信** X-Forwarded-For /
+		// X-Real-IP（安全缺省，见 internal/server/clientip.go）。
+		//
+		// 为什么需要：转发头客户端可任意伪造。无条件采信会 (1) 污染审计日志来源、
+		// (2) 在 upstream.passthrough_ip 开启时把伪造 IP 透传给上游、污染其风控
+		// 判据（安全官 F-008）。只有直连地址落在本白名单内时才采信转发头。
+		//
+		// 典型配置：nginx/traefik 与网关同机 → ["127.0.0.1"]；
+		// 反代在 docker 网络 → 加上该网段（如 "172.18.0.0/16"）。
+		TrustedProxies []string `json:"trusted_proxies"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -213,6 +230,15 @@ type Config struct {
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
 
+	Update struct {
+		// CheckEnabled 版本检查开关（缺省 true）。关闭后网关不发起任何外网检查
+		// （离线 / 隐私场景），/startport/api/update 返回 enabled:false。
+		// 注意：本功能**只提示、不自动下载**（安全红线，无对应开关）。
+		CheckEnabled bool `json:"check_enabled"`
+		// CheckIntervalHours 检查间隔（小时），缺省 6；<=0 回落 6。
+		CheckIntervalHours int `json:"check_interval_hours"`
+	} `json:"update"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
@@ -228,12 +254,20 @@ type Config struct {
 	CostExploreIntervalDur time.Duration `json:"-"`
 	// ServerReadTimeoutDur 解析后的入站请求读取上限（issue #100）；0 = 不限制。
 	ServerReadTimeoutDur time.Duration `json:"-"`
+	// ServerMaxBodyBytes 解析后的入站请求体上限（字节）；0 = 不限制。
+	ServerMaxBodyBytes int64 `json:"-"`
+	// UpdateCheckInterval 解析后的版本检查间隔。
+	UpdateCheckInterval time.Duration `json:"-"`
 }
 
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
-		Listen:    ":7863",
+		// 默认仅绑定本机回环：避免"跑起来就把网关暴露给同网段"（公网/局域网部署
+		// 需显式改 listen，或经反代）。容器部署由 compose 的 STARPORT_LISTEN 覆盖为
+		// 0.0.0.0（容器内必须监听 0.0.0.0 端口映射才通），安全性由宿主机端口绑定
+		// （127.0.0.1:7863:7863）保证。
+		Listen:    "127.0.0.1:7863",
 		APIKey:    "",
 		AuthDir:   "./auths",
 		StateFile: "./data/state.json",
@@ -293,10 +327,13 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// 版本检查缺省开启（只提示、不自动下载）；6h 一次，失败静默降级。
+	c.Update.CheckEnabled = true
+	c.Update.CheckIntervalHours = 6
 	return c
 }
 
-// Load 从文件读，再用 WB2A_* env 覆盖。
+// Load 从文件读，再用 STARPORT_* env 覆盖。
 func Load(path string) (*Config, error) {
 	c := Default()
 	if path != "" {
@@ -374,77 +411,77 @@ func WriteDefault(path string) (string, error) {
 }
 
 func applyEnv(c *Config) {
-	if v := os.Getenv("WB2A_LISTEN"); v != "" {
+	if v := os.Getenv("STARPORT_LISTEN"); v != "" {
 		c.Listen = v
 	}
-	if v := os.Getenv("WB2A_API_KEY"); v != "" {
+	if v := os.Getenv("STARPORT_API_KEY"); v != "" {
 		c.APIKey = v
 	}
-	if v := os.Getenv("WB2A_AUTH_DIR"); v != "" {
+	if v := os.Getenv("STARPORT_AUTH_DIR"); v != "" {
 		c.AuthDir = v
 	}
-	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
+	if v := os.Getenv("STARPORT_STATE_FILE"); v != "" {
 		c.StateFile = v
 	}
-	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
+	if v := os.Getenv("STARPORT_SOFT_RATE"); v != "" {
 		c.Cooldown.SoftRate = v
 	}
-	if v := os.Getenv("WB2A_SOFT_RATE_MAX"); v != "" {
+	if v := os.Getenv("STARPORT_SOFT_RATE_MAX"); v != "" {
 		c.Cooldown.SoftRateMax = v
 	}
-	if v := os.Getenv("WB2A_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv("STARPORT_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.TimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_HEADER_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv("STARPORT_HEADER_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.HeaderTimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_IDLE_TIMEOUT_SECONDS"); v != "" {
+	if v := os.Getenv("STARPORT_IDLE_TIMEOUT_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Upstream.IdleTimeoutSeconds = n
 		}
 	}
-	if v := os.Getenv("WB2A_USER_AGENT"); v != "" {
+	if v := os.Getenv("STARPORT_USER_AGENT"); v != "" {
 		c.Upstream.UserAgent = v
 	}
-	if v := os.Getenv("WB2A_CLIENT_VERSION"); v != "" {
+	if v := os.Getenv("STARPORT_CLIENT_VERSION"); v != "" {
 		c.Upstream.ClientVersion = v
 	}
-	if v := os.Getenv("WB2A_CLI_VERSION"); v != "" {
+	if v := os.Getenv("STARPORT_CLI_VERSION"); v != "" {
 		c.Upstream.CliVersion = v
 	}
-	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
+	if v := os.Getenv("STARPORT_CLIENT_NAME"); v != "" {
 		c.Upstream.ClientName = v
 	}
-	if v := os.Getenv("WB2A_DEVICE_TOKEN"); v != "" {
+	if v := os.Getenv("STARPORT_DEVICE_TOKEN"); v != "" {
 		c.Upstream.DeviceToken = v
 	}
-	if v := os.Getenv("WB2A_DEVICE_TOKEN_FILE"); v != "" {
+	if v := os.Getenv("STARPORT_DEVICE_TOKEN_FILE"); v != "" {
 		c.Upstream.DeviceTokenFile = v
 	}
-	if v := os.Getenv("WB2A_PASSTHROUGH_IP"); v != "" {
+	if v := os.Getenv("STARPORT_PASSTHROUGH_IP"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Upstream.PassthroughIP = b
 		}
 	}
-	if v := os.Getenv("WB2A_SANITIZE_FINGERPRINTS"); v != "" {
+	if v := os.Getenv("STARPORT_SANITIZE_FINGERPRINTS"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
 	}
-	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
+	if v := os.Getenv("STARPORT_PROMPT_MODE"); v != "" {
 		c.Prompt.Mode = v
 	}
-	if v := os.Getenv("WB2A_PROMPT_FILE"); v != "" {
+	if v := os.Getenv("STARPORT_PROMPT_FILE"); v != "" {
 		c.Prompt.File = v
 	}
-	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
+	if v := os.Getenv("STARPORT_EXPIRING_SOON"); v != "" {
 		c.Pool.ExpiringSoon = v
 	}
-	if v := os.Getenv("WB2A_PREFER_EXPIRING"); v != "" {
+	if v := os.Getenv("STARPORT_PREFER_EXPIRING"); v != "" {
 		if b, err := strconv.ParseBool(v); err == nil {
 			c.Pool.PreferExpiring = b
 		}
@@ -473,6 +510,16 @@ func (c *Config) normalize() error {
 	if c.ServerReadTimeoutDur < 0 {
 		return fmt.Errorf("server.read_timeout: 负时长 %q 无意义", c.Server.ReadTimeout)
 	}
+	// 入站请求体上限：负值钳 0（= 不限制，与缺省一致）；0 是合法值（不限制）。
+	if c.Server.MaxBodyMB < 0 {
+		c.Server.MaxBodyMB = 0
+	}
+	c.ServerMaxBodyBytes = int64(c.Server.MaxBodyMB) << 20
+	// 版本检查间隔：<=0 回落默认 6h（0 无合理语义——关闭请用 update.check_enabled）。
+	if c.Update.CheckIntervalHours <= 0 {
+		c.Update.CheckIntervalHours = 6
+	}
+	c.UpdateCheckInterval = time.Duration(c.Update.CheckIntervalHours) * time.Hour
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
 	}
@@ -655,4 +702,49 @@ func checkHourRange(field, switchKey string, hours []int) error {
 		}
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// 安全默认校验
+// ---------------------------------------------------------------------------
+
+// weakAPIKeys 已知占位符 / 弱口令（启动时直接拒绝，防"照抄示例就上线"被白嫖）。
+// 比较为大小写不敏感精确匹配；过短密钥另行告警而非拒绝（见 minAPIKeyLen）。
+var weakAPIKeys = map[string]bool{
+	"test_key": true, "testkey": true, "test": true, "testing": true,
+	"changeme": true, "change_me": true, "password": true, "passwd": true,
+	"admin": true, "secret": true, "123456": true, "12345678": true,
+	"your_api_key": true, "your-key": true, "sk-test": true, "api_key": true,
+	"apikey": true, "workbuddy": true, "workbuddy2api": true, "example": true,
+	"starport": true, "startport": true,
+}
+
+// minAPIKeyLen 建议的最短密钥长度（低于此值仅告警，不阻断启动）。
+const minAPIKeyLen = 16
+
+// APIKeyWeakness 报告 api_key 的安全隐患：返回 (是否占位符/弱口令, 是否过短)。
+// 空 key 不计入（其语义是"未启用鉴权"，由调用方按监听地址另行提示）。
+func (c *Config) APIKeyWeakness() (placeholder, tooShort bool) {
+	k := strings.TrimSpace(c.APIKey)
+	if k == "" {
+		return false, false
+	}
+	if weakAPIKeys[strings.ToLower(k)] {
+		return true, false
+	}
+	return false, len(k) < minAPIKeyLen
+}
+
+// ListenIsLoopback 报告 listen 是否仅绑定本机回环（127.0.0.1 / localhost / ::1）。
+// 解析失败（非常规形态）返回 false，按"可能对外暴露"从严对待。
+func (c *Config) ListenIsLoopback() bool {
+	host, _, err := net.SplitHostPort(c.Listen)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(host) {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return false
 }

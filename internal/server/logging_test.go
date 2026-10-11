@@ -2,6 +2,7 @@ package server
 
 import (
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/reqlog"
 )
 
 // captureStdout 重定向 os.Stdout（连同 chatLogOut，见 SetChatLogOutput 的注入点）
@@ -166,12 +167,57 @@ func TestRequestMetricsCapturesClientInfo(t *testing.T) {
 	if len(s.Recent) != 1 {
 		t.Fatalf("recent = %+v", s.Recent)
 	}
-	if got := s.Recent[0].ClientIP; got != "203.0.113.7" {
-		t.Errorf("client ip = %q want 203.0.113.7 (XFF first hop)", got)
+	// 白名单为空（安全缺省）→ 伪造的 XFF **不被采信**，取直连地址
+	//（httptest.NewRequest 固定 RemoteAddr 192.0.2.1:1234）。这是 F-008 的核心：
+	// 攻击者不能靠一个请求头篡改来源记录与透传给上游的 IP。
+	if got := s.Recent[0].ClientIP; got != "192.0.2.1" {
+		t.Errorf("client ip = %q want 192.0.2.1（未配可信代理时 XFF 必须被忽略）", got)
 	}
 	if got := s.Recent[0].UserAgent; got != "python-requests/2.31.0" {
 		t.Errorf("user agent = %q", got)
 	}
+}
+
+// 直连来源在可信代理白名单内时，转发头**才**被采信（反代场景拿到真实客户端）。
+func TestRequestMetricsHonorsXFFWhenPeerTrusted(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	reqLog := reqlog.New(reqlog.Config{})
+	h := NewHandler(Config{
+		Pool:             testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:         up,
+		RequestLog:       reqLog,
+		RecordClientInfo: true,
+	})
+	old := trustedProxies
+	t.Cleanup(func() { trustedProxies = old })
+	SetTrustedProxies(mustParseTrustedProxies(t, []string{"192.0.2.1"}))
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[]}`))
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.0.0.1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	s := reqLog.Snapshot()
+	if len(s.Recent) != 1 {
+		t.Fatalf("recent = %+v", s.Recent)
+	}
+	if got := s.Recent[0].ClientIP; got != "203.0.113.7" {
+		t.Errorf("client ip = %q want 203.0.113.7（直连在白名单内 → 采信 XFF 首段）", got)
+	}
+}
+
+func mustParseTrustedProxies(t *testing.T, items []string) []*net.IPNet {
+	t.Helper()
+	nets, err := ParseTrustedProxies(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return nets
 }
 
 // 开关关闭时不采集来源（归档里不出现 IP/UA），但请求指标照常记录。
@@ -209,17 +255,35 @@ func TestClientIPForLogFallsBackToRemoteAddr(t *testing.T) {
 	if got := clientIPForLog(req); got != "198.51.100.9" {
 		t.Errorf("got %q want 198.51.100.9", got)
 	}
-	// 代理头优先（X-Real-IP 兜底 XFF）。
+	// 安全缺省（白名单为空）：转发头一律不采信 → 仍是直连地址。
+	req.Header.Set("X-Real-IP", "192.0.2.5")
+	if got := clientIPForLog(req); got != "198.51.100.9" {
+		t.Errorf("未配可信代理时 X-Real-IP 应被忽略: got %q want 198.51.100.9", got)
+	}
+	req.Header.Set("X-Forwarded-For", "192.0.2.9, 10.1.1.1")
+	if got := clientIPForLog(req); got != "198.51.100.9" {
+		t.Errorf("未配可信代理时 XFF 应被忽略: got %q want 198.51.100.9", got)
+	}
+	if got := clientIPForLog(nil); got != "" {
+		t.Errorf("nil request got %q want empty", got)
+	}
+}
+
+// 配了可信代理白名单、且直连落在白名单内时，转发头才生效（XFF 首段优先于 X-Real-IP）。
+func TestClientIPForLogTrustsWhenPeerTrusted(t *testing.T) {
+	old := trustedProxies
+	t.Cleanup(func() { trustedProxies = old })
+	SetTrustedProxies(mustParseTrustedProxies(t, []string{"198.51.100.0/24"}))
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req.RemoteAddr = "198.51.100.9:54321"
 	req.Header.Set("X-Real-IP", "192.0.2.5")
 	if got := clientIPForLog(req); got != "192.0.2.5" {
 		t.Errorf("X-Real-IP got %q want 192.0.2.5", got)
 	}
 	req.Header.Set("X-Forwarded-For", "192.0.2.9, 10.1.1.1")
 	if got := clientIPForLog(req); got != "192.0.2.9" {
-		t.Errorf("XFF got %q want 192.0.2.9", got)
-	}
-	if got := clientIPForLog(nil); got != "" {
-		t.Errorf("nil request got %q want empty", got)
+		t.Errorf("XFF 首段 got %q want 192.0.2.9", got)
 	}
 }
 
@@ -417,9 +481,16 @@ func TestChatLogsStreamRow(t *testing.T) {
 	}
 }
 
-func TestChatLogsSyncRowTTFBDash(t *testing.T) {
+// 非流式（sync）行的 TTFB 也必须**实测**。历史上这里恒为 "-"：handler 给
+// recordAttempt 硬传 0，导致 stream:false 客户端在 TTFB 趋势图上永远没有观测。
+// 现用与流式相同的 stats reader 包裹上游流来测量（上游本来就按 SSE 返回，
+// 只是聚合后一次性回给客户端）。
+func TestChatLogsSyncRowHasTTFB(t *testing.T) {
 	withChatLog(t)
+	// 假上游刻意延迟 5ms 再吐首帧：本地 loopback + 内存 fake 快到 TTFB 可能落在
+	// 同一时钟刻度上（实测 61.8µs → Milliseconds() 截断为 0），断言会随机失败。
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		time.Sleep(5 * time.Millisecond)
 		return 200, sseOK, true
 	})
 	h := NewHandler(Config{
@@ -434,10 +505,25 @@ func TestChatLogsSyncRowTTFBDash(t *testing.T) {
 			t.Fatalf("code=%d", rec.Code)
 		}
 	})
-	for _, want := range []string{"| sync |", "| 200 |", "TTFB=-", "tok=1"} {
+	for _, want := range []string{"| sync |", "| 200 |", "TTFB=", "tok=1"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("sync row missing %q:\n%s", want, out)
 		}
+	}
+	// 只检查 sync 那一行：captureStdout 捕获的是全局 stdout，同一次捕获里可能混入
+	// 其它 goroutine / 相邻用例的行（实测全量跑时会被 402 用例的 "TTFB=-" 误判）。
+	var syncRow string
+	for _, ln := range strings.Split(out, "\n") {
+		if strings.Contains(ln, "| sync |") {
+			syncRow = ln
+			break
+		}
+	}
+	if syncRow == "" {
+		t.Fatalf("未找到 sync 行:\n%s", out)
+	}
+	if strings.Contains(syncRow, "TTFB=-") {
+		t.Errorf("非流式行应实测 TTFB，不应是 \"-\"：%s", syncRow)
 	}
 }
 

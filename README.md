@@ -1,8 +1,4 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
-</p>
-
-<h1 align="center">WorkBuddy2API Panel</h1>
+<h1 align="center">StarPort 星港</h1>
 
 <p align="center">
   <b>把腾讯 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关 · 附 Web 管理面板</b><br>
@@ -18,7 +14,7 @@
 
 ---
 
-> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
+> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的独立维护增强版**（基于上游源码演进）。
 > 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
 > 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
 
@@ -45,7 +41,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
+StarPort 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「添加账号」或 `login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
@@ -193,7 +189,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 flowchart LR
     Client["客户端 / SDK\nOpenAI 兼容请求"] --> H
 
-    subgraph GWI["WorkBuddy2API 网关 :7863"]
+    subgraph GWI["StarPort 网关 :7863"]
         H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
         H --> S
         P["账号池\n快过期加权 · 成本分层 · 熔断 · 冷却 · 租约"] --> U
@@ -228,17 +224,17 @@ CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git
 mkdir -p auths data && cp config.example.json config.json
 #    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
 
-# 2. 拉取并运行
-docker run -d --name workbuddy2api \
-  -p 7863:7863 -e TZ=Asia/Shanghai \
+# 2. 拉取并运行（-p 绑定宿主机回环；容器内用 STARPORT_LISTEN 监听 0.0.0.0 以配合端口映射）
+docker run -d --name starport \
+  -p 127.0.0.1:7863:7863 -e TZ=Asia/Shanghai -e STARPORT_LISTEN=0.0.0.0:7863 \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/risinginsight/startport:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
 ```
 
-> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
+> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `startport` →
 > Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
 >
 > 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
@@ -248,8 +244,8 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
-cd workbuddy2api-panel
+git clone https://github.com/RisingInsight/startport.git
+cd startport
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
 cp config.example.json config.json
@@ -260,7 +256,7 @@ docker compose up -d --build
 
 # 4. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
-# {"healthy":0,"total":0,"service":"workbuddy2api"}
+# {"healthy":0,"total":0,"service":"starport"}
 ```
 
 启动后打开 **`http://localhost:7863/panel/`**，用面板「添加账号」完成登录（见下节）。
@@ -273,20 +269,28 @@ docker compose restart          # 重启
 docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
 ```
 
-### 方式二：Windows 单文件运行（无需 Docker）
+### 方式二：Windows 单文件运行（无需 Docker，双击即用）
 
 ```powershell
-# 1) 下载 Release 中的 wb2api.exe，或从源码构建
-go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
+# 1) 下载 Release 中的 starport.exe，或从源码构建
+go build -trimpath -ldflags="-s -w" -o starport.exe ./cmd/server
 
-# 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
-.\wb2api.exe -config config.json
+# 2) 双击 starport.exe 即可：启动服务并自动打开浏览器到管理面板
+#    首次启动自动生成 config.json（含随机 api_key）
+#    控制台窗口即服务窗口——关闭它 = 停止服务
 
-# 3) 浏览器打开面板添加账号
-#    http://127.0.0.1:7863/panel/
+# 3) 需要更多控制时走命令行：
+.\starport.exe -config config.json                 # 默认自动打开浏览器
+.\starport.exe -config config.json -open=false     # 不自动打开浏览器
 ```
 
-exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
+exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写（与 exe 同目录即可）。
+
+> 💡 **开机自启**：给 `starport.exe` 建快捷方式，放进 `Win+R` → 输入 `shell:startup` 的目录。
+> **重复双击**：若已有实例在运行，新实例会探测到并**直接打开面板后退出**（退出码 0），不会报端口错误。
+> **出错不闪退**：启动期致命错误（端口占用 / 配置损坏等）会打印原因并**等待回车**再退出，避免双击时窗口一闪而过。
+> Docker 容器内会自动跳过「打开浏览器」（容器无图形界面，不会刷无意义错误）。
+> ⚠️ **不要同时跑 Docker 与 exe**——两者都监听 `7863`，会端口冲突。
 
 ### 方式三：源码运行（开发调试）
 
@@ -300,7 +304,7 @@ go run ./cmd/server -config config.json
 构建全部二进制：
 
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o starport ./cmd/server
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
@@ -347,17 +351,21 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ## 配置说明
 
-**`config.example.json` 是配置项最完整的参考**：每个字段、默认值与结构都能在其中找到，示例值一律是 `test_key` 之类占位符，**不含任何真实密钥**。下表为字段含义速查。
+**`config.example.json` 是配置项最完整的参考**：每个字段、默认值与结构都能在其中找到，示例值一律是占位符（`api_key` 留空，首次运行会自动生成强随机密钥），**不含任何真实密钥**。下表为字段含义速查。
+
+> ⚠️ **启动期安全校验**：`api_key` 为已知占位符/弱口令（如 `test_key`、`changeme`、`password`）时**拒绝启动**；密钥过短（<16 字符）或「空密钥 + 非本机回环监听」会打印醒目告警。
 
 ### 字段速查
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `listen` | `:7863` | HTTP 监听地址 |
+| `listen` | `127.0.0.1:7863` | HTTP 监听地址。**默认仅本机回环**（避免跑起来就暴露给同网段）；局域网/公网访问需显式改为 `0.0.0.0:7863` 并**务必设置强 `api_key`** |
 | `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
+| `server.max_body_mb` | `0` | 入站请求体大小上限（MiB）；`0` = 不限制（缺省，保持「大请求体交由上游判定」的既有行为）。设为正值时经 `http.MaxBytesReader` 施加，超限返回 413——供公网/多租户部署防「单个超大 body 打爆内存」 |
+| `server.trusted_proxies` | `[]` | **可信反向代理网段**（CIDR 或单 IP，如 `127.0.0.1`、`10.0.0.0/8`）。空 = **从不采信** `X-Forwarded-For`/`X-Real-IP`（安全缺省）。见「反向代理与来源 IP」 |
 | `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
@@ -399,6 +407,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `session_sticky.enabled` | `true` | 会话粘性路由开关 |
 | `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
 | `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
+| `update.check_enabled` | `true` | 版本检查开关。**只提示、不自动下载**（无对应开关——安全红线）；关闭后不发起任何外网检查（离线/隐私场景） |
+| `update.check_interval_hours` | `6` | 版本检查间隔（小时）；`<=0` 回落 6 |
 
 ### 上游超时语义（三段各归其位）
 
@@ -412,9 +422,21 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 环境变量覆盖
 
-加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
+加载顺序：JSON 文件 → `STARPORT_*` 环境变量（变量非空才覆盖）：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+**服务基础**：`STARPORT_LISTEN` · `STARPORT_API_KEY` · `STARPORT_AUTH_DIR` · `STARPORT_STATE_FILE`
+
+**上游与超时**：`STARPORT_TIMEOUT_SECONDS` · `STARPORT_HEADER_TIMEOUT_SECONDS` · `STARPORT_IDLE_TIMEOUT_SECONDS` · `STARPORT_USER_AGENT` · `STARPORT_CLIENT_NAME` · `STARPORT_CLIENT_VERSION` · `STARPORT_CLI_VERSION`
+
+**提示词与脱敏**：`STARPORT_PROMPT_MODE` · `STARPORT_PROMPT_FILE` · `STARPORT_SANITIZE_FINGERPRINTS`(bool)
+
+**设备与指纹**：`STARPORT_DEVICE_TOKEN` · `STARPORT_DEVICE_TOKEN_FILE` · `STARPORT_PASSTHROUGH_IP`(bool)
+
+**池与过期**：`STARPORT_SOFT_RATE`(duration) · `STARPORT_SOFT_RATE_MAX`(duration) · `STARPORT_EXPIRING_SOON`(duration) · `STARPORT_PREFER_EXPIRING`(bool)
+
+**调试**：`STARPORT_DEBUG_CHAT`（非空即开启：把桌面指纹 chat 的出站请求头打到 stdout；`Authorization` / `X-Refresh-Token` / `X-Device-Token` 等敏感头已做掩码，仅保留前 8 字符）
+
+> `server.max_body_mb` 仅有 JSON 字段，**无对应环境变量覆盖**；如需调整请改 `config.json`。
 
 ## 核心行为语义
 
@@ -559,7 +581,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 - 一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务（领养前置）
 - 每号每天 1 次即可（单时点）：日活跃奖励按天去重，重复上报无额外收益
-- `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
+- `conversationId` 由网关生成（`starport-<ms>`），无需真实会话
 - 限速：账号间间隔 800ms（与旅行同口径）
 - **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（`report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败记 warn 但不影响主流程（上报按天幂等，不重试，只观测）
 - 手动诊断 / 补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
@@ -634,13 +656,30 @@ http://127.0.0.1:7863/panel/
 
 | 分组 | 端点 |
 |---|---|
-| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
+| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET update`（`?refresh=1` 强制检查）· `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
 | 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
+
+### 🔔 更新提醒（只提示，不自动下载）
+
+网关内置版本检查：后台每 `update.check_interval_hours`（默认 6h）从**固定可信源**读取最新发布版本，面板顶部在检出更高版本时显示可关闭的横幅（点 ✕ 记住「该版本已忽略」，出现更高版本仍会再提示）。
+
+**安全边界（务必保持）**：
+
+- **只「检查 + 提示」**，绝不自动下载或执行任何产物；更新动作由用户自行完成（`docker compose pull` 或重新下载 exe）
+- **固定可信源**：仅访问编译期硬编码的主机白名单（`api.github.com` / `github.com` / `raw.githubusercontent.com` / `cdn.jsdelivr.net`），强制 HTTPS，**禁止重定向到白名单外主机**；不接受任意 URL 配置
+- **版本单调**：只提示比当前更高的版本，且拒绝采用低于「已见最高版本」的响应（防降级 / 回放）；最高版本持久化到 `data/update-state.json`，跨重启仍生效
+- **失败静默降级**：网络不可达 / 限流 / 解析失败都不报错、不阻塞，保留上次结果
+- **链接自行拼装**：提示里的发布页链接由网关按固定仓库拼装（**不采用响应体里的 URL**），即使响应被篡改也无法把用户导向站外
+
+主源为 GitHub Releases API，兜底源为 jsDelivr 上的 `version.json`（国内可达性更好；发版时需同步更新该文件的 `version`）。
+
+> ⚠️ 产物签名校验（ed25519）与「一键更新」属后续阶段，需发布流水线配套；当前设计**不含自动下载**，因此不涉及产物校验。
+> 关闭更新检查：`update.check_enabled: false`（离线 / 隐私场景）。
 
 **安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
 
@@ -662,12 +701,12 @@ http://127.0.0.1:7863/panel/
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 
 ```json
-{"healthy": 2, "total": 3, "service": "workbuddy2api"}
+{"healthy": 2, "total": 3, "service": "starport"}
 ```
 
-响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
+响应同时带 `X-Service: starport` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
 
-**宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+**宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "starport"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
 
 ### 流式行为细节
 
@@ -736,7 +775,7 @@ http://127.0.0.1:7863/panel/
 
 多阶段镜像（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
 
-- **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
+- **starport**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
 - 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
 - 镜像内默认落 `config.example.json` 作为空配置（不含密钥），生产用挂载卷覆盖 `/app/config.json`
 - 内置 `HEALTHCHECK`（`wget /healthz`，30s 间隔）
@@ -799,18 +838,53 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 2. 网络暴露与日志敏感度
 
-- 默认监听 `:7863`，compose 暴露 `0.0.0.0:7863`，**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代 / 内网
+- 默认监听 `127.0.0.1:7863`（仅本机回环）；Docker 部署由 compose 的 `STARPORT_LISTEN=0.0.0.0:7863` 在容器内监听，宿主机端口绑定为 `127.0.0.1:7863` 收紧暴露面。**无内置 TLS**；公网部署必须设置强 `api_key`，建议前置反代 / 内网
+- 启动时拒绝占位符/弱口令 `api_key`（`test_key` 等），避免「照抄示例就上线」被白嫖
 - 请求日志字段：序号 / 模型 / 模式 / 状态码 / **uid 前 8 位** / TTFB / token 数——**不含** `accessToken` / `refreshToken` / `api_key` 明文（不读取 `Authorization` 头）
 - 日志写 **stdout / stderr**（容器内进入 `docker logs`），代码无任何落盘日志文件
 
-### 3. 发布来源与合规边界
+### 3. 反向代理与来源 IP（XFF 信任边界）
+
+`X-Forwarded-For` / `X-Real-IP` 是**客户端可任意伪造**的请求头。网关默认**从不采信**
+它们：来源一律取直连地址（`RemoteAddr`）。
+
+为什么：这两个头的取值会写进请求日志的来源列，并在 `upstream.passthrough_ip` 开启时
+**原样透传给上游**（`X-Forwarded-For` / `X-Real-IP` / `X-Client-IP`）。无条件采信等于让
+攻击者用一个请求头就能 (1) 伪造审计来源、(2) 决定「上游眼里我是谁」、污染上游风控判据。
+
+配了反向代理才需要声明代理网段（`config.json`）：
+
+```json
+{ "server": { "trusted_proxies": ["127.0.0.1", "10.0.0.0/8"] } }
+```
+
+- 同机反代（nginx / traefik 与网关同机）→ `["127.0.0.1"]`
+- 反代在 Docker 网络 → 加上该网段（如 `["172.18.0.0/16"]`）
+- **只有直连地址落在白名单内时**才读取转发头；否则一律忽略（伪造头失效）
+- 空数组（缺省）= 从不采信。配置解析失败直接启动失败，绝不 fail-open
+
+### 4. 出站地址的 SSRF 防护
+
+`global.chat_base` / `global.billing_base` 是用户可配的出站地址，且发往它们的请求
+**携带账号 Bearer**。网关在启动时校验这两项，拒绝：
+
+- 非 `http`/`https` 的 scheme（`file://`、`gopher://` 等）
+- 指向本机 / 内网 / 链路本地 / CGNAT / 保留网段的字面 IP（含 `169.254.169.254` 云元数据）
+- `localhost` / `*.local` / `*.internal` / `metadata.*` 等内部主机名
+
+空串 = 使用内置默认（合法）。校验失败直接启动失败。
+
+> 只做字面判定、**不解析 DNS**：解析耗时与失败模式不可控，且存在 TOCTOU（一次解析
+> 无法杜绝 DNS rebinding）。正常场景下这两个地址是公网域名。
+
+### 5. 发布来源与合规边界
 
 - **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
 - **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
-### 4. 授权使用边界
+### 6. 授权使用边界
 
 - 仅限**本人授权账号**、本机 / 私有环境测试
 - 不得共享、转售、违规分发，或用于违反目标平台条款的用途；**严禁批量注册账号做 API 业务、二次加壳或捆绑卡密售卖**——详见顶部[使用声明（必读）](#使用声明必读)
@@ -829,9 +903,10 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 多图会话请求体超限怎么办？
 
-网关**不再设请求体上限**（`server.max_body_mb` 已移除，对齐上游）：任意大小的请求体都会完整读入并转发上游，超限类问题由上游自然返回错误——其响应信息量更大（能看到上游的真实策略），网关不再以 413 提前拦截。
+网关**默认不设请求体上限**（`server.max_body_mb` 缺省 `0`，对齐上游）：任意大小的请求体都会完整读入并转发上游，超限类问题由上游自然返回错误——其响应信息量更大（能看到上游的真实策略），网关不以 413 提前拦截。
 
-- 多图/长上下文会话（历史图片每轮以 base64 重发，编码再膨胀约 37%）不会再撞网关侧 413
+- 多图/长上下文会话（历史图片每轮以 base64 重发，编码再膨胀约 37%）默认不会撞网关侧 413
+- **公网 / 多租户部署**建议设 `server.max_body_mb`（如 `64`）给一个宽松上限，防「单个超大 body 打爆内存」（安全官 F-011）；超限返回 413。`0` = 不限制（缺省，保持既有行为）
 - 若上游真的返回 413/超限错误，网关按既有错误分类链路如实透传（不打码、不罚号——超限是请求侧问题）
 - 客户端中途断流导致的半截 body 在读入阶段即报 `400 invalid_request`，不会把截断 JSON 喂给上游（issue #41 语义保留在读错误路径）
 
@@ -864,7 +939,7 @@ sudo chown -R 10001:10001 ./auths ./data ./config.json
 
 ### 如何让官网「使用端」列显示为 WorkBuddy？
 
-官网「使用端」列按出站请求 UA 服务端归因。配置 `upstream.user_agent: "WorkBuddy/2.x.x"`（或环境变量 `WB2A_USER_AGENT`）即可改写全部出站请求的 UA；默认保持 `CLI/2.63.2 CodeBuddy/2.63.2` 现状（指纹净化考虑，可配而非改死）。
+官网「使用端」列按出站请求 UA 服务端归因。配置 `upstream.user_agent: "WorkBuddy/2.x.x"`（或环境变量 `STARPORT_USER_AGENT`）即可改写全部出站请求的 UA；默认保持 `CLI/2.63.2 CodeBuddy/2.63.2` 现状（指纹净化考虑，可配而非改死）。
 
 ## 关键断言 ↔ 代码出处
 

@@ -3,43 +3,158 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>WorkBuddy2API · 控制台</title>
+<title>StarPort · 星港控制台</title>
+<!-- favicon：内联 data-URI SVG（复用 .brand-mark 的轨道 + 停泊点图形），零外部请求。
+     注意 # 必须编码为 %23，否则会被当作 URL 片段截断。 -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 22 22'%3E%3Ccircle cx='11' cy='11' r='4' fill='%23e8c56a'/%3E%3Cellipse cx='11' cy='11' rx='9.5' ry='3.6' fill='none' stroke='%236b8cff' stroke-width='1.2' transform='rotate(-18 11 11)'/%3E%3Ccircle cx='19' cy='7.6' r='1.3' fill='%23e8c56a'/%3E%3C/svg%3E">
 <style>
 /* ── 设计令牌：明暗两套独立色板 ─────────────────────────────────────────
-   冷石墨基调（仪表盘语言，非营销页）：底色分层 + 单一靛蓝强调（仅交互），
-   语义色只给状态。等宽数字承载所有观测值，tabular-nums 对齐。 */
+   深空蓝基调（星港仪表盘语言）：底色分层 + 靛蓝/星光金双强调（靛蓝仅交互，
+   金只做品牌点睛），语义色只给状态。等宽数字承载所有观测值，tabular-nums 对齐。 */
 :root {
-  --bg: #0c0e14; --surface: #14171f; --surface-2: #1a1e28; --raise: #202531;
-  --line: #262c3a; --line-soft: #1e232e;
-  --ink: #e8ebf2; --ink-2: #a8b0c2; --ink-3: #6b7488;
-  --accent: #5b7cfa; --accent-ink: #ffffff; --accent-soft: rgba(91,124,250,.13);
+  --bg: #0a0e1a; --surface: #101626; --surface-2: #151c30; --raise: #1b2440;
+  --line: #26304d; --line-soft: #1d2540;
+  --ink: #e9edf6; --ink-2: #a9b3cc; --ink-3: #7d87a6;
+  --accent: #6b8cff; --accent-ink: #ffffff; --accent-soft: rgba(107,140,255,.14);
+  --gold: #e8c56a; --gold-soft: rgba(232,197,106,.13);
   --ok: #3ddc97; --ok-soft: rgba(61,220,151,.12);
   --warn: #f5b544; --warn-soft: rgba(245,181,68,.12);
   --bad: #f0655f; --bad-soft: rgba(240,101,95,.12);
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.5);
-  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, monospace;
-  --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", "SF Mono", Consolas,
+          "Liberation Mono", Menlo, "Microsoft YaHei", "PingFang SC", monospace;
+  /* 字体栈：Latin/数字优先命中专用字体，中文在**末尾显式回退**。
+     不显式枚举的话，system-ui 在各 OS 指向不同字体；mono 栈则完全没有
+     中文字形，一旦等宽语境里出现中文就会"掉字"到不可预期的兜底字体。 */
+  --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei",
+          "Noto Sans CJK SC", "Hiragino Sans GB", sans-serif;
+  /* ── 派生语义令牌（v2 视觉刷新）────────────────────────────────────
+     全部由既有令牌派生，浅色主题各自覆盖，保证明暗自动适配。 */
+  --hi: var(--gold);        /* 数据高光色：把品牌金提为"重点数据"用色，不再只做署名 */
+  --cool: color-mix(in srgb, var(--accent) 34%, var(--ink-2)); /* 冷中性：非告警的"暂停/未启用"态 */
+  --ring: color-mix(in srgb, var(--accent) 42%, transparent);  /* 焦点环 */
+  --glass: color-mix(in srgb, var(--surface) 72%, transparent);/* 玻璃面（顶栏） */
+  --glass-line: color-mix(in srgb, var(--line) 68%, transparent);
+  --grid: rgba(107,140,255,.035);                              /* 星图网格线 */
+  --shadow-hover: 0 2px 4px rgba(0,0,0,.45), 0 18px 40px -16px rgba(0,0,0,.6);
+  /* ── v2 视觉层令牌（暗色）──────────────────────────────────────────
+     圆角 / 玻璃 / 发光 / 星空 / 图标轨尺寸。浅色主题必须各自覆盖一份，
+     保证两套主题令牌集合一致（--mono/--sans 字体栈是唯一例外）。 */
+  --r-card: 16px;                                              /* 卡片圆角（10→16） */
+  --glass-card: color-mix(in srgb, var(--surface) 78%, transparent); /* 玻璃卡面 */
+  --glass-strong: color-mix(in srgb, var(--surface) 88%, transparent); /* Hero/弹层更实 */
+  --glass-blur: 14px;                                          /* 玻璃模糊半径 */
+  --glow-accent: 0 0 24px -8px color-mix(in srgb, var(--accent) 60%, transparent);
+  --glow-gold: 0 0 24px -8px color-mix(in srgb, var(--gold) 55%, transparent);
+  --star-opacity: .5;                                          /* 星空层不透明度（compact=0） */
+  --star-drift: 120s;                                          /* 星空漂移周期 */
+  --rail: 72px;                                                /* 图标轨宽度（展开态覆写为 208px） */
+  --fs-num: 34px;                                              /* Hero 大数字字号 */
+  /* ── 排版阶梯 ───────────────────────────────────────────────────────
+     字号 14 档 → 8 档；字重 8 种 → 400/700 两档。为什么收敛：
+     ① 11.5/12.5/13.5/15.5 这类 .5px 档位相邻视觉上几乎不可区分，是"临时
+        微调痕迹"而非系统；
+     ② 550/620/640/650 属非标准字重——只提供 400/700 的中文字体（微软雅黑）
+        会按 CSS 字重匹配规则把它们强行映射，导致同一行里英文比中文轻/重的
+        层级错乱。中档强调改用**颜色或字号**表达，比赌字重可靠。
+     数字另有独立阶梯，跟随 --fs-num 缩放，保证大数字之间比例固定。 */
+  --fs-2xs: 11px;                            /* 表头 / 时间戳 / 角标 */
+  --fs-xs: 12px;                             /* badge / 次要信息 / 小标签 */
+  --fs-sm: 13px;                             /* 密集表格正文 / 控件 */
+  --fs-base: 14px;                           /* 正文 / 默认 UI */
+  --fs-md: 16px;                             /* 卡片标题 / 区块标题 */
+  --fs-lg: 20px;                             /* 弹层标题 / 环内大字 */
+  --fs-num-sm: calc(var(--fs-num) * .70);    /* ≈24px 次级大数字 */
+  --fs-num-md: calc(var(--fs-num) * .88);    /* ≈30px 统计卡 / 用量 KPI */
+  --fw-normal: 400;
+  --fw-bold: 700;                                              /* Hero 大数字字号 */
+  --pad-card: 18px;                                            /* 卡片内边距基数 */
+  --gap-card: 22px;                                            /* 区块间距基数 */
+  /* 分层背景（星港意象）：左上靛蓝微光 + 右下星光金微光 + 两层星点 + 极淡网格。
+     层序与 body 的 background-repeat/size 一一对应，改动时两边必须同步。 */
+  --bg-image:
+    radial-gradient(1100px 720px at 8% -6%, rgba(107,140,255,.12), transparent 60%),
+    radial-gradient(1000px 760px at 112% 112%, rgba(232,197,106,.07), transparent 62%),
+    radial-gradient(1.6px 1.6px at 40px 60px, rgba(233,237,246,.16), transparent 100%),
+    radial-gradient(1.2px 1.2px at 150px 180px, rgba(233,237,246,.11), transparent 100%),
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
 }
 [data-theme="light"] {
-  --bg: #f4f5f8; --surface: #ffffff; --surface-2: #f8f9fb; --raise: #ffffff;
-  --line: #e2e5ec; --line-soft: #eceef3;
-  --ink: #14171f; --ink-2: #545c6e; --ink-3: #8b93a5;
+  --bg: #f6f5f0; --surface: #fffdf9; --surface-2: #faf8f2; --raise: #ffffff;
+  --line: #e3e0d5; --line-soft: #eeebe1;
+  --ink: #1a1c22; --ink-2: #565b66; --ink-3: #686f81;
   --accent: #3d5fe0; --accent-ink: #ffffff; --accent-soft: rgba(61,95,224,.09);
+  --gold: #8f6906; --gold-soft: rgba(143,105,6,.07);
   --ok: #0f9d63; --ok-soft: rgba(15,157,99,.1);
   --warn: #b47611; --warn-soft: rgba(180,118,17,.11);
   --bad: #cf3b34; --bad-soft: rgba(207,59,52,.09);
   --shadow: 0 1px 2px rgba(16,20,32,.06), 0 8px 24px -14px rgba(16,20,32,.14);
+  /* 派生令牌：浅色下光晕 / 星点 / 网格整体更淡，避免发灰。 */
+  --hi: var(--gold);
+  --cool: color-mix(in srgb, var(--accent) 30%, var(--ink-2));
+  --ring: color-mix(in srgb, var(--accent) 38%, transparent);
+  --glass: color-mix(in srgb, var(--surface) 80%, transparent);
+  --glass-line: color-mix(in srgb, var(--line) 74%, transparent);
+  --grid: rgba(61,95,224,.03);
+  --shadow-hover: 0 2px 4px rgba(16,20,32,.08), 0 18px 40px -18px rgba(16,20,32,.2);
+  /* v2 视觉层令牌（浅色）：与暗色一一对应，玻璃更实、光晕更淡、星点更少。 */
+  --r-card: 16px;
+  --glass-card: color-mix(in srgb, var(--surface) 86%, transparent);
+  --glass-strong: color-mix(in srgb, var(--surface) 92%, transparent);
+  --glass-blur: 14px;
+  --glow-accent: 0 0 24px -8px color-mix(in srgb, var(--accent) 40%, transparent);
+  --glow-gold: 0 0 24px -8px color-mix(in srgb, var(--gold) 35%, transparent);
+  --star-opacity: .35;
+  --star-drift: 120s;
+  --rail: 72px;
+  --fs-num: 34px;
+  --pad-card: 18px;
+  --gap-card: 22px;
+  --bg-image:
+    radial-gradient(1100px 720px at 8% -6%, rgba(61,95,224,.07), transparent 60%),
+    radial-gradient(1000px 760px at 112% 112%, rgba(160,119,8,.06), transparent 62%),
+    radial-gradient(1.6px 1.6px at 40px 60px, rgba(26,28,34,.05), transparent 100%),
+    radial-gradient(1.2px 1.2px at 150px 180px, rgba(26,28,34,.035), transparent 100%),
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
 [hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
-  background: var(--bg); color: var(--ink); font: 14px/1.55 var(--sans);
+  color: var(--ink); font: var(--fs-base)/1.55 var(--sans);
   -webkit-font-smoothing: antialiased;
+  /* 分层背景：6 层，层序见 --bg-image 定义；repeat / size 与层序严格一一对应。
+     fixed 让背景在滚动时不错位；纯 CSS 零图片，避免大面积 blur 的性能开销。 */
+  background-color: var(--bg);
+  background-image: var(--bg-image);
+  background-repeat: no-repeat, no-repeat, repeat, repeat, repeat, repeat;
+  background-size: auto, auto, 220px 220px, 260px 260px, 46px 46px, 46px 46px;
+  background-position: 0 0, 0 0, 0 0, 0 0, 0 0, 0 0;
+  background-attachment: fixed;
 }
-::selection { background: var(--accent-soft); }
+::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); color: var(--ink); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+/* 自定义滚动条：滑块用 --line，悬停提亮到 --ink-3；轨道透明，滚到哪里都不抢内容。
+   #logBox / .req-wrap / .pk-expiry-chart / .tbl-wrap 等滚动区共用同一套。 */
+* { scrollbar-width: thin; scrollbar-color: var(--line) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--line); border-radius: 6px;
+  border: 2px solid transparent; background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-3); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }
+/* 主题切换过渡：只过渡颜色相关属性（**不用** * { transition: all }，会造成卡顿与
+   意外动画）。prefers-reduced-motion 的全局规则会把这里的 transition 一并关掉。 */
+body, .nav, .topbar, .stat, .kpi, input, select {
+  transition: background-color .18s ease, color .18s ease, border-color .18s ease;
+}
+/* 减动效兜底：必须显式列出伪元素——`*` 不匹配 ::before/::after，否则新加的
+   .nav a::before 金轨过渡（及历史 .dots::after blink）在减动效模式下仍会播放。 */
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; } }
 
 /* ── 壳层：左侧导航 + 主区 ─────────────────────────────────────────── */
 .shell { display: grid; grid-template-columns: 208px 1fr; min-height: 100vh; }
@@ -47,39 +162,76 @@ body {
   background: var(--surface); border-right: 1px solid var(--line);
   display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
 }
-.brand { padding: 20px 18px 16px; border-bottom: 1px solid var(--line-soft); }
-.brand .name { font-weight: 650; letter-spacing: -.01em; font-size: 15px; }
-.brand .sub { color: var(--ink-3); font-size: 11.5px; font-family: var(--mono); margin-top: 3px; }
-.nav ul { list-style: none; padding: 10px 8px; flex: 1; }
+.brand { padding: 20px 16px 16px; border-bottom: 1px solid var(--line-soft); }
+.brand-head { display: flex; align-items: center; gap: 10px; }
+.brand-mark {
+  width: 36px; height: 36px; flex: none; border-radius: 10px;
+  background: linear-gradient(150deg, var(--surface-2), var(--raise));
+  border: 1px solid var(--line);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
+}
+.brand-mark svg { width: 22px; height: 22px; display: block; animation: orbit 48s linear infinite; transform-origin: 50% 50%; }
+/* 品牌标记：轨道与停泊点极缓慢公转（周期 48s、无幅度突变），只做气质点缀。
+   prefers-reduced-motion 的全局 animation:none 会把它停住。 */
+@keyframes orbit { to { transform: rotate(360deg); } }
+.brand-name {
+  font-weight: 700; font-size: var(--fs-md); letter-spacing: .04em; line-height: 1.2;
+  /* 品牌名渐变文字：StarPort 走 ink→gold 渐变；两主题下两端都取自主题令牌，
+     浅色下自动变深，仍可读。仅用于品牌名，正文不用。 */
+  background: linear-gradient(96deg, var(--ink) 0%, color-mix(in srgb, var(--gold) 88%, var(--ink)) 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+/* 「星港」保持纯金：显式覆盖父级继承来的透明填充色。 */
+.brand-name .zh { color: var(--gold); font-weight: 700; margin-left: 6px; letter-spacing: .12em; -webkit-text-fill-color: var(--gold); }
+.brand .sub { color: var(--ink-3); font-size: var(--fs-xs); font-family: var(--mono);
+  margin-top: 8px; white-space: nowrap; }
+.nav ul { list-style: none; padding: 12px 9px; flex: 1; }
 .nav a {
-  display: flex; align-items: center; gap: 10px; padding: 8px 11px; margin-bottom: 2px;
-  color: var(--ink-2); text-decoration: none; border-radius: 7px; font-size: 13.5px;
+  position: relative;
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px; margin-bottom: 3px;
+  color: var(--ink-2); text-decoration: none; border-radius: 7px; font-size: var(--fs-base);
+  transition: background-color .15s ease, color .15s ease;
+}
+/* 活动指示器：金色竖轨。left:0 贴在药丸左缘内侧，靠 transform 居中，不挤文字对齐；
+   高度由 0 → 16px 过渡（.18s），比单纯换背景更能一眼定位当前页。 */
+.nav a::before {
+  content: ''; position: absolute; left: 0; top: 50%;
+  width: 3px; height: 0; border-radius: 0 3px 3px 0;
+  background: var(--gold); opacity: 0; transform: translateY(-50%);
+  transition: height .18s ease, opacity .18s ease;
 }
 .nav a:hover { background: var(--surface-2); color: var(--ink); }
-.nav a.on { background: var(--accent-soft); color: var(--accent); font-weight: 550; }
+.nav a.on { background: var(--accent-soft); color: var(--accent); font-weight: 700; }
+.nav a.on::before { height: 16px; opacity: 1; }
 .nav a svg { width: 15px; height: 15px; flex: none; opacity: .85; }
-.nav .sig { padding: 12px 16px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--ink-3); }
+.nav .sig { padding: 14px 16px; border-top: 1px solid var(--line-soft); font-size: var(--fs-xs); color: var(--ink-3); }
 .nav .sig .row { display: flex; align-items: center; gap: 7px; }
+/* 侧栏底部"关于"块：品牌署名 + 运行时长/泊位数（由 app.js 随 overview 填充） */
+.nav .about { padding: 0 16px 12px; font-size: var(--fs-xs); color: var(--ink-3); line-height: 1.7; }
+.nav .about .ver { font-family: var(--mono); color: var(--gold); }
+.nav .about span[id] { font-variant-numeric: tabular-nums; }
 /* 日志频道筛选 chips */
 .chips { display: inline-flex; gap: 4px; align-items: center; }
 .chips .chip { padding: 2px 10px; border-radius: 999px; }
-.chips .chip.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 550; }
-.ln .lch { font-style: normal; display: inline-block; font-size: 10px; line-height: 1; padding: 2px 6px; border-radius: 4px; margin-right: 8px; vertical-align: 1px; }
+.chips .chip.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; font-weight: 700; }
+.ln .lch { font-style: normal; display: inline-block; font-size: var(--fs-2xs); line-height: 1; padding: 2px 6px; border-radius: 4px; margin-right: 8px; vertical-align: 1px; }
 .ln .lch.c-task { background: var(--accent-soft); color: var(--accent); }
 .ln .lch.c-chat { background: var(--ok-soft); color: var(--ok); }
 .ln .lch.c-sys { background: var(--surface-2); color: var(--ink-3); }
 
 /* 任务中心 */
-.tc-empty { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 42px 16px; color: var(--ink-3); }
-.tc-empty svg { width: 42px; height: 42px; opacity: .55; margin-bottom: 6px; }
-.tc-empty .t { font-weight: 550; color: var(--ink-2); }
-.tc-empty .d { font-size: 12.5px; max-width: 34em; text-align: center; }
-.sel-note { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-3); white-space: nowrap; flex: none; }
+.tc-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 52px 16px; color: var(--ink-3); }
+.tc-empty svg { width: 44px; height: 44px; opacity: .4; margin-bottom: 8px; }
+.tc-empty .t { font-weight: 700; color: var(--ink-2); }
+.tc-empty .d { font-size: var(--fs-sm); max-width: 34em; text-align: center; }
+.sel-note { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-xs); color: var(--ink-3); white-space: nowrap; flex: none; }
 .sel-note select {
   appearance: none; -webkit-appearance: none;
   background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23888' stroke-width='1.6' stroke-linecap='round'/%3E%3C/svg%3E") no-repeat right 8px center;
   border: 1px solid var(--line); border-radius: 7px; color: var(--ink);
-  font: 550 12px var(--sans); padding: 3px 24px 3px 9px; cursor: pointer;
+  font: 700 var(--fs-xs) var(--sans); padding: 3px 24px 3px 9px; cursor: pointer;
 }
 .qprog { display: flex; align-items: center; gap: 12px; padding: 12px 16px 0; }
 .qprog .qbar { flex: 1; height: 4px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
@@ -91,19 +243,19 @@ body {
   display: flex; align-items: baseline; gap: 9px; padding: 10px 16px 6px;
   background: none; border: none; box-shadow: none;
 }
-.qgroup header .nm { font-weight: 600; font-size: 13.5px; }
-.qgroup header .cnt { font-size: 12px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.qgroup header .nm { font-weight: 700; font-size: var(--fs-base); }
+.qgroup header .cnt { font-size: var(--fs-xs); color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .qrow {
   display: grid; grid-template-columns: 118px 1fr 52px 84px minmax(120px, 240px);
-  gap: 10px; align-items: center; padding: 7.5px 16px; font-size: 13px;
+  gap: 10px; align-items: center; padding: 7.5px 16px; font-size: var(--fs-sm);
 }
 .qrow:hover { background: var(--surface-2); }
-.qrow .code { font: 11.5px/1.35 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qrow .code { font: var(--fs-xs)/1.35 var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qrow .name { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .qrow .name .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qrow .prog { font-variant-numeric: tabular-nums; color: var(--ink-2); text-align: right; }
 .qrow .st { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-.qrow .msg { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qrow .msg { font-size: var(--fs-xs); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .qdot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
 .qdot.done { background: var(--ok); }
 .qdot.run { background: var(--accent); animation: qpulse 1.2s ease-in-out infinite; }
@@ -114,23 +266,23 @@ body {
 @media (prefers-reduced-motion: reduce) { .qdot.run { animation: none; } }
 .srow { display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto; gap: 14px; align-items: center; padding: 13px 16px; }
 .srow + .srow { border-top: 1px solid var(--line-soft); }
-.srow .who .nm { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.srow .who .nm { font-weight: 700; font-size: var(--fs-base); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srow .who .id { font: 10.5px var(--mono); color: var(--ink-3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shead {
   display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto;
   gap: 14px; align-items: center; padding: 9px 16px 7px;
-  font-size: 11.5px; color: var(--ink-3); border-bottom: 1px solid var(--line-soft);
+  font-size: var(--fs-xs); color: var(--ink-3); border-bottom: 1px solid var(--line-soft);
 }
 .shead .stasks span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stasks { display: grid; grid-template-columns: repeat(5, minmax(64px, 1fr)); gap: 6px 10px; }
-.stask { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
-.stask .mark { font-size: 13px; line-height: 1; width: 14px; text-align: center; flex: none; }
+.stask { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--ink-2); }
+.stask .mark { font-size: var(--fs-sm); line-height: 1; width: 14px; text-align: center; flex: none; }
 .stask.ok .mark { color: var(--ok); }
 .stask.warn .mark { color: var(--warn); } .stask.warn .fr { color: var(--warn); font-variant-numeric: tabular-nums; }
 .stask.todo { color: var(--ink-3); }
-.srow .luck { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.srow .luck { display: flex; align-items: center; gap: 5px; font-size: var(--fs-sm); color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .srow .luck svg { width: 14px; height: 14px; opacity: .7; }
-.srow .err { grid-column: 1 / -1; font-size: 12px; color: var(--bad); margin-top: -4px; }
+.srow .err { grid-column: 1 / -1; font-size: var(--fs-xs); color: var(--bad); margin-top: -4px; }
 .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); flex: none; }
 .pulse.bad { background: var(--bad); }
 .pulse.warn { background: var(--warn); }
@@ -138,13 +290,28 @@ body {
 .main { min-width: 0; display: flex; flex-direction: column; }
 .topbar {
   display: flex; align-items: center; gap: 14px; padding: 14px 24px;
-  border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0; z-index: 20;
+  border-bottom: 1px solid var(--glass-line);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  position: sticky; top: 0; z-index: 20;
 }
-.topbar h2 { font-size: 15.5px; font-weight: 620; letter-spacing: -.01em; }
+/* 不支持 backdrop-filter 时回退为不透明面，避免半透明底导致文字发虚。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .topbar { background: var(--surface); }
+}
+.topbar h2 { font-size: var(--fs-md); font-weight: 700; letter-spacing: -.015em; }
 .topbar .sep { color: var(--ink-3); }
-.topbar .meta { color: var(--ink-3); font-size: 12px; font-family: var(--mono); }
+.topbar .meta { color: var(--ink-3); font-size: var(--fs-xs); font-family: var(--mono); }
 .topbar .grow { flex: 1; }
-.view { padding: 22px 24px 60px; max-width: 1560px; margin: 0 auto; width: 100%; }
+/* 更新提示横幅：非模态、可关闭；仅在检出更高版本时显示（app.js 控制 hidden）。 */
+.updbanner { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 9px 14px;
+  background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  border-radius: 10px; font-size: var(--fs-sm); color: var(--ink-2); }
+.updbanner .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.updbanner .grow { flex: 1; }
+.updbanner a { color: var(--accent); text-decoration: none; font-weight: 400; }
+.updbanner a:hover { text-decoration: underline; }
+.view { padding: 22px 24px 60px; max-width: 1680px; margin: 0 auto; width: 100%; }
 .view[hidden] { display: none; }
 
 /* ── 控件 ─────────────────────────────────────────────────────────── */
@@ -155,49 +322,62 @@ button {
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .5; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 550; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 700; }
 button.primary:hover:not(:disabled) { filter: brightness(1.08); }
 button.ghost { background: transparent; }
 button.danger { color: var(--bad); }
 button.danger:hover:not(:disabled) { border-color: var(--bad); }
-button.xs { padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; white-space: nowrap; }
+button.xs { padding: 3.5px 9px; font-size: var(--fs-sm); border-radius: 6px; white-space: nowrap; }
 /* select.xs：header 里的紧凑选择框。通用 input/select 规则是 width:100%（表单页用），
    header 里若不收窄会把同行 note 挤到换行——收成内容宽并压小外观，与 button.xs 同款。 */
-select.xs { width: auto; padding: 3.5px 9px; font-size: 12.5px; border-radius: 6px; }
+select.xs { width: auto; padding: 3.5px 9px; font-size: var(--fs-sm); border-radius: 6px; }
 button.icon { padding: 7px 9px; }
 input, select {
   font: inherit; color: var(--ink); background: var(--surface-2);
   border: 1px solid var(--line); border-radius: 7px; padding: 7px 11px; width: 100%;
 }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--ring); }
 input.invalid { border-color: var(--bad); background: var(--bad-soft); }
 input.invalid:focus { border-color: var(--bad); }
 input[type=checkbox] { width: auto; accent-color: var(--accent); }
 label.fld { display: block; margin-bottom: 14px; }
-label.fld > .lb { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
-label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; }
+label.fld > .lb { display: block; font-size: var(--fs-sm); color: var(--ink-2); margin-bottom: 5px; }
+label.fld > .hint { display: block; font-size: var(--fs-xs); color: var(--ink-3); margin-top: 4px; }
 .inline { display: flex; align-items: center; gap: 9px; }
 
 /* ── 统计条（观测区）──────────────────────────────────────────────── */
-.stats {
-  display: grid; grid-template-columns: repeat(7, 1fr);
-  border: 1px solid var(--line); border-radius: 11px; background: var(--surface);
-  overflow: hidden; margin-bottom: 20px; box-shadow: var(--shadow);
-}
-@media (max-width: 980px) { .stats { grid-template-columns: repeat(3, 1fr); } }
-@media (max-width: 560px) { .stats { grid-template-columns: repeat(2, 1fr); } }
-.stat { padding: 14px 17px; border-right: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
-.stat .v { font: 600 26px/1.15 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; white-space: nowrap; }
-.stat .k { color: var(--ink-3); font-size: 11.5px; margin-top: 5px; }
+/* 统计条已并入 Hero 的一行 7 指标（.hero-metrics），这里不再需要容器样式。 */
+/* 入场动效：轻抬 + 淡入，仅 transform/opacity，不引起布局抖动。 */
+@keyframes rise { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+.stat { padding: 14px 17px; animation: rise .28s ease both; }
+/* 错峰入场：每项 +30ms，最长 180ms，避免长尾等待。 */
+.stat:nth-child(1) { animation-delay: 0ms; }
+.stat:nth-child(2) { animation-delay: 30ms; }
+.stat:nth-child(3) { animation-delay: 60ms; }
+.stat:nth-child(4) { animation-delay: 90ms; }
+.stat:nth-child(5) { animation-delay: 120ms; }
+.stat:nth-child(6) { animation-delay: 150ms; }
+.stat:nth-child(7) { animation-delay: 180ms; }
+.stat .v { font: 700 var(--fs-num-sm)/1.15 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; white-space: nowrap; }
+.stat .k { color: var(--ink-3); font-size: var(--fs-xs); margin-top: 5px; }
 .stat.good .v { color: var(--ok); } .stat.warn .v { color: var(--warn); } .stat.bad .v { color: var(--bad); }
+/* 「已暂停选号」只关选号、照常保号，是中性状态而非告警——用冷中性色与「冷却中」的
+   琥珀 warn 区分，避免两条统计条语义撞色（issue：两者原本都用 .stat.warn）。 */
+.stat.pause .v { color: var(--cool); }
 
 /* ── 面板块 ───────────────────────────────────────────────────────── */
-.box { background: var(--surface); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); margin-bottom: 20px; overflow: hidden; }
+.box {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 11px;
+  box-shadow: var(--shadow); margin-bottom: var(--gap-card); overflow: hidden;
+  transition: transform .14s ease, box-shadow .14s ease, border-color .18s ease, background-color .18s ease;
+}
+/* 悬停轻微抬升：只用 transform/box-shadow，不改变布局、不推挤相邻卡片。 */
+.box:hover { transform: translateY(-1px); box-shadow: var(--shadow-hover); }
 .box > header { display: flex; align-items: center; gap: 12px; padding: 12px 17px; border-bottom: 1px solid var(--line-soft); }
-.box > header h3 { font-size: 13.5px; font-weight: 600; }
-.box > header h3 .hint { font-size: 11.5px; font-weight: 400; color: var(--ink-3); margin-left: 6px; }
+.box > header h3 { font-size: var(--fs-base); font-weight: 700; letter-spacing: -.01em; }
+.box > header h3 .hint { font-size: var(--fs-xs); font-weight: 400; color: var(--ink-3); margin-left: 6px; }
 .box > header .grow { flex: 1; }
-.box > header .note { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+.box > header .note { color: var(--ink-3); font-size: var(--fs-xs); white-space: nowrap; }
 /* 面板块头部的下拉/输入按内容取宽：全局 input/select 是 width:100%（配置表单要整行），
    在 header 里会把标题挤成两行、把"近 3 天"这类短选项拉成一整条。 */
 .box > header select, .box > header input { width: auto; }
@@ -206,9 +386,9 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 
 /* ── 账号表（签名元素：健康色条 + 积分量条）───────────────────────── */
 .tbl-wrap { overflow-x: auto; }
-.acc { width: 100%; border-collapse: collapse; font-size: 13px; min-width: 640px; }
+.acc { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); min-width: 640px; }
 .acc th {
-  text-align: left; font-weight: 500; font-size: 11.5px; color: var(--ink-3);
+  text-align: left; font-weight: 400; font-size: var(--fs-xs); color: var(--ink-3);
   padding: 9px 11px; border-bottom: 1px solid var(--line); white-space: nowrap;
 }
 .acc td { padding: 11px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
@@ -225,6 +405,34 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc.md .mark { display: none; }
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
 .acc .c-acts { width: 1px; white-space: nowrap; }
+/* 操作列固定右侧：.tbl-wrap 横向滚动时操作按钮始终可见，不再被容器右缘裁掉。
+   单元格自带底色（否则滚动内容会从它下面透出来），左缘一道渐隐阴影提示"浮在内容之上"。 */
+/* 操作列原本宽达 332px（6 个文字按钮一行排开），是整表溢出的主因。
+   给列定宽 + 让按钮换到第二行，列宽直接砍半，且不丢任何按钮文字。
+   （td 上不能直接设 display:flex——会破坏表格布局，所以按钮外面套了 .acts-wrap。） */
+.acc th.c-acts,
+.acc td.acts {
+  position: sticky; right: 0; z-index: 2;
+  background: var(--surface);
+  box-shadow: -10px 0 12px -10px rgba(0,0,0,.5);
+}
+.acc th.c-acts { z-index: 3; width: 112px; }
+.acts-wrap { display: flex; flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: 6px; }
+/* 「⋯」更多操作：行内只留 1 个主操作 + 它，其余按钮收进浮层菜单。
+   6 个文字按钮平铺会把这一列撑到 332px（占整表 1/3）、行高从 52px 抬到 92px，
+   且换行后左缘参差、危险操作（移除）抢占第一视线。 */
+.act-more { min-width: 30px; padding: 3px 8px; font-size: var(--fs-md); line-height: 1; letter-spacing: .08em; }
+/* 行内菜单模板（hidden）与浮层菜单共用样式；浮层挂 body，用 fixed 定位。 */
+.acts-menu {
+  min-width: 128px; padding: 6px;
+  background: var(--raise); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 18px 44px -18px rgba(0,0,0,.62);
+  display: flex; flex-direction: column; gap: 3px;
+}
+body > .acts-menu { position: fixed; z-index: 70; }
+.acts-menu .xs { justify-content: flex-start; text-align: left; }
+.acts-menu .sep { height: 1px; background: var(--line-soft); margin: 3px 2px; }
+.acc tbody tr:hover td.acts { background: var(--surface-2); }
 /* 档位标签列：允许换行在标签之间（不拆字），并给足最小宽度 */
 .acc .efs { min-width: 150px; }
 .acc .efs .tag { margin: 1px 0; }
@@ -234,42 +442,49 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .who { min-width: 118px; max-width: 200px; }
 #taskTable .who { max-width: 360px; }
 #taskTable .who .nm, #taskTable .who .id { white-space: normal; word-break: break-all; }
-.who .nm { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.who .id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.realm-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 500 10px/1 var(--sans); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); vertical-align: 1px; }
+.who .nm { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.who .id { font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-3); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.realm-tag { display: inline-block; margin-left: 6px; padding: 1px 5px; border-radius: 4px; font: 400 var(--fs-2xs)/1 var(--sans); color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent); vertical-align: 1px; }
 .realm-row { display: flex; align-items: center; gap: 14px; padding: 4px 0 10px; }
-.realm-opt { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
+.realm-opt { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-sm); color: var(--ink-2); cursor: pointer; }
 .realm-opt input { accent-color: var(--accent); margin: 0; }
 .num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-.usage-cell { min-width: 268px; }
+/* 等宽数字统一开启表格数字 + 风格集 1，保证纵向对齐（mono 栈下 tnum 多为默认，
+   显式声明以兼容各系统回退字体）。 */
+.num, .stat .v, .kpi .v, .cred .n, .pk-card .big, .pk-expiry-row > b,
+.usage-line, .qrow .prog, .srow .luck, .nav .about span[id] { font-feature-settings: "tnum" 1, "ss01" 1; }
+/* 四个胶囊（次数 / token / 延迟 / 速率）允许换到第二行，列宽因此可以收窄一半而不丢信息。
+   原先 white-space:nowrap + min-width:268px 在"导航展开 + 窗口偏窄"时会把这一列挤扁，
+   末尾的速率胶囊被直接切掉。 */
+.usage-cell { min-width: 140px; }
 .usage-line {
-  display: inline-flex; align-items: center; gap: 4px; max-width: 100%;
-  font: 600 11.5px/1.25 var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap;
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 5px; max-width: 100%;
+  font: 700 var(--fs-xs)/1.25 var(--mono); font-variant-numeric: tabular-nums;
 }
 .usage-item {
   display: inline-flex; align-items: baseline; padding: 3px 6px; border: 1px solid transparent;
   border-radius: 5px; background: var(--surface-2);
 }
-.usage-item b { font-weight: 650; }
-.usage-item em { margin-left: 2px; font: 500 10px/1 var(--sans); font-style: normal; }
+.usage-item b { font-weight: 700; }
+.usage-item em { margin-left: 2px; font: 400 var(--fs-2xs)/1 var(--sans); font-style: normal; }
 .usage-count { color: var(--accent); background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 18%, transparent); }
 .usage-total {
   color: var(--accent); background: var(--accent-soft);
   border-color: color-mix(in srgb, var(--accent) 24%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 6%, transparent);
 }
-.usage-total b { font-size: 12px; letter-spacing: -.02em; }
+.usage-total b { font-size: var(--fs-xs); letter-spacing: -.02em; }
 .usage-total em { color: var(--ink-2); }
 .usage-latency { color: var(--warn); background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 18%, transparent); }
 .usage-rate { color: var(--ok); background: var(--ok-soft); border-color: color-mix(in srgb, var(--ok) 18%, transparent); }
 .cred { min-width: 84px; }
-.cred .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
-.cred .n .of { color: var(--ink-3); font-size: 11px; }
+.cred .n { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: var(--fs-sm); white-space: nowrap; }
+.cred .n .of { color: var(--ink-3); font-size: var(--fs-2xs); }
 .bar { height: 3px; background: var(--line); border-radius: 2px; margin-top: 5px; overflow: hidden; max-width: 88px; }
 .bar i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
 .tag {
   display: inline-flex; align-items: center; gap: 5px; padding: 1px 9px;
-  border-radius: 999px; font-size: 11.5px; font-weight: 500; white-space: nowrap;
+  border-radius: 999px; font-size: var(--fs-xs); font-weight: 400; white-space: nowrap;
 }
 .tag.ok { background: var(--ok-soft); color: var(--ok); }
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
@@ -279,21 +494,21 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .rate-limit {
   display: flex; align-items: baseline; gap: 6px; padding: 4px 7px;
   border: 1px solid color-mix(in srgb, var(--warn) 24%, var(--line));
-  border-radius: 6px; background: var(--warn-soft); font-size: 11.5px; line-height: 1.35;
+  border-radius: 6px; background: var(--warn-soft); font-size: var(--fs-xs); line-height: 1.35;
 }
 .rate-limit.model-unavailable { border-color: var(--line); background: var(--surface-2); color: var(--ink-3); }
-.rate-limit b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+.rate-limit b { color: var(--ink); font-family: var(--mono); font-weight: 700; }
 .rate-limit span { color: var(--ink-2); }
 .acts { display: flex; gap: 5px; justify-content: flex-end; white-space: nowrap; }
-.acts button { padding: 3.5px 8px; font-size: 12.5px; white-space: nowrap; flex: none; }
+.acts button { padding: 3.5px 8px; font-size: var(--fs-sm); white-space: nowrap; flex: none; }
 
-.empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
-.empty .big { font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }
+.empty { padding: 46px 20px; text-align: center; color: var(--ink-3); }
+.empty .big { font-size: var(--fs-base); color: var(--ink-2); margin-bottom: 6px; }
 
 /* ── 日志（终端质感）────────────────────────────────────────────── */
 #logBox {
   max-height: 420px; overflow: auto; margin: 0; padding: 15px 17px;
-  font: 12px/1.75 var(--mono); white-space: pre-wrap; word-break: break-all; color: var(--ink-2);
+  font: var(--fs-xs)/1.75 var(--mono); white-space: pre-wrap; word-break: break-all; color: var(--ink-2);
 }
 #logBox .ln { display: block; }
 #logBox .ln.e { color: var(--bad); }
@@ -308,17 +523,17 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 16px; }
 @media (max-width: 860px) { .grid2, .grid3 { grid-template-columns: 1fr; } }
 fieldset { border: none; margin-bottom: 6px; }
-legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom: 10px; }
+legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding-bottom: 10px; }
 .hr { height: 1px; background: var(--line-soft); margin: 4px 0 16px; }
 .switch { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; }
-.switch .lb { font-size: 13.5px; }
+.switch .lb { font-size: var(--fs-base); }
 .savebar {
   display: flex; align-items: center; gap: 12px; padding: 13px 17px;
   border-top: 1px solid var(--line-soft); background: var(--surface-2);
   position: sticky; bottom: 0;
 }
 .savebar .grow { flex: 1; }
-.restart-note { color: var(--warn); font-size: 12.5px; }
+.restart-note { color: var(--warn); font-size: var(--fs-sm); }
 
 /* ── 弹层 ─────────────────────────────────────────────────────────── */
 .veil { position: fixed; inset: 0; background: rgba(6,8,13,.62); backdrop-filter: blur(2px); display: none; z-index: 60; }
@@ -329,13 +544,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   box-shadow: 0 24px 64px -24px rgba(0,0,0,.6);
 }
 .dlg header { padding: 17px 20px 13px; border-bottom: 1px solid var(--line-soft); }
-.dlg header h3 { font-size: 15px; font-weight: 620; }
-.dlg header .hint { color: var(--ink-3); font-size: 12.5px; margin-top: 5px; }
+.dlg header h3 { font-size: var(--fs-md); font-weight: 700; letter-spacing: -.015em; }
+.dlg header .hint { color: var(--ink-3); font-size: var(--fs-sm); margin-top: 5px; }
 .dlg .body { padding: 18px 20px; overflow: auto; }
 .dlg footer { padding: 13px 20px; border-top: 1px solid var(--line-soft); display: flex; gap: 10px; }
 .dlg footer .grow { flex: 1; }
 .dlg .tabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-left: 10px; vertical-align: middle; }
-.dlg .tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
+.dlg .tabs .tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 700 var(--fs-sm) var(--sans); cursor: pointer; }
 .dlg .tabs .tab.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.25); }
 .tab-panel + .tab-panel { border-top: 1px solid var(--line-soft); margin: 0 -20px; padding: 14px 20px 0; }
 .url {
@@ -343,27 +558,27 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   padding: 11px 13px; font: 12px var(--mono); word-break: break-all; color: var(--accent);
   margin: 8px 0 12px; user-select: all;
 }
-.state { font-size: 13px; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
+.state { font-size: var(--fs-sm); color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .state.ok { color: var(--ok); } .state.err { color: var(--bad); }
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
 @keyframes blink { 0% { opacity: 1; } 50% { opacity: .3; } 100% { opacity: 1; } }
 
 /* ── 券码弹窗（票券式卡片，类名全部 vc- 前缀防越界）────────────────── */
 .vc-acct { display: flex; align-items: baseline; gap: 7px; margin: 18px 2px 8px;
-  font-size: 12px; color: var(--ink-3); }
+  font-size: var(--fs-xs); color: var(--ink-3); }
 .vc-acct:first-child { margin-top: 4px; }
-.vc-acct .nm { font-weight: 650; font-size: 13px; color: var(--ink-2); }
+.vc-acct .nm { font-weight: 700; font-size: var(--fs-sm); color: var(--ink-2); }
 .vc { border: 1px solid var(--line); border-radius: 11px; overflow: hidden; margin: 0 0 10px;
   background: var(--surface); transition: border-color .15s; }
 .vc:hover { border-color: var(--accent); }
 .vc .hd { display: flex; align-items: center; gap: 8px; padding: 12px 14px 4px; }
-.vc .hd .nm { font-weight: 640; font-size: 14px; }
+.vc .hd .nm { font-weight: 700; font-size: var(--fs-base); }
 .vc .hd .tag { margin-left: auto; }
-.vc .meta { padding: 2px 14px 10px; font-size: 11.5px; color: var(--ink-3); }
+.vc .meta { padding: 2px 14px 10px; font-size: var(--fs-xs); color: var(--ink-3); }
 .vc .sep { border-top: 1px dashed var(--line); margin: 0 12px; }
 .vc .ft { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
-.vc .ft .lab { font-size: 11.5px; color: var(--ink-3); flex: none; }
-.vc .ft code { font: 600 15px/1 var(--mono); letter-spacing: 1.2px; user-select: all;
+.vc .ft .lab { font-size: var(--fs-xs); color: var(--ink-3); flex: none; }
+.vc .ft code { font: 700 var(--fs-md)/1 var(--mono); letter-spacing: 1.2px; user-select: all;
   background: var(--surface-2); border: 1px solid var(--line-soft);
   border-radius: 7px; padding: 7px 12px; }
 .vc .ft .acts { margin-left: auto; display: flex; gap: 8px; flex: none; }
@@ -377,8 +592,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 #toasts { position: fixed; right: 20px; bottom: 20px; z-index: 90; display: flex; flex-direction: column; gap: 8px; align-items: flex-end; }
 .tst {
   background: var(--raise); border: 1px solid var(--line); border-left: 3px solid var(--ink-3);
-  border-radius: 8px; padding: 10px 15px; font-size: 13px; box-shadow: var(--shadow); max-width: 380px;
+  border-radius: 8px; padding: 10px 15px; font-size: var(--fs-sm); box-shadow: var(--shadow); max-width: 380px;
+  animation: toastIn .22s ease both;
 }
+/* Toast 入场：轻抬 + 淡入（transform/opacity，不动布局）。 */
+@keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 .tst.ok { border-left-color: var(--ok); } .tst.err { border-left-color: var(--bad); }
 
 @media (max-width: 760px) {
@@ -400,16 +618,17 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     position: relative; min-width: 0; overflow: hidden;
     background: var(--surface-2); border: 1px solid var(--line-soft);
     border-radius: 10px; padding: 11px 14px 12px 16px;
+    animation: rise .28s ease both;
   }
   .kpi::before {
     content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
     background: var(--kpi-c, var(--ink-3)); opacity: .9;
   }
-  .kpi .k { font-size: 11.5px; color: var(--ink-3); white-space: nowrap;
+  .kpi .k { font-size: var(--fs-xs); color: var(--ink-3); white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
-  .kpi .v { font: 600 23px/1.15 var(--mono); font-variant-numeric: tabular-nums;
+  .kpi .v { font: 700 var(--fs-num-sm)/1.15 var(--mono); font-variant-numeric: tabular-nums;
     letter-spacing: -.02em; margin-top: 5px; white-space: nowrap; }
-  .kpi .s { font-size: 11px; color: var(--ink-3); margin-top: 4px; white-space: nowrap;
+  .kpi .s { font-size: var(--fs-2xs); color: var(--ink-3); margin-top: 4px; white-space: nowrap;
     overflow: hidden; text-overflow: ellipsis; }
   .kpi.c-accent { --kpi-c: var(--accent); } .kpi.c-accent .v { color: var(--accent); }
   .kpi.c-ok { --kpi-c: var(--ok); } .kpi.c-ok .v { color: var(--ok); }
@@ -419,6 +638,22 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   /* 中性但带一点主色：用于 prompt / 平均延迟这类"要看但不抢眼"的指标——
      纯灰轨在深色主题下几乎看不见，纯主色又会让六张卡都在喊。 */
   .kpi.c-soft { --kpi-c: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  /* KPI 入场错峰：最多 6 张卡，末位 150ms。 */
+  .kpi:nth-child(1) { animation-delay: 0ms; }
+  .kpi:nth-child(2) { animation-delay: 30ms; }
+  .kpi:nth-child(3) { animation-delay: 60ms; }
+  .kpi:nth-child(4) { animation-delay: 90ms; }
+  .kpi:nth-child(5) { animation-delay: 120ms; }
+  .kpi:nth-child(6) { animation-delay: 150ms; }
+  /* 用量总览的「总 token」是这页的头号指标（第 2 张卡）：色轨与数值提为数据高光色
+     （品牌金），让"最重要的那张卡"一眼可辨；其余卡仍走各自语义色。 */
+  /* 「总 token」卡是这页的头号指标：色轨/数值用 --hi，再加一层极淡金底强化层级。
+     用"金色叠加层 + --surface-2 卡面"而非替换底色，保住卡片本身的质感。 */
+  #usStats .kpi:nth-child(2) {
+    --kpi-c: var(--hi);
+    background: linear-gradient(0deg, var(--gold-soft), var(--gold-soft)), var(--surface-2);
+  }
+  #usStats .kpi:nth-child(2) .v { color: var(--hi); }
   /* KPI 内的构成条（总 token 卡的 prompt/completion 占比） */
   .kpi .kbar { display: flex; height: 4px; border-radius: 3px; overflow: hidden;
     background: var(--line); margin-top: 7px; }
@@ -427,9 +662,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .uschart { border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden;
     background: var(--surface-2); }
   .uschart-hd { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
-    border-bottom: 1px solid var(--line-soft); font-size: 12px; }
-  .uschart-hd .lb { color: var(--ink-2); font-weight: 600; }
-  .uschart-hd .legend { color: var(--ink-3); font-size: 11.5px; display: flex; align-items: center; gap: 6px; }
+    border-bottom: 1px solid var(--line-soft); font-size: var(--fs-xs); }
+  .uschart-hd .lb { color: var(--ink-2); font-weight: 700; }
+  .uschart-hd .legend { color: var(--ink-3); font-size: var(--fs-xs); display: flex; align-items: center; gap: 6px; }
   .uschart-hd .legend .sep { width: 1px; height: 11px; background: var(--line); margin: 0 3px; }
   .uschart-hd .sw { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
   .uschart-hd .sw-p { background: var(--accent); }
@@ -442,10 +677,19 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .uschart-body .avg { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 4 4; opacity: .55; }
   .uschart-body .tk { fill: var(--ink-3); font: 10px var(--mono); }
   .uschart-body .tk-avg { fill: var(--warn); font: 10px var(--mono); opacity: .9; }
-  .uschart-body .tk-peak { fill: var(--ink-2); font: 600 10px var(--mono); }
+  .uschart-body .tk-peak { fill: var(--hi); font: 700 var(--fs-2xs) var(--mono); }
   .uschart-body rect.usbar { transition: opacity .12s; }
   .uschart-body rect.usbar:hover { opacity: .78; }
-  .uschart-body .us-empty { padding: 30px 0; text-align: center; color: var(--ink-3); font-size: 12.5px; }
+  /* 缓存命中率 / TTFB 双联趋势图（renderHealthChart）。 */
+  .uschart-body .usgrid { stroke: var(--line); stroke-width: 1; }
+  .uschart-body text.usax { fill: var(--ink-3); font: 10px var(--mono); }
+  .uschart-body text.usax.l { text-anchor: end; }
+  .uschart-body text.usax.c { text-anchor: middle; }
+  .uschart-body text.usax.t { fill: var(--ink-2); font-weight: 700; }
+  .uschart-body rect.ushit { fill: url(#hGradHit); transition: opacity .12s; }
+  .uschart-body rect.usttfb { fill: url(#hGradTTFB); transition: opacity .12s; }
+  .uschart-body rect.ushit:hover, .uschart-body rect.usttfb:hover { opacity: .78; }
+  .uschart-body .us-empty { padding: 30px 0; text-align: center; color: var(--ink-3); font-size: var(--fs-sm); }
 
   /* 用量表内的 prompt/completion 占比条。用 .us-mix 而不是复用账号池的 .bar：
      全局 .bar 是块级容器（积分条），同优先级下会互相覆盖（v1.9.0 回归）。 */
@@ -463,16 +707,16 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .pk-card { flex: 1 1 220px; min-width: 200px; border: 1px solid var(--line-soft);
     border-radius: 8px; padding: 11px 13px; }
   .pk-card .who { display: flex; align-items: baseline; gap: 7px; margin-bottom: 7px; }
-  .pk-card .nm { font-weight: 600; font-size: 13px; }
-  .pk-card .realm { font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
-  .pk-card .big { font: 600 24px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
-  .pk-card .sub { font-size: 11.5px; color: var(--ink-3); margin-top: 3px; }
+  .pk-card .nm { font-weight: 700; font-size: var(--fs-sm); }
+  .pk-card .realm { font-size: var(--fs-2xs); color: var(--ink-3); font-family: var(--mono); }
+  .pk-card .big { font: 700 var(--fs-num-sm)/1.1 var(--mono); font-variant-numeric: tabular-nums; }
+  .pk-card .sub { font-size: var(--fs-xs); color: var(--ink-3); margin-top: 3px; }
   .pk-card .mixbar { display: flex; height: 7px; border-radius: 4px; overflow: hidden;
     margin-top: 8px; background: var(--surface-2); }
   .pk-card .mixbar i { display: block; height: 100%; }
-  .pk-card .err { color: var(--warn); font-size: 12px; }
+  .pk-card .err { color: var(--warn); font-size: var(--fs-xs); }
   .pk-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 7px;
-    font-size: 11px; color: var(--ink-3); }
+    font-size: var(--fs-2xs); color: var(--ink-3); }
   .pk-legend span { display: flex; align-items: center; gap: 5px; }
   .pk-legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
   .pk-group-summary td { padding: 7px 11px; background: var(--surface-2); }
@@ -486,25 +730,32 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     overscroll-behavior: contain; }
   .pk-expiry-hdr { display: grid; grid-template-columns: 64px minmax(80px, 1fr) 72px;
     align-items: center; gap: 9px; margin-bottom: 4px; color: var(--ink-3);
-    font-size: 11px; }
-  .pk-expiry-hdr > b { text-align: right; font-weight: 600; }
+    font-size: var(--fs-2xs); }
+  .pk-expiry-hdr > b { text-align: right; font-weight: 700; }
   .pk-expiry-row { display: grid; grid-template-columns: 64px minmax(80px, 1fr) 72px;
     align-items: center; gap: 9px; min-height: 30px; padding-right: 2px; }
-  .pk-expiry-row > span { color: var(--ink-3); font-size: 11.5px; }
-  .pk-expiry-row > b { text-align: right; font: 600 11.5px var(--mono);
+  .pk-expiry-row > span { color: var(--ink-3); font-size: var(--fs-xs); }
+  .pk-expiry-row > b { text-align: right; font: 700 var(--fs-xs) var(--mono);
     font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  /* 临期档位：1 天内=强提醒（琥珀底），7 天内=次一级；=0 置灰
+     ——"当前无临期积分"同样是有用信息。 */
+  .pk-expiry-row.is-urgent { background: var(--warn-soft); border-radius: 6px; }
+  .pk-expiry-row.is-urgent > span { color: var(--warn); font-weight: 700; }
+  .pk-expiry-row.is-urgent > b { color: var(--warn); }
+  .pk-expiry-row.is-near > span { color: var(--ink-2); font-weight: 700; }
+  .pk-expiry-row.is-empty { opacity: .55; }
   .pk-expiry-track { display: flex; align-items: stretch; gap: 2px; height: 9px;
     border-radius: 5px; background: var(--surface-2); overflow: hidden; }
   .pk-expiry-seg { display: block; min-width: 3px; height: 100%; cursor: default;
     background: var(--seg-color, var(--accent)); transition: filter .15s, transform .15s; }
   .pk-expiry-seg:hover { filter: brightness(1.12); transform: scaleY(1.35); }
   .pk-expiry-legend { display: flex; flex-wrap: wrap; gap: 5px 12px; margin-top: 8px;
-    color: var(--ink-3); font-size: 11px; }
+    color: var(--ink-3); font-size: var(--fs-2xs); }
   .pk-expiry-legend span { display: inline-flex; align-items: center; gap: 5px; }
   .pk-expiry-legend i { width: 9px; height: 9px; border-radius: 3px; flex: 0 0 9px; }
   .pk-expiry-foot { margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line-soft);
-    color: var(--ink-3); font-size: 11px; }
-  .pk-expiry-empty { padding: 22px 0; text-align: center; color: var(--ink-3); font-size: 12px; }
+    color: var(--ink-3); font-size: var(--fs-2xs); }
+  .pk-expiry-empty { padding: 22px 0; text-align: center; color: var(--ink-3); font-size: var(--fs-xs); }
   .pk-card .expirybar { display: flex; height: 5px; border-radius: 3px; overflow: hidden;
     margin-top: 6px; background: var(--surface-2); }
   .pk-card .expirybar i { display: block; height: 100%; min-width: 2px; }
@@ -517,12 +768,12 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
     padding: 10px 17px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2);
   }
   .fbar > input, .fbar > select {
-    width: auto; padding: 5px 10px; font-size: 12.5px; border-radius: 6px;
+    width: auto; padding: 5px 10px; font-size: var(--fs-sm); border-radius: 6px;
   }
   .fbar > input[type=search] { min-width: 200px; flex: 0 1 280px; }
   .fbar > input[type=search]::-webkit-search-cancel-button { cursor: pointer; }
   .fbar .grow { flex: 1; }
-  .fbar .flab { color: var(--ink-3); font-size: 12px; white-space: nowrap; }
+  .fbar .flab { color: var(--ink-3); font-size: var(--fs-xs); white-space: nowrap; }
   .fbar select { cursor: pointer; }
   /* 用量总览的头部在「自定义」态会多出两个时间输入框：允许换行，宁可整组折到
      下一行，也不要把标题挤成两行、把下拉压成窄条。
@@ -540,9 +791,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
      自定义态下在窄屏会整体折到下一行，而不是把标题挤扁。 */
   .trange { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .trange .tr-custom { display: inline-flex; align-items: center; gap: 6px; }
-  .trange .tr-sep { color: var(--ink-3); font-size: 12px; }
-  .trange select, .trange input { width: auto; padding: 5px 9px; font-size: 12.5px; border-radius: 6px; }
-  .trange input[type=datetime-local] { font-family: var(--mono); font-size: 12px; }
+  .trange .tr-sep { color: var(--ink-3); font-size: var(--fs-xs); }
+  .trange select, .trange input { width: auto; padding: 5px 9px; font-size: var(--fs-sm); border-radius: 6px; }
+  .trange input[type=datetime-local] { font-family: var(--mono); font-size: var(--fs-xs); }
   /* 原生日期选择器的弹出面板要跟随明暗主题，否则深色下是一块刺眼的白。 */
   .trange input[type=datetime-local] { color-scheme: light; }
   [data-theme="dark"] .trange input[type=datetime-local] { color-scheme: dark; }
@@ -552,7 +803,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .vtabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 8px; padding: 3px; }
   .vtabs button {
     padding: 3.5px 13px; border: none; background: transparent; border-radius: 6px;
-    color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer;
+    color: var(--ink-3); font: 700 var(--fs-sm) var(--sans); cursor: pointer;
   }
   .vtabs button:hover:not(:disabled) { border: none; color: var(--ink); }
   .vtabs button.on { background: var(--surface); color: var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.22); }
@@ -568,8 +819,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .req-wrap { max-height: 460px; overflow: auto; }
   .req-wrap thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
   .clip { display: block; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .clip.ip { max-width: 150px; font-family: var(--mono); font-size: 12.5px; }
-  .clip.rid { max-width: 150px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+  .clip.ip { max-width: 150px; font-family: var(--mono); font-size: var(--fs-sm); }
+  .clip.rid { max-width: 150px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-3); }
   .acc.req .muted { color: var(--ink-3); }
   .src-off { color: var(--warn); }
 
@@ -577,50 +828,563 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
   /* 到期提醒卡片（首页）：每账号一行，色点=危险度，正文数字用 mono 对齐。 */
   .exp-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0;
-    font-size: 12.5px; }
+    font-size: var(--fs-sm); }
   .exp-row + .exp-row { border-top: 1px solid var(--line-soft); }
   .exp-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; flex: none; }
-  .exp-nm { font-weight: 600; flex: none; min-width: 9em; }
+  .exp-nm { font-weight: 700; flex: none; min-width: 9em; }
   .exp-main { color: var(--ink-2, inherit); }
   .exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-  .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
+  .exp-main .note { margin-top: 2px; font-size: var(--fs-2xs); color: var(--ink-3); line-height: 1.6; }
   .exp-main.err { color: var(--bad); }
 
+/* ══════════════════════════════════════════════════════════════════════
+   v2 视觉层（整段集中放在文件末尾，便于整体回退）
+   ──────────────────────────────────────────────────────────────────────
+   本层只做「覆盖」不做「改写」：新增令牌在 :root / [data-theme=light] 各一份，
+   既有选择器语义一律不动，靠更靠后的同优先级规则覆盖。分区：
+     1. 风格开关（compact / cozy / vivid）
+     2. 星空漂移层
+     3. 图标轨导航
+     4. 顶栏 / 玻璃拟态 / 发光
+     5. Hero 概览带 + 进度环
+     6. 统计卡（大号数字 + 迷你趋势线）
+     7. 账号表视觉刷新
+     8. 用量页（DeepSeek 轻量语言）
+     9. 响应式兜底
+   ══════════════════════════════════════════════════════════════════════ */
+
+/* ── 1. 风格开关：三档令牌覆写 ─────────────────────────────────────
+   cozy 是默认档（不改任何令牌，维持既有节奏）；compact 收紧密度并关星空/重发光；
+   vivid 放开星空与玻璃/发光。选择器一律用 :root[data-style=...]，避免误伤
+   带 data-* 的其它元素。 */
+:root[data-rail="open"] { --rail: 208px; }
+:root[data-style="compact"] {
+  --pad-card: 13px; --gap-card: 14px; --fs-num: 26px;
+  --star-opacity: 0; --glass-blur: 8px;
+}
+:root[data-style="vivid"] {
+  --star-opacity: 1; --star-drift: 90s; --glass-blur: 20px; --fs-num: 38px;
+  /* 玻璃更透、发光更强：都基于 --surface/--accent/--gold 派生，两套主题通用。 */
+  --glass-card: color-mix(in srgb, var(--surface) 64%, transparent);
+  --glass-strong: color-mix(in srgb, var(--surface) 76%, transparent);
+  --glow-accent: 0 0 36px -6px color-mix(in srgb, var(--accent) 85%, transparent);
+  --glow-gold: 0 0 36px -6px color-mix(in srgb, var(--gold) 80%, transparent);
+}
+:root[data-style="compact"] body { font-size: var(--fs-sm); }
+:root[data-style="compact"] .view { padding: 14px 16px 44px; }
+:root[data-style="compact"] .box > header { padding: 9px 13px; }
+:root[data-style="compact"] .acc td { padding: 9px 10px; }
+:root[data-style="compact"] .hero { padding: 14px 18px; }
+:root[data-style="compact"] .box:hover { transform: none; box-shadow: var(--shadow-hover); }
+:root[data-style="vivid"] .box:hover { box-shadow: var(--shadow-hover), var(--glow-accent); }
+:root[data-style="vivid"] .hero {
+  box-shadow: var(--shadow), var(--glow-gold);
+  border-color: color-mix(in srgb, var(--gold) 34%, var(--glass-line));
+}
+:root[data-style="vivid"] .nav a.on { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent), var(--glow-accent); }
+:root[data-style="vivid"] .ring .val { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--accent) 80%, transparent)); }
+
+/* ── 2. 星空漂移层 ─────────────────────────────────────────────────
+   body::before 铺一层可平铺的星点阵列，用 transform 缓慢平移（GPU 合成，
+   不触发重排/重绘大面积像素）。inset:-30% 让图层比视口大，漂移时不露边。
+   幅度极小、周期 90–120s，长时间盯屏不干扰。compact 档 --star-opacity:0 关闭。
+   禁止大面积 filter: blur()——这里完全不用。 */
+body::before {
+  content: ''; position: fixed; inset: -30%; z-index: 0; pointer-events: none;
+  background-image:
+    radial-gradient(1.5px 1.5px at 24px 32px, color-mix(in srgb, var(--ink) 70%, transparent), transparent 100%),
+    radial-gradient(1.2px 1.2px at 168px 96px, color-mix(in srgb, var(--ink) 55%, transparent), transparent 100%),
+    radial-gradient(1px 1px at 92px 214px, color-mix(in srgb, var(--gold) 60%, transparent), transparent 100%),
+    radial-gradient(1.3px 1.3px at 268px 268px, color-mix(in srgb, var(--accent) 55%, transparent), transparent 100%),
+    radial-gradient(1px 1px at 210px 20px, color-mix(in srgb, var(--ink) 45%, transparent), transparent 100%);
+  background-repeat: repeat;
+  background-size: 320px 320px, 380px 380px, 300px 300px, 420px 420px, 260px 260px;
+  opacity: var(--star-opacity);
+  animation: starDrift var(--star-drift) linear infinite;
+}
+@keyframes starDrift {
+  from { transform: translate3d(0, 0, 0); }
+  to   { transform: translate3d(-46px, -64px, 0); }
+}
+/* 极光层（仅 vivid）：两团极淡的靛蓝/金色光斑缓慢呼吸平移，拉开与 cozy 的观感差距。
+   cozy / compact 下 opacity:0 且不挂动画，零开销。 */
+body::after {
+  content: ''; position: fixed; inset: -20%; z-index: 0; pointer-events: none; opacity: 0;
+  background:
+    radial-gradient(620px 420px at 16% 18%, color-mix(in srgb, var(--accent) 26%, transparent), transparent 62%),
+    radial-gradient(720px 520px at 86% 82%, color-mix(in srgb, var(--gold) 18%, transparent), transparent 62%);
+  transition: opacity .5s ease;
+}
+:root[data-style="vivid"] body::after { opacity: 1; animation: aurora 26s ease-in-out infinite alternate; }
+@keyframes aurora {
+  from { transform: translate3d(-2%, -1.5%, 0) scale(1); }
+  to   { transform: translate3d(2%, 2%, 0) scale(1.07); }
+}
+/* 内容层抬到星空之上（.shell 建立层叠上下文，内部 topbar/veil 的相对层级不变）。 */
+.shell { position: relative; z-index: 1; }
+
+/* ── 3. 图标轨导航 ─────────────────────────────────────────────────
+   .shell 首列改为 auto，宽度由 .nav 的 width:var(--rail) 决定，
+   过渡 width 即可平滑展开/收起（比动画 grid-template-columns 兼容性更好）。 */
+.shell { grid-template-columns: auto 1fr; }
+.nav { width: var(--rail); transition: width .22s ease; overflow: hidden; }
+.brand { position: relative; }
+.brand-head { min-width: 0; }
+.brand-txt { min-width: 0; overflow: hidden; }
+.brand-name { white-space: nowrap; }
+/* 品牌 lockup：轨道标记缓慢自转 + 字标 + 金色「星港」。 */
+.brand-mark {
+  border-radius: 12px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), var(--glow-gold);
+}
+/* 图标轨收起态：只留图标；每个链接靠 title 给 tooltip。
+   文字/副标/关于块改用「透明度 + 最大尺寸」过渡隐藏，而不是 display:none 硬切——
+   硬切会让展开时文字先出现、而导航宽度还没撑开，于是被裁掉一半，非常难看。
+   收起 = 先淡出(80ms) → 再收尺寸；展开 = 先撑尺寸(220ms) → 再淡入(延迟 200ms)。 */
+.brand-txt,
+.nav .lbl,
+.brand .sub,
+.nav .about,
+.nav .sig span:not(.pulse) {
+  overflow: hidden;
+  white-space: nowrap;
+  max-width: 240px;
+  max-height: 240px;
+  transition: opacity .1s ease .2s, max-width .22s ease, max-height .22s ease,
+              padding .22s ease, margin .22s ease;
+}
+:root[data-rail="closed"] .brand-txt,
+:root[data-rail="closed"] .nav .lbl,
+:root[data-rail="closed"] .brand .sub,
+:root[data-rail="closed"] .nav .about,
+:root[data-rail="closed"] .nav .sig span:not(.pulse) {
+  max-width: 0; max-height: 0; opacity: 0;
+  padding: 0; margin: 0;
+  pointer-events: none;
+  transition: opacity .08s ease, max-width .2s ease .1s, max-height .2s ease .1s,
+              padding .2s ease .1s, margin .2s ease .1s;
+}
+/* 收起态把 flex 间距归零：文字宽度归零后，图标与状态点仍能精确居中，不产生偏移。 */
+:root[data-rail="closed"] .nav a,
+:root[data-rail="closed"] .brand-head,
+:root[data-rail="closed"] .nav .sig .row { gap: 0; }
+:root[data-rail="closed"] .brand { padding: 18px 0 14px; }
+:root[data-rail="closed"] .brand-head { justify-content: center; }
+:root[data-rail="closed"] .nav ul { padding: 12px 8px; }
+:root[data-rail="closed"] .nav a { justify-content: center; padding: 11px 0; }
+:root[data-rail="closed"] .nav a svg { width: 18px; height: 18px; opacity: .92; }
+:root[data-rail="closed"] .nav .sig { justify-content: center; padding: 12px 0; }
+:root[data-rail="closed"] .nav .sig .row { justify-content: center; }
+:root[data-rail="open"] .nav a { justify-content: flex-start; }
+/* 图标轨上的活动指示：左侧金色竖轨（沿用既有 .nav a::before 语义）。 */
+.nav a svg { transition: transform .16s ease, opacity .16s ease; }
+.nav a:hover svg { transform: translateY(-1px); opacity: 1; }
+/* 收起/展开切换按钮。 */
+.rail-toggle {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  width: 100%; margin-top: 12px; padding: 7px 10px; border-radius: 9px;
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+  color: var(--ink-3); font: 700 var(--fs-xs) var(--sans); cursor: pointer;
+}
+.rail-toggle:hover:not(:disabled) { border-color: var(--accent); color: var(--ink); }
+.rail-toggle svg { width: 14px; height: 14px; flex: none; transition: transform .22s ease; }
+:root[data-rail="open"] .rail-toggle svg { transform: rotate(180deg); }
+:root[data-rail="closed"] .rail-toggle { width: 40px; margin: 12px auto 0; padding: 7px 0; }
+:root[data-rail="closed"] .rail-toggle .lbl { display: none; }
+
+/* ── 4. 顶栏 / 玻璃拟态 / 发光 ────────────────────────────────────── */
+.topbar { padding: 15px 26px; }
+/* 玻璃拟态：卡片/弹层/Hero 半透明面 + backdrop-filter；不支持时回退不透明。 */
+.box, .dlg, .hero, .stat {
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+}
+.box { background: var(--glass-card); border-radius: var(--r-card); }
+.dlg { background: var(--glass-strong); border-radius: 18px; }
+.hero { background: var(--glass-strong); border-radius: var(--r-card); }
+/* 卡片内边距走 --pad-card（17→18，compact 档自动收到 13）。 */
+.box .pad { padding: var(--pad-card); }
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .box { background: var(--surface); }
+  .dlg, .hero { background: var(--surface); }
+}
+/* 主按钮轻微渐变 + 柔和发光。 */
+button.primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, #fff), var(--accent));
+  box-shadow: 0 1px 0 rgba(255,255,255,.14) inset, 0 6px 18px -10px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) inset, var(--glow-accent); }
+/* 风格开关控件（与主题按钮并列）。 */
+.seg {
+  display: inline-flex; gap: 2px; padding: 3px; border-radius: 10px;
+  background: var(--surface-2); border: 1px solid var(--line-soft);
+}
+.seg button {
+  border: none; background: transparent; color: var(--ink-3);
+  font: 700 var(--fs-xs) var(--sans); padding: 4px 10px; border-radius: 7px; cursor: pointer;
+  transition: color .14s ease, background-color .14s ease;
+}
+.seg button:hover:not(:disabled) { border: none; color: var(--ink); }
+.seg button.on { background: var(--surface); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.22); }
+
+/* ── 5. Hero 概览带 + 进度环 ──────────────────────────────────────── */
+.hero {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  padding: 22px 26px; margin-bottom: var(--gap-card);
+  border: 1px solid var(--glass-line); box-shadow: var(--shadow);
+  position: relative; overflow: hidden;
+}
+/* 左侧极淡靛蓝光晕，强化「星港」质感；纯装饰、不挡交互。 */
+.hero::after {
+  content: ''; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(560px 200px at 0% 0%, var(--accent-soft), transparent 70%);
+}
+.hero > * { position: relative; z-index: 1; }
+.hero-brand { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; min-width: 0; }
+.hero-title { display: flex; align-items: center; gap: 12px; }
+.hero-mark {
+  width: 40px; height: 40px; flex: none; border-radius: 12px;
+  background: linear-gradient(150deg, var(--surface-2), var(--raise));
+  border: 1px solid var(--line); display: flex; align-items: center; justify-content: center;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.06), var(--glow-gold);
+}
+.hero-mark svg { width: 24px; height: 24px; display: block; animation: orbit 60s linear infinite; transform-origin: 50% 50%; }
+.hero-h { font-size: var(--fs-md); font-weight: 700; letter-spacing: .01em; }
+.hero-h .zh { color: var(--gold); margin-left: 6px; letter-spacing: .12em; }
+.hero-sub { color: var(--ink-3); font-size: var(--fs-xs); font-family: var(--mono); margin-top: 3px; }
+.hero-status { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--ink-2); }
+/* 进度环：SVG 圆环，--p（0-100）驱动 stroke-dashoffset。r=40 → 周长≈251.2。 */
+/* 圆环独立成区：左侧一条发丝线把它与数字组分开，消除"悬在中间"的突兀感。
+   线用 ::before 绝对定位绘制（不用 border/padding），以免 box-sizing 挤压环本身。 */
+.hero-ring { position: relative; width: 72px; height: 72px; flex: none; margin-left: 18px; }
+.hero-ring::before {
+  content: ''; position: absolute; left: -14px; top: 4%; bottom: 4%; width: 1px;
+  background: var(--line-soft);
+}
+.ring { width: 100%; height: 100%; display: block; transform: rotate(-90deg); }
+.ring circle { fill: none; stroke-width: 9; }
+.ring .trk { stroke: var(--line); }
+.ring .val {
+  stroke: var(--accent); stroke-linecap: round;
+  stroke-dasharray: 251.2;
+  stroke-dashoffset: calc(251.2 - 251.2 * var(--p, 0) / 100);
+  transition: stroke-dashoffset .7s cubic-bezier(.4, 0, .2, 1);
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 55%, transparent));
+}
+.ring-txt {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 1px; pointer-events: none;
+}
+.ring-txt b { font: 700 var(--fs-lg)/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.ring-txt span { font-size: var(--fs-2xs); color: var(--ink-3); letter-spacing: .06em; }
+/* 右侧关键数字：等宽大字号、字距收紧、tnum 对齐。 */
+/* 4 列不是等分：「积分剩余 / 总额」要放 "4394 / 4800" 这类长串，给它 1.7 份宽，
+   否则会被 ellipsis 截成 "4394 / 48…"；列间距同时加大，避免与「实时在途」贴在一起。 */
+/* 一行 7 指标：品牌块在左、可用率环在右，中间全部指标用竖线分隔。
+   字号走 --fs-num-sm（≈24px）——一行要同时容纳品牌 + 7 项 + 环，34px 放不下。
+   窄屏整块换行（见响应式段），指标不会被挤碎。 */
+.hero-metrics { display: flex; align-items: stretch; flex-wrap: wrap; flex: 1 1 auto; min-width: 0; }
+.hero-metrics .stat {
+  flex: 1 1 0; min-width: 0; padding: 0 8px; border: none; animation: none;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.hero-metrics .stat:first-child { padding-left: 2px; }
+.hero-metrics .stat + .stat { border-left: 1px solid var(--line-soft); }
+.hero-metrics .stat .v { font-size: var(--fs-num-sm); }
+.hero-metrics .stat .k { font-size: var(--fs-2xs); }   /* 标签是 caption：11px 换来的宽度给了总额 */
+.hero-metrics .stat.wide { flex: 2.3 1 0; }
+.hero-metrics .stat.accent .v { color: var(--accent); }
+/* 「积分剩余 / 总额」的总额是次要值：缩小后整串才放得下。 */
+.hero-metrics .stat .v .of { color: var(--ink-3); font-size: 1em; }   /* 总额与主值同号（靠去掉空格腾宽度，而不是压字号） */
+
+/* ── 6. 统计卡（大号数字 + 迷你趋势线）────────────────────────────
+   账号池统计条：由 7 格扁条改为 4 张大卡，每卡带一条极淡的迷你趋势线
+   （overview 无时间序列，故画平线，不做伪数据）。 */
+.stat { padding: 16px 18px 14px; position: relative; overflow: hidden; }
+.stat .v { font-size: var(--fs-num-sm); }   /* 降一档：Hero 才是主、统计条是次 */
+.stat .k { font-size: var(--fs-xs); margin-top: 6px; }
+/* 迷你趋势线：目前**未接入真实序列**（HTML 里原本写死的是平线，已移除——永远平直的线不表达信息，只制造噪音）。样式保留，等有序列数据再启用。 */
+.spark { display: block; width: 100%; height: 26px; margin-top: 10px; opacity: .85; }
+.spark .ln { fill: none; stroke-width: 2; stroke-linecap: round; }
+.spark .area { opacity: .5; }
+.spark .dot { r: 2.6; }
+.spark.ok .ln { stroke: var(--ok); } .spark.ok .dot { fill: var(--ok); } .spark.ok .area { fill: var(--ok-soft); }
+.spark.warn .ln { stroke: var(--warn); } .spark.warn .dot { fill: var(--warn); } .spark.warn .area { fill: var(--warn-soft); }
+.spark.bad .ln { stroke: var(--bad); } .spark.bad .dot { fill: var(--bad); } .spark.bad .area { fill: var(--bad-soft); }
+.spark.cool .ln { stroke: var(--cool); } .spark.cool .dot { fill: var(--cool); } .spark.cool .area { fill: var(--accent-soft); }
+.spark.mute .ln { stroke: var(--ink-3); } .spark.mute .dot { fill: var(--ink-3); } .spark.mute .area { fill: var(--surface-2); }
+
+/* ── 7. 账号表视觉刷新 ─────────────────────────────────────────────
+   行更高、悬停高亮带发光、表头更轻、数字列右对齐。保持 <table> 结构不动。 */
+.acc { font-size: var(--fs-base); }
+.acc th {
+  font-weight: 400; font-size: var(--fs-xs); color: var(--ink-3);
+  letter-spacing: .04em; padding: 12px 12px; border-bottom: 1px solid var(--line);
+}
+.acc td { padding: 15px 12px; border-bottom: 1px solid var(--line-soft); }
+.acc tbody tr { transition: background-color .15s ease, box-shadow .15s ease; }
+.acc tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.acc tbody tr:hover td { border-bottom-color: color-mix(in srgb, var(--accent) 20%, transparent); }
+.acc tbody tr:hover .mark i { box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 70%, transparent); }
+.acc .mark i { transition: box-shadow .15s ease; }
+.acc th.r, .acc td.r { text-align: right; }
+/* 账号表：数值列改回左对齐。
+   本表 9 列里 7 列（账号 / 状态 / 操作…）本来就是左对齐，只有数值列右对齐会让内容
+   浮在列右缘、与其余列的左栅格错开；而且本表内容也不是纯数字——积分带进度条、
+   用量是胶囊组、最近成功是相对时间，统一左对齐更整齐。
+   （#view-usage / #view-logs / #view-packages 是纯数字表，仍走下面的 .num 右对齐。） */
+#view-accounts .acc th.r, #view-accounts .acc td.r { text-align: left; }
+/* 积分列是「数字 + 量条」组合，右对齐时量条也贴右，与数字同一基准线。 */
+.acc td.r .bar { margin-left: auto; }
+/* 数字列右对齐：只在「表头与单元格都带 .num」的表上启用，避免表头左对齐、数值右对齐的错位。
+   用量页 / 请求记录 / 积分明细三处均满足该条件。 */
+#view-usage .acc th.num, #view-usage .acc td.num,
+#view-logs .acc th.num, #view-logs .acc td.num,
+#view-packages .acc th.num, #view-packages .acc td.num { text-align: right; }
+.acc tbody tr:hover .who .nm { color: var(--ink); }
+
+/* ── 8. 用量页（DeepSeek 轻量语言）────────────────────────────────
+   与其它页的「星港」厚重感形成对比：留白大、边框细、无斑马纹、
+   标签在上数字在下、单一强调色。令牌仍复用全局，不硬编码颜色。 */
+#view-usage { max-width: 1360px; }
+#view-usage .box { background: var(--surface); border-color: var(--line-soft); border-radius: 12px; box-shadow: none; }
+#view-usage .box:hover { transform: none; box-shadow: none; }
+#view-usage .box > header { padding: 16px 20px; }
+#view-usage .box > header h3 { font-size: var(--fs-base); font-weight: 700; letter-spacing: -.01em; }
+#view-usage .box .pad { padding: 20px; }
+#view-usage .box + .box { margin-top: 24px; }
+/* KPI：去彩色左轨，极简卡；标签在上（12px 灰）、数字在下（30px 等宽 600）。 */
+#view-usage .kpis { gap: 12px; padding: 18px 20px 2px; }
+/* 积分扣除有 5 张卡：原 .k4（4 列）会把第 5 张挤到第二行独自成排，改为 5 列一行。 */
+#view-usage .kpis.k4 { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@media (max-width: 1180px) { #view-usage .kpis.k4 { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 700px) { #view-usage .kpis.k4 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+#view-usage .kpi {
+  border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-2);
+  padding: 15px 17px; overflow: visible;
+}
+#view-usage .kpi::before { display: none; }
+#view-usage .kpi .k { font-size: var(--fs-xs); color: var(--ink-3); letter-spacing: .01em; }
+#view-usage .kpi .v { font: 700 var(--fs-num-md)/1.1 var(--mono); letter-spacing: -.03em; margin-top: 8px; color: var(--ink); }
+#view-usage .kpi .s { font-size: var(--fs-xs); margin-top: 6px; }
+/* 单一强调色：头号指标（总 token）用品牌靛蓝，其余保持中性；失败仍走语义色。 */
+#view-usage #usStats .kpi:nth-child(2) { --kpi-c: var(--accent); background: var(--surface-2); }
+#view-usage #usStats .kpi:nth-child(2) .v { color: var(--accent); }
+#view-usage .kpi.c-accent .v { color: var(--accent); }
+#view-usage .kpi.c-ok .v { color: var(--ok); }
+#view-usage .kpi.c-warn .v { color: var(--warn); }
+#view-usage .kpi.c-bad .v { color: var(--bad); }
+/* 图表：极淡网格、细柱、悬停才出 tooltip 细节。 */
+#view-usage .uschart { border: none; background: transparent; }
+#view-usage .uschart-hd { border-bottom: 1px solid var(--line-soft); padding: 6px 4px 12px; }
+#view-usage .uschart-body { padding: 16px 0 0; }
+#view-usage .uschart-body .gl { stroke: var(--line-soft); opacity: .55; }
+#view-usage .uschart-body .usgrid { stroke: var(--line-soft); opacity: .6; }
+#view-usage .uschart-body .ax { stroke: var(--line); }
+/* 表格：去斑马纹，改极淡行分隔线 + 充足行高；表头更轻更小；数字右对齐等宽。 */
+#view-usage .acc { font-size: var(--fs-sm); }
+#view-usage .acc th { padding: 12px 14px; font-size: var(--fs-xs); color: var(--ink-3); border-bottom: 1px solid var(--line); }
+#view-usage .acc td { padding: 14px 14px; border-bottom: 1px solid var(--line-soft); }
+#view-usage .acc.zebra tbody tr:nth-child(even) { background: transparent; }
+#view-usage .acc tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+#view-usage .acc .mark { display: none; }
+#view-usage .tbl-wrap { border-top: 1px solid var(--line-soft); }
+#view-usage .vtabs { background: var(--surface-2); }
+
+/* ── 9. 响应式兜底 ─────────────────────────────────────────────────
+   窄屏：Hero 数字两列、图标轨恢复横向导航并显示文字、隐藏展开按钮。 */
+/* ── E1 Hero 层级重塑：1 主（可用率环）+ 3 副 + 色点图例条 ────────────
+   原先 7 个指标同字号同权重平铺 = 视觉上没有第一落点，大脑识别为"数字墙"。
+   改法：可用率环升为主角；积分/在途/近 7 天请求升为副指标；其余 5 项降级为
+   12px 色点图例条（信息一点没少，只是权重重排）。 */
+.hero-core { display: flex; align-items: center; gap: 26px; flex: 1 1 auto; min-width: 0; }
+.hero-ring { width: 108px; height: 108px; margin-left: 18px; }
+.ring-txt b { font-size: var(--fs-lg); }
+.hero-sec { display: flex; align-items: flex-start; gap: 28px; flex: 1 1 auto; min-width: 0; }
+.hs .v { font: 700 var(--fs-num-sm)/1.1 var(--mono); font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em; white-space: nowrap; }
+.hs .k { color: var(--ink-3); font-size: var(--fs-2xs); margin-top: 4px; }
+.hero-legend { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px 18px;
+  list-style: none; font-size: var(--fs-2xs); color: var(--ink-3); }
+.hero-legend li { display: flex; align-items: center; gap: 6px; }
+.hero-legend b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.hero-legend .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ink-3); flex: none; }
+.hero-legend li.ok .dot { background: var(--ok); }
+.hero-legend li.warn .dot { background: var(--warn); }
+.hero-legend li.bad .dot { background: var(--bad); }
+.hero-legend li.cool .dot { background: var(--cool); }
+.hero-legend li.mute .dot { background: var(--line); }
+
+/* ── E2 需要关注行动条 ──────────────────────────────────────────────
+   白底 + 左色条 + 条目前色点：整卡黄/红底面积太大，在首页和 Hero 抢视觉权重；
+   严重度交给色条与色点传递，卡片本体保持安静。 */
+.attn { border: 1px solid var(--line); border-left: 3px solid var(--ink-3); border-radius: 10px;
+  background: var(--surface); padding: 10px 14px; font-size: var(--fs-sm);
+  display: flex; flex-direction: column; gap: 5px; }
+.attn.warn { border-left-color: var(--warn); }
+.attn.bad { border-left-color: var(--bad); }
+.attn.ok { border-left-color: var(--ok); }
+.attn .row { display: flex; align-items: center; gap: 8px; color: var(--ink-2); }
+.attn .row::before { content: ''; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ink-3); flex: none; }
+.attn.warn .row::before { background: var(--warn); }
+.attn.bad .row::before { background: var(--bad); }
+.attn.ok .row::before { background: var(--ok); }
+.attn .row b { color: var(--ink); }
+.attn .tag { flex: none; }
+
+/* ── E3 负载带 / E4 泳道 ──────────────────────────────────────────── */
+.load-chart svg, .live-lanes svg { display: block; width: 100%; height: auto; }
+.load-chart .bar { fill: var(--accent); opacity: .82; }
+.load-chart .bar.err { fill: var(--bad); opacity: .95; }
+.load-chart .cred { fill: none; stroke: var(--gold); stroke-width: 1.5; }
+.load-chart .ax { stroke: var(--line); stroke-width: 1; }
+.load-chart .lb { fill: var(--ink-3); font: 10px var(--mono); }
+/* E3 静态图例：色块/线样与 .bar/.bar.err/.cred 同源（--accent/--bad/--gold）。
+   放 header 里 h3 之后、12px 弱化色——职责是让人看懂图，不提供任何开关。 */
+.lg-row { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px;
+  font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.lg-swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); opacity: .82; }
+.lg-swatch.err { background: var(--bad); opacity: .95; margin-left: 10px; }
+.lg-line { width: 16px; border-top: 1.5px solid var(--gold); margin: 0 10px 0 12px; }
+.live-stat { display: flex; align-items: center; gap: 18px; margin-bottom: 10px;
+  font-size: var(--fs-sm); color: var(--ink-2); }
+/* 指标胶囊组：数字大、标签小，主次分明；成功率按阈值染色（JS 决定 ok/warn/bad）。 */
+.live-stat .ls { display: inline-flex; align-items: baseline; gap: 6px; }
+.live-stat .ls b { font: 700 var(--fs-md)/1 var(--mono); color: var(--ink);
+  font-variant-numeric: tabular-nums; }
+.live-stat .ls i { font-style: normal; font-size: var(--fs-2xs); color: var(--ink-3); }
+.live-stat .ls b.ok { color: var(--ok); }
+.live-stat .ls b.warn { color: var(--warn); }
+.live-stat .ls b.bad { color: var(--bad); }
+/* 泳道静态图例：点色/点形/点大小的语义，靠右弱化排布。 */
+.live-stat .ls-lg { margin-left: auto; display: inline-flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; font-size: var(--fs-2xs); color: var(--ink-3); }
+.live-stat .ls-lg i { display: inline-flex; align-items: center; gap: 4px; font-style: normal; }
+.live-stat .ls-lg .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.live-stat .ls-lg .dot.ok { background: var(--ok); }
+.live-stat .ls-lg .dot.no { background: var(--bad); }
+.live-stat .ls-lg .dot.retry { background: none; border: 1.4px solid var(--warn); }
+.live-stat .ls-lg .dot.sz { background: var(--ink-3); opacity: .55; }
+.live-lanes .lane-lb { fill: var(--ink-3); font: 10px var(--sans); }
+/* 泳道背景带与 now 虚线：都只做空间参照，颜色弱到不与数据点争抢。 */
+.live-lanes .lane-bg { fill: var(--surface-2); opacity: .55; }
+.live-lanes .now-line { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: 2 2; opacity: .65; }
+.live-lanes .pt.ok { fill: var(--ok); }
+.live-lanes .pt.no { fill: var(--bad); }
+.live-lanes .pt.retry { fill: none; stroke: var(--warn); stroke-width: 1.4; }
+
+/* ── 账号池：宽屏两栏 ────────────────────────────────────────────────
+   宽屏（≥1400px）把「账号池表」与「积分到期提醒」并排，模型锁池仍占整行。
+   用 flex 而不是 grid：到期提醒在无临期积分时是 hidden，grid 会在右栏留下
+   一个空洞；flex 下隐藏元素直接退出布局，主表自动补满整行。 */
+@media (min-width: 1400px) {
+  #view-accounts { display: flex; flex-wrap: wrap; gap: var(--gap-card); align-items: flex-start; }
+  #view-accounts > .hero { flex: 1 1 100%; margin-bottom: 0; order: 1; }
+  #accBox { flex: 1 1 660px; margin-bottom: 0; order: 2; }
+  #expBox { flex: 0 1 320px; margin-bottom: 0; order: 3; }
+  #mlBox  { flex: 1 1 100%; margin-bottom: 0; order: 4; }
+}
+@media (max-width: 1200px) {
+  /* 中等宽度：品牌与圆环同行，四个数字整行铺开（4 列）——
+     否则会退化成 2×2，圆环还孤零零吊在下面一行，很散。 */
+  .hero-brand { flex: 1 1 auto; }
+  .hero-ring { margin-left: auto; order: 2; }
+  .hero-metrics { order: 3; flex-basis: 100%; }
+}
+@media (max-width: 980px) {
+}
+@media (max-width: 760px) {
+  .shell { grid-template-columns: 1fr; }
+  .view { padding: 16px 14px 48px; }
+  /* 窄屏 header 空间紧张：E3 图例是增强信息，让位给标题与统计 note。 */
+  .lg-row { display: none; }
+  /* 窄屏导航恢复为横向条：隐藏关于块与副标，条目一律不换行，整体横向滚动。 */
+  .nav { width: auto; flex-direction: row; align-items: center; overflow-x: auto; overflow-y: hidden; }
+  .brand { flex: none; padding: 10px 12px; border-bottom: none; border-right: 1px solid var(--line-soft); }
+  :root[data-rail="closed"] .brand { padding: 10px 12px; }
+  :root[data-rail="closed"] .brand-txt { display: block; }
+  .brand .sub { display: none; }
+  .brand-name { white-space: nowrap; }
+  .nav ul { display: flex; flex-wrap: nowrap; padding: 8px; }
+  .nav ul li { flex: none; }
+  :root[data-rail="closed"] .nav .lbl { display: inline; }
+  .nav a { white-space: nowrap; }
+  :root[data-rail="closed"] .nav a { justify-content: flex-start; padding: 8px 11px; }
+  .nav .sig { flex: none; padding: 8px 12px; border-top: none; }
+  :root[data-rail="closed"] .nav .sig span:not(.pulse) { display: inline; }
+  /* 窄屏导航是横向条：收起态也照常显示文字，需撤销上面的「收尺寸 + 淡出」收起规则，
+     否则 72px 图标轨那套 max-width:0 / opacity:0 会把文字一起干掉。 */
+  :root[data-rail="closed"] .brand-txt,
+  :root[data-rail="closed"] .nav .lbl,
+  :root[data-rail="closed"] .nav .about,
+  :root[data-rail="closed"] .nav .sig span:not(.pulse) {
+    max-width: none; max-height: none; opacity: 1; pointer-events: auto;
+  }
+  :root[data-rail="closed"] .nav .about { padding: 0 16px 12px; }
+  .nav .about { display: none; }
+  .rail-toggle { display: none; }
+  /* 顶栏：标题占满首行并把操作按钮推到右端，风格开关整行折到第二行。 */
+  .topbar { flex-wrap: wrap; padding: 12px 14px; gap: 10px; }
+  .topbar h2 { white-space: nowrap; flex: 1 1 auto; }
+  .topbar .sep, .topbar .meta { display: none; }
+  .topbar .grow { display: none; }
+  .topbar button { white-space: nowrap; flex: none; }
+  .seg { order: 9; flex: 1 1 100%; justify-content: flex-start; }
+  .hero { gap: 18px; }
+  .hero-ring { width: 78px; height: 78px; }
+  .ring { width: 78px; height: 78px; }
+}
 </style>
 </head>
 <body>
 <div class="shell">
   <nav class="nav">
     <div class="brand">
-      <div class="name">WorkBuddy2API</div>
-      <div class="sub" id="navSub">控制台</div>
+      <div class="brand-head">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 22 22"><circle cx="11" cy="11" r="4" fill="var(--gold)"/><ellipse cx="11" cy="11" rx="9.5" ry="3.6" fill="none" stroke="var(--accent)" stroke-width="1.2" transform="rotate(-18 11 11)"/><circle cx="19" cy="7.6" r="1.3" fill="var(--gold)"/></svg>
+        </span>
+        <div class="brand-txt">
+          <div class="brand-name">StarPort<span class="zh">星港</span></div>
+        </div>
+      </div>
+      <div class="sub" id="navSub">多账号补给港 · 控制台</div>
+      <button class="rail-toggle" id="btnRail" title="展开 / 收起导航" aria-label="展开或收起导航" aria-expanded="false">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        <span class="lbl">收起导航</span>
+      </button>
     </div>
     <ul>
-      <li><a href="#accounts" data-view="accounts" class="on">
+      <li><a href="#accounts" data-view="accounts" class="on" title="账号池">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
-        账号池</a></li>
-      <li><a href="#usage" data-view="usage">
+        <span class="lbl">账号池</span></a></li>
+      <li><a href="#usage" data-view="usage" title="用量">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
-        用量</a></li>
-      <li><a href="#packages" data-view="packages">
+        <span class="lbl">用量</span></a></li>
+      <li><a href="#packages" data-view="packages" title="积分构成">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
-        积分构成</a></li>
-      <li><a href="#taskscenter" data-view="taskscenter">
+        <span class="lbl">积分构成</span></a></li>
+      <li><a href="#taskscenter" data-view="taskscenter" title="任务中心">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 2.5h10v9H8l-3 3v-3H3z"/><path d="M6 6.5h4M6 9h2.5"/></svg>
-        任务中心</a></li>
-      <li><a href="#models" data-view="models">
+        <span class="lbl">任务中心</span></a></li>
+      <li><a href="#models" data-view="models" title="模型与档位">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
-        模型与档位</a></li>
-      <li><a href="#config" data-view="config">
+        <span class="lbl">模型与档位</span></a></li>
+      <li><a href="#config" data-view="config" title="配置">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
-        配置</a></li>
-      <li><a href="#logs" data-view="logs">
+        <span class="lbl">配置</span></a></li>
+      <li><a href="#logs" data-view="logs" title="运行日志">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
-        运行日志</a></li>
+        <span class="lbl">运行日志</span></a></li>
     </ul>
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
-      <div class="row" style="margin-top:5px"><span id="navVer">v-</span> · <span id="navRedis">-</span></div>
+    </div>
+    <div class="about">
+      <div>StarPort <span class="ver" id="aboutVer">v1.0.0</span></div>
+      <div>运行 <span id="aboutUptime">—</span></div>
+      <div>泊位 <span id="aboutAccounts">—</span></div>
     </div>
   </nav>
 
@@ -630,6 +1394,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <span class="sep">/</span>
       <span class="meta" id="subMeta">-</span>
       <div class="grow"></div>
+      <div class="seg" id="styleSwitch" role="group" aria-label="界面风格">
+        <button type="button" data-ui="compact" title="紧凑：信息密度优先，关闭星空与重发光">紧凑</button>
+        <button type="button" data-ui="cozy" title="舒适：默认节奏">舒适</button>
+        <button type="button" data-ui="vivid" title="炫酷：星空、玻璃与发光全开">炫酷</button>
+      </div>
       <button class="icon ghost" id="btnTheme" title="切换明暗（跟随系统 → 浅色 → 深色）" aria-label="切换主题">
         <svg id="icoTheme" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
       </button>
@@ -637,21 +1406,84 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <button class="primary" id="btnAdd">添加账号</button>
     </div>
 
+    <!-- 更新提示横幅（仅在检出更高版本时由 app.js 显示；点击 ✕ 本次忽略） -->
+    <div class="updbanner" id="updBanner" hidden>
+      <span class="dot"></span>
+      <span id="updText">有新版本可用</span>
+      <span class="grow"></span>
+      <a id="updLink" href="#" target="_blank" rel="noopener noreferrer">查看更新</a>
+      <button class="icon ghost" id="updClose" title="本次忽略" aria-label="关闭更新提示">×</button>
+    </div>
+
     <!-- 账号池 -->
     <section class="view" id="view-accounts">
-      <div class="stats">
-        <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
-        <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
-        <div class="stat warn"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
-        <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
-        <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
-        <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
-        <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
+      <!-- Hero 概览带：品牌 lockup + 运行状态灯 + 可用率进度环 + 4 个大号关键数字。
+           数字沿用既有 id（sTotal/sHealthy/sCredits，app.js 原样填充），外层新增
+           hero* id 供样式/锚点使用；实时在途为新增指标（heroInflightVal）。 -->
+      <div class="hero">
+        <div class="hero-brand">
+          <div class="hero-title">
+            <span class="hero-mark" aria-hidden="true">
+              <svg viewBox="0 0 22 22"><circle cx="11" cy="11" r="4" fill="var(--gold)"/><ellipse cx="11" cy="11" rx="9.5" ry="3.6" fill="none" stroke="var(--accent)" stroke-width="1.2" transform="rotate(-18 11 11)"/><circle cx="19" cy="7.6" r="1.3" fill="var(--gold)"/></svg>
+            </span>
+            <div>
+              <div class="hero-h">星港<span class="zh">运行概览</span></div>
+              <div class="hero-sub">StarPort · 多账号补给港</div>
+            </div>
+          </div>
+          <div class="hero-status"><span class="pulse" id="heroPulse"></span><span id="heroState">连接中</span></div>
+        </div>
+        <div class="hero-core">
+          <div class="hero-ring" title="账号健康度：可用 / 总数">
+            <svg class="ring" viewBox="0 0 92 92" aria-hidden="true">
+              <circle class="trk" cx="46" cy="46" r="40"/>
+              <circle class="val" id="heroRing" cx="46" cy="46" r="40"/>
+            </svg>
+            <div class="ring-txt"><b id="heroRingPct">—</b><span>可用率</span></div>
+          </div>
+          <div class="hero-sec">
+            <div class="hs"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
+            <div class="hs"><div class="v" id="hsInflight">-</div><div class="k">在途请求</div></div>
+            <div class="hs"><div class="v" id="hsReq7d">-</div><div class="k">近 7 天请求</div></div>
+          </div>
+        </div>
+        <ul class="hero-legend">
+          <li><i class="dot"></i>账号总数<b id="sTotal">-</b></li>
+          <li class="ok"><i class="dot"></i>可用<b id="sHealthy">-</b></li>
+          <li class="warn"><i class="dot"></i>冷却<b id="sCooling">-</b></li>
+          <li class="bad"><i class="dot"></i>禁用<b id="sDisabled">-</b></li>
+          <li class="cool"><i class="dot"></i>暂停<b id="sPaused">-</b></li>
+          <li class="mute"><i class="dot"></i>粘性<b id="sSticky">-</b></li>
+        </ul>
+      </div>
+
+      <!-- E2 需要关注：把指标翻译成动作。0 条时显示安静态（留白即健康信号）。 -->
+      <div class="attn" id="attnBox"></div>
+
+      <!-- E3 近 7 天负载带：与账号数无关的时间维，2 个账号也照样满。 -->
+      <div class="box" id="loadBox">
+        <header>
+          <h3>近 7 天负载</h3><span class="lg-row"><span class="lg-swatch"></span>请求<span class="lg-swatch err"></span>失败<span class="lg-line"></span>积分消耗（独立刻度）</span><span class="grow"></span>
+          <span class="note" id="loadNote">—</span>
+        </header>
+        <div class="pad"><div class="load-chart" id="loadChart"></div></div>
+      </div>
+
+      <!-- E4 在途与最近请求泳道：每条泳道 = 一个账号，账号越少越清晰。 -->
+      <div class="box" id="liveBox">
+        <header>
+          <h3>在途与最近请求</h3><span class="grow"></span>
+          <span class="note" id="liveNote">—</span>
+        </header>
+        <div class="pad">
+          <div class="live-stat" id="liveStat"></div>
+          <div class="live-lanes" id="liveLanes"></div>
+        </div>
       </div>
 
       <div class="box" id="expBox" hidden>
         <header>
-          <h3>积分到期提醒<span class="hint">按最近到期批次估算 · 日均需耗 = 批次剩余 ÷ 距到期天数 · 上游按失效时刻先后自动优先扣减（FEFO）</span></h3>
+          <h3>积分到期提醒<span class="hint" title="日均需耗 = 批次剩余 ÷ 距到期天数">按最近到期批次估算 · 上游按失效时刻先后优先扣减（FEFO）</span></h3>
           <span class="grow"></span>
           <span class="note" id="expNote"></span>
           <button class="xs" id="btnExp">检查</button>
@@ -659,7 +1491,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <div class="pad"><div id="expList"></div></div>
       </div>
 
-      <div class="box">
+      <div class="box" id="accBox">
         <header>
           <h3>账号池</h3>
           <span class="grow"></span>
@@ -673,15 +1505,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
-            <th>账号</th><th>状态</th><th>积分</th>
-            <th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th>
+            <th>账号</th><th>状态</th><th class="r">积分</th>
+            <th class="r">成功 / 失败</th><th class="r">在途</th><th class="r">用量</th><th class="r">最近成功</th><th class="c-acts"></th>
           </tr></thead>
           <tbody id="accBody"></tbody>
         </table>
         </div>
       </div>
 
-      <div class="box">
+      <div class="box" id="mlBox">
         <header>
           <h3>模型锁池 <span class="hint">哪些模型不能用、还要锁多久</span></h3>
           <span class="grow"></span>
@@ -838,6 +1670,21 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
               </span>
             </div>
             <div id="usChart" class="uschart-body"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>缓存命中率 与 TTFB 趋势</h3>
+          <span class="grow"></span>
+          <span class="note" id="usHealthNote">—</span>
+        </header>
+        <div class="pad">
+          <div id="usHealth" class="uschart-body"></div>
+          <div class="hint" style="margin-top:6px">
+            缓存命中率越高、TTFB 越低。命中率突然掉到 0 说明上游前缀缓存被冲掉
+            （常见原因：同一账号上不同会话共用了同一个缓存键）。
           </div>
         </div>
       </div>
@@ -1040,7 +1887,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <div class="hr"></div>
             <div class="grid2">
               <label class="fld"><span class="lb">出站 User-Agent</span>
-                <input name="user_agent" placeholder="留空 = CLI/2.63.2 CodeBuddy/2.63.2">
+                <input name="user_agent" placeholder="留空 = 默认 CLI UA">
                 <span class="hint">影响官网积分记录「使用端」显示；需重启</span></label>
             </div>
             <div class="hr"></div>
@@ -1202,11 +2049,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div id="addTabLogin" class="tab-panel">
         <div id="addPick">
           <div class="realm-row">
-            <span class="hint" style="font-size:12px">版本：</span>
+            <span class="hint" style="font-size: var(--fs-xs)">版本：</span>
             <label class="realm-opt"><input type="radio" name="addRealm" value="cn" checked> 国内版（CN）</label>
             <label class="realm-opt"><input type="radio" name="addRealm" value="global"> 国际版（Global）</label>
           </div>
-          <div class="hint" style="font-size:12px;margin-top:2px">国际版登录后，网关自动完成注册地区、激活与试用额度领取，全程无需手动操作。</div>
+          <div class="hint" style="font-size: var(--fs-xs);margin-top:2px">国际版登录后，网关自动完成注册地区、激活与试用额度领取，全程无需手动操作。</div>
         </div>
         <div id="addLoad" class="state" hidden><span class="dots">正在获取授权链接</span></div>
         <div id="addReady" hidden>
@@ -1243,7 +2090,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="hint">该网关已启用 api_key 鉴权，请输入 config.json 中的密钥。</div>
     </header>
     <div class="body">
-      <form style="display:contents" onsubmit="return false"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
+      <form style="display:contents"><input type="password" id="keyInput" placeholder="api_key" autocomplete="off"></form>
       <div class="state err" id="keyErr" hidden style="margin-top:10px">密钥不正确，请重试。</div>
     </div>
     <footer>

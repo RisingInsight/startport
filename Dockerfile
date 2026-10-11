@@ -4,8 +4,16 @@ WORKDIR /src
 COPY go.mod ./
 RUN go mod download
 COPY . .
+# 版本注入：CI 经 --build-arg 传入 tag/commit；本地 docker build 不传则保留源码
+# 默认版本。用条件拼接而非无条件 -X——未传参时 `-X main.appVersion=` 会把版本
+# 清空成空串，反而丢掉源码里的默认值。
+ARG VERSION=""
+ARG COMMIT=""
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/wb2api ./cmd/server \
+RUN LDFLAGS="-s -w"; \
+    if [ -n "$VERSION" ]; then LDFLAGS="$LDFLAGS -X main.appVersion=$VERSION"; fi; \
+    if [ -n "$COMMIT" ]; then LDFLAGS="$LDFLAGS -X main.appCommit=$COMMIT"; fi; \
+    CGO_ENABLED=0 go build -trimpath -ldflags="$LDFLAGS" -o /out/starport ./cmd/server \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit
@@ -19,7 +27,7 @@ RUN apk add --no-cache wget ca-certificates tzdata python3 bash \
 WORKDIR /app
 # 脚本置入 + 去 CRLF（Windows 检出可能性）在切到 app 之前以 root 完成——
 # app 对 root 所有文件无写权限，sed -i 需要写权限。
-COPY --from=build /out/wb2api /app/wb2api
+COPY --from=build /out/starport /app/starport
 COPY --from=build /out/signin_bin /app/signin_bin
 COPY --from=build /out/login /app/login
 COPY --from=build /out/credit /app/credit
@@ -32,4 +40,4 @@ USER app
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1
-ENTRYPOINT ["/app/wb2api", "-config", "/app/config.json"]
+ENTRYPOINT ["/app/starport", "-config", "/app/config.json"]

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/RisingInsight/startport/internal/auth"
 )
 
 func TestNoteCheckinDoneMarksToday(t *testing.T) {

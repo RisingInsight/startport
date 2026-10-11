@@ -36,7 +36,7 @@ func TestInjectPromptCacheKey_PreservesExisting(t *testing.T) {
 
 // TestInjectPromptCacheKey_UsesConversationID 覆盖任务用例 2：
 // body 无 prompt_cache_key 但有 conversation_id → 用它做会话哈希源。
-// 格式 wb2a-<uid8>-<conversationHash>：conversation_id 不逐字出现，而是驱动哈希段
+// 格式 starport-<uid8>-<conversationHash>：conversation_id 不逐字出现，而是驱动哈希段
 // （同 id 同 key、不同 id 不同 key）。同时仍带 uid8 隔离前缀。
 func TestInjectPromptCacheKey_UsesConversationID(t *testing.T) {
 	uid := "user-abc-123"
@@ -44,8 +44,8 @@ func TestInjectPromptCacheKey_UsesConversationID(t *testing.T) {
 
 	out := InjectPromptCacheKey([]byte(in), uid, "")
 	got := extractCacheKey(t, out)
-	if !strings.HasPrefix(got, "wb2a-") {
-		t.Fatalf("expected wb2a- prefix, got=%q", got)
+	if !strings.HasPrefix(got, "starport-") {
+		t.Fatalf("expected starport- prefix, got=%q", got)
 	}
 	if !strings.Contains(got, "user-abc") {
 		t.Fatalf("expected uid8 isolation prefix, got=%q", got)
@@ -89,8 +89,8 @@ func TestInjectPromptCacheKey_AccountIsolation(t *testing.T) {
 	if ka == kb {
 		t.Fatalf("cross-account key collision: both=%q", ka)
 	}
-	if !strings.HasPrefix(ka, "wb2a-") || !strings.HasPrefix(kb, "wb2a-") {
-		t.Fatalf("keys must carry wb2a- prefix: a=%q b=%q", ka, kb)
+	if !strings.HasPrefix(ka, "starport-") || !strings.HasPrefix(kb, "starport-") {
+		t.Fatalf("keys must carry starport- prefix: a=%q b=%q", ka, kb)
 	}
 }
 
@@ -101,8 +101,8 @@ func TestInjectPromptCacheKey_Format(t *testing.T) {
 	in := `{"model":"glm-5.2","messages":[]}`
 	out := InjectPromptCacheKey([]byte(in), uid, "conv-fmt")
 	got := extractCacheKey(t, out)
-	if !strings.HasPrefix(got, "wb2a-") {
-		t.Fatalf("expected wb2a- prefix, got=%q", got)
+	if !strings.HasPrefix(got, "starport-") {
+		t.Fatalf("expected starport- prefix, got=%q", got)
 	}
 	if !strings.Contains(got, "12345678") {
 		t.Fatalf("expected uid8 (12345678) in key, got=%q", got)
@@ -120,8 +120,8 @@ func TestInjectPromptCacheKey_EmptyConversation(t *testing.T) {
 	if got == "" {
 		t.Fatalf("expected non-empty key when no conversation, got empty")
 	}
-	if !strings.HasPrefix(got, "wb2a-") {
-		t.Fatalf("expected wb2a- prefix, got=%q", got)
+	if !strings.HasPrefix(got, "starport-") {
+		t.Fatalf("expected starport- prefix, got=%q", got)
 	}
 	if !strings.Contains(got, "user-abc") {
 		t.Fatalf("expected uid8 in key, got=%q", got)
@@ -140,5 +140,35 @@ func TestPrepareBodyOptNoCacheKeyInjection(t *testing.T) {
 	}
 	if _, present := obj["prompt_cache_key"]; present {
 		t.Fatalf("PrepareBodyOpt must NOT inject prompt_cache_key, but got: %v", obj["prompt_cache_key"])
+	}
+}
+
+// TestPrepareBodyCacheKeyFallsBackToDerivedConv 回归：conversationID 为空时必须回落
+// cacheConvID（内容派生会话键）。否则 buildCacheKey 的会话段退化成每账号定值，
+// 同一账号上所有无会话键客户端的会话共用同一个上游缓存槽、互相覆盖（前缀缓存抖动，
+// 费用与 TTFB 双升）。与粘性侧 ExtractKey 的派生回退对齐。
+func TestPrepareBodyCacheKeyFallsBackToDerivedConv(t *testing.T) {
+	c := &Client{}
+	base := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`)
+
+	ka := extractCacheKey(t, c.prepareBody(base, "cn", "uid-1234567890", "", "convA"))
+	kb := extractCacheKey(t, c.prepareBody(base, "cn", "uid-1234567890", "", "convB"))
+	if ka == "" || kb == "" {
+		t.Fatalf("cache key must be injected: a=%q b=%q", ka, kb)
+	}
+	if ka == kb {
+		t.Fatalf("不同会话必须得到不同缓存键（退化成定值即本回归）: %q", ka)
+	}
+	if !strings.Contains(ka, "uid-1234") {
+		t.Errorf("缓存键应保留账号隔离段: %q", ka)
+	}
+	// 显式 conversationID 优先于兜底段。
+	kExplicit := extractCacheKey(t, c.prepareBody(base, "cn", "uid-1234567890", "explicitConv", "convA"))
+	if kExplicit == ka {
+		t.Errorf("显式 conversationID 应优先于 cacheConvID")
+	}
+	// 两源都空 → 保持原有定值语义（仍注入账号隔离键，不 panic）。
+	if kEmpty := extractCacheKey(t, c.prepareBody(base, "cn", "uid-1234567890", "", "")); kEmpty == "" {
+		t.Errorf("两源都空时仍应注入账号隔离键")
 	}
 }

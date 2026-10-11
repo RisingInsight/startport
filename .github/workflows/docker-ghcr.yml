@@ -30,7 +30,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  # github.repository 自动小写化，得到 ghcr.io/linguo2625469/workbuddy2api-panel
+  # github.repository 自动小写化，得到 ghcr.io/risinginsight/startport
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -41,17 +41,27 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # 注入版本：tag 构建用 tag（去 v 前缀），分支/PR 构建回落源码 appVersion。
+      - name: 解析注入版本
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            echo "v=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "v=$(grep -oP 'appVersion = "\K[^"]+' cmd/server/main.go)" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up QEMU（arm64 交叉模拟）
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Login to GHCR
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -59,7 +69,7 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -70,14 +80,26 @@ jobs:
             type=sha,format=short
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # 把版本/commit 传进 Dockerfile（ARG VERSION/COMMIT），使镜像内 starport
+          # 的 appVersion 与 tag 一致（自动更新的版本源）。
+          build-args: |
+            VERSION=${{ steps.ver.outputs.v }}
+            COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # 关闭 provenance attestation：避免 ghcr 页面出现 unknown/unknown 架构条目
-          provenance: false
+          # 供应链可验证性（安全官 F-012/F-013）：产出 build provenance（含构建来源、
+          # 源码 commit、构建参数）与 SBOM，供下游 `docker buildx imagetools inspect`
+          # 或 cosign / gh attestation verify 校验。
+          #
+          # 代价：GHCR 包的「Platforms」列会多出 unknown/unknown 条目（attestation
+          # 本身是一个非镜像的 manifest），属正常现象。若嫌它碍眼，把下面两行改回
+          # `provenance: false` 并删掉 `sbom: true` 即可——但那样就没有可验证的构建来源了。
+          provenance: mode=max
+          sbom: true
