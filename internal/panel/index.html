@@ -2332,6 +2332,10 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 
 <div class="us-tip" id="usTip" hidden></div>
 
+<!-- 加载顺序即依赖顺序：core.js（基础设施）→ app.js（视图主体）→ keys.js（密钥视图）。
+     classic scripts 共享全局作用域，顶层绑定只可向前引用；新增模块追加到末尾。 -->
+<script src="core.js"></script>
 <script src="app.js"></script>
+<script src="keys.js"></script>
 </body>
 </html>

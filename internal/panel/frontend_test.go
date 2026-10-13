@@ -13,9 +13,39 @@ import (
 	"time"
 )
 
-// TestAppJSSyntax app.js 必须能通过 JS 解析器语法校验。
+// panelJSFiles 面板前端脚本的加载顺序（与 index.html 的 <script> 顺序一致）。
+// 2026-10-13 拆分（core.js / app.js / keys.js）后，node harness 必须按此顺序
+// 拼接后再以单文件形态执行——经典脚本共享全局作用域，拼接顺序错误会引入
+// TDZ / 引用错误（如 app.js 顶层用 $ 而 $ 定义在 core.js）。
+var panelJSFiles = []string{"core.js", "app.js", "keys.js"}
+
+// mergedAppJSPath 拼接全部面板 JS 为临时文件并返回路径（供 node harness 读取）。
+// 这样所有按函数名切片 app.js 的既有测试在拆分后无需改动切法。
+func mergedAppJSPath(t *testing.T) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, name := range panelJSFiles {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		sb.Write(b)
+		sb.WriteString("\n;\n")
+	}
+	f, err := os.CreateTemp(t.TempDir(), "merged-panel-*.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(sb.String()); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	return f.Name()
+}
+
+// TestAppJSSyntax 每个面板 JS 文件都必须能通过 JS 解析器语法校验。
 //
-// 为什么需要：app.js 是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
+// 为什么需要：JS 是 go:embed 进二进制的静态资源，Go 编译器不检查其内容——
 // 一次对象字面量键名未加引号（Model_chat_GLM5.2 被解析成属性访问 + 数字字面量）
 // 就让整个面板白屏，而所有 Go 测试依然全绿。此测试把语法校验前移到 CI。
 // 无 node 环境时跳过（不阻塞无 Node 的构建机）。
@@ -24,13 +54,15 @@ func TestAppJSSyntax(t *testing.T) {
 	if err != nil {
 		t.Skip("node not available; skipping JS syntax check")
 	}
-	path, err := filepath.Abs("app.js")
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(node, "--check", path).CombinedOutput()
-	if err != nil {
-		t.Fatalf("app.js syntax error:\n%s", out)
+	for _, name := range panelJSFiles {
+		path, err := filepath.Abs(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := exec.Command(node, "--check", path).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s syntax error:\n%s", name, out)
+		}
 	}
 }
 
@@ -114,7 +146,7 @@ try {
 	}
 	hf.Close()
 	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
-		cmd := exec.Command(node, hf.Name(), "app.js")
+		cmd := exec.Command(node, hf.Name(), mergedAppJSPath(t))
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
 		out, err := cmd.CombinedOutput()
@@ -164,7 +196,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("credit formatting node test failed: %v\n%s", err, out)
 	}
@@ -208,7 +240,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("rate-limit formatting node test failed: %v\n%s", err, out)
 	}
@@ -258,7 +290,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("request log formatting node test failed: %v\n%s", err, out)
 	}
@@ -308,7 +340,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("request filter node test failed: %v\n%s", err, out)
 	}
@@ -371,7 +403,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("model filter node test failed: %v\n%s", err, out)
 	}
@@ -463,7 +495,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("usage chart node test failed: %v\n%s", err, out)
 	}
@@ -537,7 +569,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("time range node test failed: %v\n%s", err, out)
 	}
@@ -566,7 +598,7 @@ process.stdout.write(JSON.stringify({
 // 少了一个开关而 Go 测试全绿，只有人肉点开配置页才会发现。这里把"表单字段 ↔
 // CFG_MAP"与"关键热改键必须在表单里"两条都钉住。
 func TestConfigFormMatchesCFGMap(t *testing.T) {
-	src, err := os.ReadFile("app.js")
+	src, err := os.ReadFile(mergedAppJSPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +696,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("detail groups node test failed: %v\n%s", err, out)
 	}
@@ -720,7 +752,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry summary node test failed: %v\n%s", err, out)
 	}
@@ -782,7 +814,7 @@ process.stdout.write(JSON.stringify([
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("collectConfig node test failed: %v\n%s", err, out)
 	}
@@ -846,7 +878,7 @@ process.stdout.write(JSON.stringify(names));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry sort node test failed: %v\n%s", err, out)
 	}
@@ -923,7 +955,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("expiry snapshot node test failed: %v\n%s", err, out)
 	}
@@ -1035,7 +1067,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("chart tooltip node test failed: %v\n%s", err, out)
 	}
@@ -1115,7 +1147,7 @@ process.stdout.write(JSON.stringify({
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("daily merge node test failed: %v\n%s", err, out)
 	}
@@ -1195,7 +1227,7 @@ process.stdout.write(JSON.stringify(out));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
 	if err != nil {
 		t.Fatalf("attn expiry node test failed: %v\n%s", err, out)
 	}

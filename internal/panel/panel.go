@@ -159,7 +159,11 @@ func (p *Panel) Logs() *Ring { return p.logs }
 
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/{$}", p.index)
+	// 前端脚本（core.js / app.js / keys.js）：按名查 embed 白名单，见 index.go appScript。
+	// Go 1.22 mux 通配符须占满整段，故按文件显式注册（新增 JS 文件在此加一行）。
 	p.mux.HandleFunc("GET /startport/app.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/core.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/keys.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /startport/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /startport/api/request_metrics", p.withAuth(p.requestMetrics))

@@ -2,22 +2,26 @@
 //
 // 资源经 go:embed 打进二进制（随服务部署，无外部构建步骤）：
 //   - index.html  页面骨架
-//   - app.js      全部前端逻辑（独立文件而非内联，为了启用无需 unsafe-inline 的严格 CSP）
+//   - core.js     全局基础设施（状态/主题/工具/trange/密钥门，最先加载）
+//   - app.js      视图主体逻辑（账号池/用量/积分构成/模型/日志/配置/任务）
+//   - keys.js     API 密钥视图（自包含模块）
+// 前端脚本独立为同源文件而非内联，为了启用无需 unsafe-inline 的严格 CSP。
 //
 // 安全头对"面板页面与全部 /startport/api/* 响应"统一生效：CSP 限制脚本只能来自本服务，
 // 禁止被 iframe 嵌套（防点击劫持），禁 MIME 嗅探，并声明不泄露 Referer 出去。
 package panel
 
 import (
-	_ "embed"
+	"embed"
 	"net/http"
+	"path"
 )
 
 //go:embed index.html
 var indexHTML []byte
 
-//go:embed app.js
-var appJS []byte
+//go:embed app.js core.js keys.js
+var panelFS embed.FS
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
@@ -59,11 +63,18 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(indexHTML)
 }
 
-// appScript 输出前端逻辑（同源脚本，供 CSP script-src 'self' 加载）。
+// appScript 输出前端脚本（同源脚本，供 CSP script-src 'self' 加载）。
+// 多文件拆分后统一入口：按 URL 末段查 embed（embed 只含 app.js/core.js/keys.js，
+// 白名单外一律 404——路由亦只注册了这三个路径，双保险）。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", noStore)
+	b, err := panelFS.ReadFile(path.Base(r.URL.Path))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(appJS)
+	_, _ = w.Write(b)
 }
