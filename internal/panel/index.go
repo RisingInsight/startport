@@ -44,10 +44,17 @@ func setSecurityHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 }
 
+// noStore 面板页面与脚本禁止缓存：前端资源 go:embed 在二进制里，每次升级
+// 内容都变——没有本头时浏览器启发式缓存会继续用旧版页面配新版 API（或反之），
+// 表现为「升级后界面没变/样式错乱」，普通刷新都未必奏效。本地面板 ~150KB
+// 重复拉取零成本，宁可全量拉取也不要错版本。
+const noStore = "no-store"
+
 // index 输出面板页面（静态无秘密；数据接口 /startport/api/* 才走鉴权）。
 func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", noStore)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(indexHTML)
 }
@@ -56,6 +63,7 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", noStore)
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(appJS)
 }

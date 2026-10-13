@@ -27,6 +27,7 @@ backups/
 # IDE
 .idea/
 .vscode/
+.zcodeignore
 LOOP.md
 PLAN.md
 SPEC.md

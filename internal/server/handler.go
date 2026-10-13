@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
 	"github.com/RisingInsight/startport/internal/httpauth"
 	"github.com/RisingInsight/startport/internal/livecfg"
@@ -70,6 +71,11 @@ type Config struct {
 	// 且与 pool 的每账号累计器同源，两条口径不会漂移。
 	Usage *usage.Recorder
 
+	// APIKeys 面板生成的「agent 接入密钥」存储（可选；nil = 不启用该通道）。
+	// 仅 /v1/*（聊天 + 模型列表）接受这类密钥；面板与 /status 不接受——
+	// agent 密钥泄露时面板/凭证/配置保持隔离（鉴权边界见 chatAuth）。
+	APIKeys *apikeys.APIKeys
+
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
 
@@ -108,6 +114,11 @@ func (h *Handler) softCooldown() time.Duration {
 // 故固定 60s 防雪崩即可，不随 soft_rate 配置、也不参与软退避指数。
 const notFoundCooldown = 60 * time.Second
 
+// apiKeyNameKey 请求上下文键:chatAuth 命中「agent 接入密钥」后把密钥名
+// 放进请求上下文,chatCompletions 的 recordAttempt 据此把用量归到该密钥
+// (usage 桶的密钥维度)。经管理密钥(api_key)来的请求不含此值。
+type apiKeyNameKey struct{}
+
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
@@ -138,8 +149,8 @@ func NewHandler(cfg Config) *Handler {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
-	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
-	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
+	h.mux.HandleFunc("POST /v1/chat/completions", h.chatAuth(h.chatCompletions))
+	h.mux.HandleFunc("GET /v1/models", h.chatAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	if cfg.Panel != nil {
@@ -178,6 +189,29 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+// chatAuth /v1/*（聊天 + 模型列表）的鉴权：管理密钥（api_key）或任一启用的
+// 「agent 接入密钥」均可。两条边界必须守住：
+//   - 面板端点与 /status 只走 withAuth（仅 api_key）——agent 密钥哪怕泄露，
+//     攻击者也只能消耗聊天积分，摸不到面板、账号凭证与配置；
+//   - api_key 为空 = 未启用鉴权（VerifyBearer 恒真），保持既有语义；
+//     此时 agent 密钥同样可用（校验在 VerifyBearer 之后叠加，不改变"空 = 开门"）。
+func (h *Handler) chatAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+			next(w, r)
+			return
+		}
+		if h.cfg.APIKeys != nil {
+			if name := h.cfg.APIKeys.AuthName(r); name != "" {
+				r = r.WithContext(context.WithValue(r.Context(), apiKeyNameKey{}, name))
+				next(w, r)
+				return
+			}
+		}
+		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 	}
 }
 
@@ -550,6 +584,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
+	// agent 密钥名由 chatAuth 放进上下文(管理密钥/未启用鉴权时为空),用量记录
+	// 据此按密钥归因(usage 桶的密钥维度)。
+	apiKeyName, _ := r.Context().Value(apiKeyNameKey{}).(string)
 	st := newChatStat(time.Now(), body, peek.Stream)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
@@ -666,6 +703,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				realm = a.Realm
 			}
 			h.cfg.Usage.Add(time.Now(), realm, uid, delta.Model, usage.Delta{
+				KeyName:          apiKeyName,
 				PromptTokens:     delta.PromptTokens,
 				HasPromptTokens:  delta.HasPromptTokens,
 				CompletionTokens: delta.CompletionTokens,
