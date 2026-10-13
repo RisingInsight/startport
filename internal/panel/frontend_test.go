@@ -1313,3 +1313,23 @@ process.exit(0);`
 		t.Fatalf("cool reason note=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestPanelTrangeCalFlexBasis .tr-cal 的 flex-basis 必须为 0。
+// auto 基准 = 内容宽（双月 ≈500px），与快捷列表（132px）相加超过 withcal 的
+// 660px 时 flex-wrap 把日历挤到第二行并拉满全宽——弹层暴涨 ~230px，「飘」在
+// 页面中间（2026-10-13 用户截图反馈，已修）。此断言防回归。
+func TestPanelTrangeCalFlexBasis(t *testing.T) {
+	b, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(b)
+	idx := strings.Index(html, ".tr-cal {")
+	if idx < 0 {
+		t.Fatal("index.html missing .tr-cal rule")
+	}
+	rule := html[idx : idx+strings.Index(html[idx:], "}")]
+	if !strings.Contains(rule, "flex: 1 1 0") {
+		t.Fatalf(".tr-cal must use flex-basis 0 (otherwise calendar wraps below quick list): %s", rule)
+	}
+}
