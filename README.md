@@ -260,7 +260,7 @@ curl -s http://localhost:7863/healthz
 # {"healthy":0,"total":0,"service":"starport"}
 ```
 
-启动后打开 **`http://localhost:7863/panel/`**，用面板「添加账号」完成登录（见下节）。
+启动后打开 **`http://localhost:7863/startport/`**，用面板「添加账号」完成登录（见下节）。
 
 常用运维命令：
 
@@ -315,7 +315,7 @@ CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
 
 **方式 A：Web 面板（推荐，各平台通用，免命令行）**
 
-打开 `http://127.0.0.1:7863/panel/`，点右上角「**添加账号**」：面板展示授权链接 → 浏览器完成登录 → 自动检测并落盘凭证 → **热加载进池（无需重启）**，顺带完成首次签到。
+打开 `http://127.0.0.1:7863/startport/`，点右上角「**添加账号**」：面板展示授权链接 → 浏览器完成登录 → 自动检测并落盘凭证 → **热加载进池（无需重启）**，顺带完成首次签到。
 
 **方式 B：命令行脚本（仅 Linux / macOS，依赖 bash + python3）**
 
@@ -646,7 +646,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：
 
 ```
-http://127.0.0.1:7863/panel/
+http://127.0.0.1:7863/startport/
 ```
 
 鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
@@ -685,7 +685,7 @@ http://127.0.0.1:7863/panel/
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
 
-### 面板接口（`/panel/api/*`）
+### 面板接口（`/startport/api/*`）
 
 与页面同一 Bearer 鉴权，可直接脚本化调用：
 
@@ -716,7 +716,7 @@ http://127.0.0.1:7863/panel/
 > ⚠️ 产物签名校验（ed25519）与「一键更新」属后续阶段，需发布流水线配套；当前设计**不含自动下载**，因此不涉及产物校验。
 > 关闭更新检查：`update.check_enabled: false`（离线 / 隐私场景）。
 
-**安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
+**安全响应头**：面板页面与全部 `/startport/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
 
 **鉴权实现**：`internal/httpauth` 统一 server 与 panel 的 Bearer 校验，使用 SHA-256 摘要 + `subtle.ConstantTimeCompare` 常量时间比较（避免逐字节比较泄露密钥信息）；上游返回的 `uid` 经白名单校验（`[A-Za-z0-9_-]`，长度 ≤64）后才用于拼凭证文件名，防止路径穿越。
 
@@ -853,7 +853,7 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 ```
 
 文件落在 state 文件同目录（默认 `data/output_probes.json`，`data/` 已被 gitignore），面板
-`GET /panel/api/model_probes` 只读透传，写入后**下次查询即生效，无需重启网关**；未探测的
+`GET /startport/api/model_probes` 只读透传，写入后**下次查询即生效，无需重启网关**；未探测的
 模型不受影响。探测判据（两种停止的区分 / 提示词量级匹配 / 并行与时间预算）的设计细节
 见脚本头部注释。
 
