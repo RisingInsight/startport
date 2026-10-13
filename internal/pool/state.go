@@ -562,6 +562,17 @@ func (p *Pool) List() []Status {
 }
 func (p *Pool) statusOf(uid string, e *entry) Status {
 	now := time.Now()
+	// reason 只在「账号级 until 冷却生效中」或「禁用中」透出：
+	//   - 冷却中：reason 描述限流/余额耗尽等原因（与 CoolRemaining 互补）；
+	//   - 禁用中：reason 是禁用原因（与 DisabledReason 双透出，既有契约，见
+	//     TestDisablePersists）；
+	//   - 自然到期后（未禁用）：残留是数据层脏，面板 / /status 会把「已恢复」的
+	//    账号显示成「还在限流」（用户实际困惑过：重启后仍看到 429 rate limit）——
+	//     一律不透出。
+	coolReason := ""
+	if now.Before(e.until) || e.disabled {
+		coolReason = e.reason
+	}
 	st := Status{
 		UID: uid,
 		// 限额台账（issue #36）：仅「带解析时间 6004 的模型级软冷却」仍在生效时非空，
@@ -579,7 +590,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		CreditsEarliestExpiry:    e.creditsEarliestExpiry,
 		CreditsEarliestRemaining: e.creditsEarliestRemaining,
 		Cooling:                  now.Before(e.until) || now.Before(e.breakerUntil),
-		Reason:                   e.reason,
+		Reason:                   coolReason,
 		Disabled:                 e.disabled,
 		Paused:                   e.paused,
 		SuccessCount:             e.successCount,

@@ -95,6 +95,27 @@ func (p *Pool) RestoreFromSnapshot() {
 	log.Printf("pool: 恢复来源=本地 state.json（较新于 Redis 快照 %s）", snap.SavedAt.Format(time.RFC3339))
 }
 
+// sweepExpiredCoolReasonLocked 自然到期的账号级冷却：清掉残留的 reason 展示文本
+// （ until / coolKind / softStreak 一律不动）：
+//   - softStreak 是指数退避计数，必须存活到「成功或签到解冻」才清零（提前清会让
+//     连续被限流的账号永不升档，见 softDurationLocked）；
+//   - until 留档（何时冷到）零成本；
+//   - 「until 非零且已过期」这个条件同时把禁用账号排除在外——禁用的 reason 描述
+//     的是禁用而非冷却（until 已被 clearCoolingLocked 归零），由 DisabledReason
+//     单独透出，不在扫除范围。
+//
+// 与 statusOf 的按查询期过滤互补：那里保证接口层永不透出过期 reason；本扫除清掉
+// 内存与 state.json 里的残留，让持久化数据也不带脏。调用方必须已持有 p.mu。
+func (p *Pool) sweepExpiredCoolReasonLocked(now time.Time) {
+	for _, e := range p.byUID {
+		if e.reason == "" || e.until.IsZero() || now.Before(e.until) {
+			continue
+		}
+		e.reason = ""
+		p.dirty.Store(true)
+	}
+}
+
 // Acquire 为账号占一个在途名额；false 表示该账号已达上限（或不存在）。
 // 必须在成功 Pick 后调用；调用方负责 defer Release。
 func (p *Pool) startFlusher() {
@@ -108,12 +129,14 @@ func (p *Pool) startFlusher() {
 		defer t.Stop()
 		for {
 			select {
-			case <-t.C:
-				p.mu.Lock()
-				if p.dirty.Swap(false) {
-					p.saveLocked()
-				}
-				p.mu.Unlock()
+		case <-t.C:
+			p.mu.Lock()
+			// 自然到期的冷却残留 reason 一并扫掉（数据层去脏；接口层另有按查询期过滤）。
+			p.sweepExpiredCoolReasonLocked(time.Now())
+			if p.dirty.Swap(false) {
+				p.saveLocked()
+			}
+			p.mu.Unlock()
 			case <-stopCh:
 				return
 			}
