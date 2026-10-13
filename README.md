@@ -14,9 +14,9 @@
 
 ---
 
-> **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的独立维护增强版**（基于上游源码演进）。
-> 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
-> 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
+> **本项目前身为 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)**（该上游已删库；本项目已同步至其删库前的最后一次更新 `ea8b1e5`）。
+> 现基于活跃社区 fork [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) 深度定制，并与其**保持长期同步**（`git remote origin` 即指向该仓库，定期 `git fetch` / `git merge origin/main` 吸收上游修复；最近一次同步至 `6b31db6`，2026-10-13）。
+> 在保留上游精巧设计（账号池调度、错误分类、提示词体系）的基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
@@ -163,6 +163,7 @@ StarPort 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 C
 | **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
 | **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
+| **原生工具调用标记还原** | 上游（DeepSeek 系）的工具调用原生语法是带全角竖线的标记文本，**仅在请求声明了 `tools` 时**才被上游解析成结构化 `tool_calls`。实测 `tools` 声明在中转环节（Responses → chat/completions 等）丢失是常态，此时模型仍想调工具，标记就以纯文本落进 `content`——Codex 这类只执行结构化 `function_call` 的客户端会把它当普通正文写进会话历史，回合直接结束、工具一次都没跑。网关在出站响应里识别并还原成 `tool_calls`（流式与非流式都覆盖） |
 
 ### 同步上游
 
@@ -181,7 +182,7 @@ StarPort 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 C
 
 未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
 
-> 上游仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本仓库与上游不再有同步关系，演进以本仓库为准。
+> 原始上游（Sliverkiss/workbuddy2api）此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本项目转向与活跃社区 fork [linguo2625469/workbuddy2api-panel](https://github.com/linguo2625469/workbuddy2api-panel) **保持长期同步**：每次同步走独立 `sync/upstream-<date>` 分支，合并后全量验证（build / vet / test）+ 打 `upstream-synced-<sha>` 标签再合回 main，解法与冲突预案详见 `deliverables/gstack/system-assessment-upstream-sync-2026-10-13.md`。
 
 ## 架构总览
 
@@ -463,6 +464,40 @@ curl -s http://localhost:7863/v1/chat/completions \
 - 降级状态是**进程内存态**，重启清零
 - 内容问题非账号问题：`ErrContentBlocked` 不罚账号（无冷却 / 熔断 / 计错），由网关降级重试消化
 
+### 原生工具调用标记还原
+
+上游（DeepSeek 系）的工具调用原生语法不是 OpenAI 的 JSON `tool_calls`，而是一段带**全角竖线**（U+FF5C）分隔符的标记文本：
+
+```text
+<PIPE>DSML<PIPE> calls>
+<PIPE>DSML<PIPE> invoke name="exec_command">
+<PIPE>DSML<PIPE> parameter name="cmd" string="true">ls -la<PIPE>DSML<PIPE> parameter>
+</PIPE>DSML<PIPE> invoke>
+</PIPE>DSML<PIPE> calls>
+```
+
+（上面用 `<PIPE>` 占位，真实分隔符是两个全角竖线。）
+
+上游**只在请求声明了 `tools` 时**才把这段标记解析成结构化 `tool_calls`。一旦某次请求没带上 `tools`——实测这在链路上是常态（协议转换丢字段、一次性 `exec` 探测、auto-review 复核回合等）——模型仍然想调工具，于是标记以纯文本落进 `content`。下游没有任何一层认识它：Codex 只执行 Responses API 的结构化 `function_call` 条目，于是把它当普通助手正文写进会话历史，回合直接 `task_complete`、工具一次都没跑。
+
+网关在出站响应里做最后一道还原（`internal/upstream/dsml.go`），判定分两级：
+
+| 工具名单状态 | 判定 |
+|---|---|
+| 非空 | **严格**：块内每个工具名都必须在名单里 |
+| 为空（`tools` 丢失，实测常态） | **弱**：块必须完美闭合，且工具名形如合法标识符（`^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,63}$`） |
+
+名单有两个来源，二者会分别缺失，所以都要：**本请求声明的工具**（`tools[].function.name` / `tools[].name` / `functions[].name`）与**会话历史里出现过的工具名**（`messages[].tool_calls[].function.name`）。
+
+还原还受三条硬性前提约束：本回合上游没有给出任何结构化 `tool_calls`（不覆盖真实调用）、块内除 invoke/parameter 与空白外不夹带正文、非流式额外要求 `finish_reason` 为 `stop`。**任何一条不满足即原文逐字节透出**——未闭合、参数畸形、超长（>256KB）一律回吐，修复层绝不吞字节。
+
+命中与否各记一行日志，便于排障时区分「没识别到」与「识别到但判定不通过」：
+
+```text
+INFO: [server] stream ...: repaired N native tool call(s) from assistant text (tool names known=K)
+WARN: [server] stream ...: saw M native tool call block(s) but repaired none (tool names known=K)
+```
+
 ### 错误分类与账号处置
 
 上游错误由 `Classify` 统一分类（判定优先级：余额耗尽 → session 失效 → 限流文案 → 状态码兜底），账号处置如下：
@@ -713,6 +748,7 @@ http://127.0.0.1:7863/panel/
 - 出站请求强制 `stream:true`；SSE 帧按 OpenAI 规范**白名单重建**（`reasoning_content` 保留、工具调用按 index 合并、未知字段剥离）
 - 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`
 - 非流式请求由本地聚合完整 SSE 流为单 `chat.completion` 响应（含 `reasoning_content` / `tool_calls`）
+- 正文里的原生工具调用标记在透传前还原为 `delta.tool_calls`（见「原生工具调用标记还原」）：命中时一帧会拆成「正文帧 + N 个调用帧 + 收尾帧」，上游的 `finish_reason: stop` 改写为 `tool_calls` 且排在调用帧之后；未命中时逐字节透传
 
 ### 上游端点
 

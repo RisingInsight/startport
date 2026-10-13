@@ -549,7 +549,9 @@ function go(v) {
   if (v === 'keys') loadKeys();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
-  if (v === 'accounts') loadExpiry();
+  // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
+  // 每轮刷新）。不再「打开账号池就打上游」——逐账号实时查在账号多时会卡死面板。
+  // 完整逐包明细由卡片上的「检查」按钮显式触发（loadPackages/loadExpiry）。
   if (v === 'taskscenter') reattachQueueView();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
@@ -1029,6 +1031,9 @@ async function loadOverview(quiet) {
     renderAccounts(d.accounts || []);
     renderModelLocks(d.model_locks);
     renderUpdateBanner(d.update);
+    // 到期卡片跟随首页统计同步刷新（用同一份响应里的到期快照，不额外发请求）。
+    // 已有逐包明细缓存时不再覆盖——明细信息量更大，别把它降级成快照。
+    if ($('expBox') && !lastPackages) renderExpirySnapshot(d);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
@@ -4105,7 +4110,16 @@ if ($('pkSort')) {
   };
 }
 
-async function loadPackages() {
+// loadPackages 按需拉取：有缓存（上次任意入口拉到的 packages 数据）先直接渲染，
+// 不再「切进积分构成页就打一次上游」——逐账号实时查询在账号多时既慢又压上游。
+// 无缓存（首次进入）才自动查一次；显式刷新（force=true，点「刷新」按钮）始终实时查。
+async function loadPackages(force) {
+  if (!force && lastPackages) {
+    renderPackages(lastPackages, lastDetailLimit);
+    const ageMin = Math.floor((Date.now() - lastPackagesAt) / 60000);
+    if (ageMin > 0) $('pkNote').textContent = lastPackages.accounts.length + ' 个账号 · ' + ageMin + ' 分钟前的数据，点「刷新」更新';
+    return;
+  }
   $('pkSummary').innerHTML = '<div class="empty">查询中…（逐账号向上游实时查询）</div>';
   $('pkDetail').innerHTML = '';
   $('pkExpiry').innerHTML = '<div class="pk-expiry-empty">查询中…</div>';
@@ -4251,6 +4265,57 @@ function attnEarliestExpiry(s) {
   return { days: Math.round((day - today) / 86400000), remain: s.credits_earliest_remaining };
 }
 
+/* 快照版到期提醒：不查上游，直接用 /overview 已有的 credits_earliest_expiry /
+   credits_earliest_remaining（由签到与余额后台刷新写入 state.json，默认每 5 分钟
+   更新一次）。打开面板即可看到「最近哪批要过期」，成本与首页统计条相同为零。
+
+   与 renderExpiry（逐包明细版）的差异：这里只有**最早一批**的日期与数量，没有
+   后续批次、也没法算「7 天内合计」——那是 packages 接口才有的信息。因此卡片上
+   保留「检查」按钮作为增强入口，用户想要完整明细再显式触发一次上游查询。 */
+function renderExpirySnapshot(d) {
+  const list = (d && d.accounts) || [];
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const keyed = list.map(a => {
+    // 后端给的是 RFC3339 带时区；无到期信息（长期包/未刷新）的账号排在最后。
+    let key = null, ms = 0;
+    if (a.credits_earliest_expiry) {
+      const t = new Date(a.credits_earliest_expiry);
+      if (!isNaN(t.getTime())) { ms = t.getTime(); key = ms; }
+    }
+    return { a, key, ms };
+  });
+  keyed.sort((x, y) => {
+    if (x.key === null && y.key === null) return 0;
+    if (x.key === null) return 1;
+    if (y.key === null) return -1;
+    return x.key - y.key;
+  });
+  const rows = keyed.map(({ a, ms }) => {
+    const nm = esc(a.nickname || String(a.uid || '').slice(0, 8));
+    if (!ms || !a.credits_earliest_remaining) {
+      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
+        '<span class="exp-nm">' + nm + '</span>' +
+        '<span class="exp-main">无近期到期批次</span></div>';
+    }
+    const days = Math.max(0, Math.ceil((ms - today.getTime()) / 86400000));
+    const remain = Number(a.credits_earliest_remaining || 0);
+    const daily = Math.ceil(remain / Math.max(1, days));
+    const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
+    const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
+    const when = new Date(ms).toISOString().slice(0, 10);
+    return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
+      '<span class="exp-nm">' + nm + '</span>' +
+      '<span class="exp-main">最近到期 <b>' + esc(when) + '</b>（' + dayWord +
+      '）· 该批 <b>' + fmtTok(remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
+      fmtTok(daily) + '</b>' +
+      '<div class="note">仅最早一批，点「检查」看全部到期批次</div>' +
+      '</span></div>';
+  }).join('');
+  $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
+  $('expNote').textContent = list.length + ' 个账号 · 快照（来自本地状态，点「检查」拉实时明细）';
+  $('expBox').hidden = false;
+}
+
 async function loadExpiry(force) {
   if (!$('expBox')) return;
   if (expFetching) return;
@@ -4273,4 +4338,5 @@ async function loadExpiry(force) {
 
 if ($('btnExp')) $('btnExp').onclick = () => loadExpiry(true);
 
-if ($('btnPk')) $('btnPk').onclick = loadPackages;
+// 「刷新」始终实时查（显式 force，不依赖事件对象真值）
+if ($('btnPk')) $('btnPk').onclick = () => loadPackages(true);

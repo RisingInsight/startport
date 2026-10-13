@@ -1580,8 +1580,12 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 
       <!-- 积分到期提醒：紧贴概览带置顶（原排在页面底部账号池旁——"积分要过期了"
            是全系统紧急度最高的信息，必须一打开就能看到）。内容卡片化：每账号
-           一张卡，网格自动铺满宽度。 -->
-      <div class="box" id="expBox" hidden>
+           一张卡，网格自动铺满宽度。
+           卡片默认可见（issue #137）：此前 hidden +「仅点检查才渲染」形成死锁
+           （按钮藏在隐藏卡片里，用户看不到也就点不到）。现在进页面即用 /overview
+           的到期快照渲染（数据来自 state.json，不经上游），「检查」按钮改为拉取
+           逐包明细的增强入口。 -->
+      <div class="box" id="expBox">
         <header>
           <h3>积分到期提醒<span class="hint" title="日均需耗 = 批次剩余 ÷ 距到期天数">按最近到期批次估算 · 上游按失效时刻先后优先扣减（FEFO）</span></h3>
           <span class="grow"></span>
