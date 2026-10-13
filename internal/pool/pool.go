@@ -71,6 +71,12 @@ type Pool struct {
 	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
 	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
 	persistFails int
+	// fallbackLogUID / fallbackLogUntil 全冷却兜底（pickEarliestExpiryLocked）的
+	// 日志去重键：同一账号同一冷却周期（until）只报一次——兜底在账号冷却期间可能
+	// 逐请求触发，不去重会把面板系统频道的 WARN 刷屏、淹掉真正要看的告警
+	// （同 persistFails 的节流思路）。仅 pick 写锁路径读写，无需 atomic。
+	fallbackLogUID   string
+	fallbackLogUntil time.Time
 	// pickSeq 单调递增的选号序号：每次 pick 选中账号时自增并记到 entry.usedSeq，
 	// 为 LRU 兜底/防惊群提供与 time.Now() 精度无关的严格全序（Windows ~0.5ms 精度下
 	// lastUsed 墙钟会全等）。仅 pick 写锁路径读写，无需 atomic。
