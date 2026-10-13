@@ -905,7 +905,12 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   .tr-q:hover { background: var(--accent-soft); color: var(--ink); }
   .tr-q.on { color: var(--accent); font-weight: 700; }
   .tr-check { width: 10px; height: 8px; fill: none; stroke: currentColor; stroke-width: 1.6; }
-  .tr-cal { display: flex; gap: 18px; padding: 12px 14px 10px; flex: 1 1 auto; min-width: 0; }
+  /* flex-basis 必须为 0（不能是 auto）：auto 的基准=内容宽（双月≈500px），与左侧
+     快捷列表（132px）相加超过 withcal 的 660px 时，flex-wrap 会把整个日历挤到
+     第二行并拉满全宽——弹层从 ~410px 暴涨到 ~640px，视觉上「飘」在页面中间
+     （2026-10-13 用户截图反馈）。basis=0 = 吃掉整行剩余宽度，永不换行；
+     月份格子是 1fr，窄了自然收缩。min-width:0 允许压到内容宽以下。 */
+  .tr-cal { display: flex; gap: 18px; padding: 12px 14px 10px; flex: 1 1 0; min-width: 0; }
   .tr-mon { flex: 1 1 0; min-width: 0; }
   .tr-mon-h { display: flex; align-items: center; justify-content: space-between;
     font-weight: 700; font-size: var(--fs-sm); margin-bottom: 6px; white-space: nowrap; }
