@@ -295,9 +295,30 @@ function trangePopHtml(id) {
     : '点两天生成区间 · 灰色为未到达的日子';
   return '<div class="tr-pop' + (showCal ? ' withcal' : '') + '"><div class="tr-quick' +
     (showCal ? '' : ' solo') + '">' + quick + '</div>' +
-    (showCal ? '<div class="tr-cal">' + cal + '</div>' +
+    (showCal ? '<div class="tr-cal"><div class="tr-mons">' + cal + '</div>' +
+      '<div class="tr-rangefoot">' + trRangeFootHtml(id) + '</div></div>' +
       '<div class="tr-hint">' + esc(hint) + '</div>' : '') +
     '</div>';
+}
+
+/* trRangeFootHtml 日历列底部的区间摘要条：实时反映当前 from → to 与跨度天数
+   （点选过程中即时更新，与 hint 行的操作引导互补）。同时承担「填充」职责——
+   字体度量差异下快捷列表比日历高出一截，摘要条把日历列撑满，不留右下角空白
+   （2026-10-13 用户反馈「红框处特别空」）。 */
+function trRangeFootHtml(id) {
+  const st = trangeState(id);
+  const f = st.from, t = st.to;
+  const fmt = d => (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0') + ' ' +
+    String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  let txt = '未选择区间';
+  if (f && t) {
+    const dayOf = d => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const days = Math.max(1, Math.round((dayOf(t) - dayOf(f)) / 86400000) + 1);
+    txt = fmt(f) + '  →  ' + fmt(t) + '（' + days + ' 天）';
+  } else if (f) {
+    txt = fmt(f) + '  →  待选择结束日';
+  }
+  return '<span class="tr-rf-k">当前区间</span><span class="tr-rf-v">' + esc(txt) + '</span>';
 }
 
 /* bindTrPop 弹层内交互:快捷口径立即生效并收起;「自定义…」停留进入日历点选;
