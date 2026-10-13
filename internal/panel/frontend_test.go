@@ -1237,12 +1237,10 @@ process.stdout.write(JSON.stringify(out));`
 	}
 }
 
-// TestAppJSAccountCoolReasonNote 账号行「冷却原因」备注的三态渲染（2026-10-13 回归）：
-//   - 冷却中（cool_remaining_sec>0）：reason 原样显示，与徽标倒计时互补；
-//   - 已恢复（until 在过去）：降级为「… · 已于 X前恢复」历史备注——reason 持久化在
-//     state.json、恢复不清除，此前不分态裸显示，用户重启后看到「可用 / 429 rate limit」
-//     误以为账号仍在限流；
-//   - until 零值/缺失：不显示历史备注（宁缺毋滥）。
+// TestAppJSAccountCoolReasonNote 账号行「冷却原因」备注的渲染规则（2026-10-13 回归）：
+// 仅「正在冷却」时显示 reason（与徽标倒计时互补）；已恢复（until 在过去）/ until
+// 零值 / 无 reason 一律不显示——后端 statusOf 按查询期过滤 + flusher 5s 扫除双保险
+// 之外，这里是前端最后一道防线（用户明确要求：恢复了就不要显示）。
 func TestAppJSAccountCoolReasonNote(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -1291,8 +1289,8 @@ sandbox.renderAccounts([
 ]);
 const rows = sinks.accBody.innerHTML.split('<tr').slice(1);
 const out = {
-  cooling_plain: rows[0].includes('429 rate limit') && !rows[0].includes('恢复'),
-  recovered_hist: rows[1].includes('429 rate limit') && rows[1].includes('恢复'),
+  cooling_plain: rows[0].includes('429 rate limit'),
+  recovered_hidden: !rows[1].includes('429 rate limit') && !rows[1].includes('恢复'),
   zero_until_hidden: !rows[2].includes('429 rate limit'),
   no_reason_hidden: !rows[3].includes('429'),
 };
@@ -1310,7 +1308,7 @@ process.exit(0);`
 	if err != nil {
 		t.Fatalf("cool reason note node test failed: %v\n%s", err, out)
 	}
-	const want = `{"cooling_plain":true,"recovered_hist":true,"zero_until_hidden":true,"no_reason_hidden":true}`
+	const want = `{"cooling_plain":true,"recovered_hidden":true,"zero_until_hidden":true,"no_reason_hidden":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("cool reason note=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
