@@ -1236,3 +1236,82 @@ process.stdout.write(JSON.stringify(out));`
 		t.Fatalf("attn expiry results=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestAppJSAccountCoolReasonNote 账号行「冷却原因」备注的三态渲染（2026-10-13 回归）：
+//   - 冷却中（cool_remaining_sec>0）：reason 原样显示，与徽标倒计时互补；
+//   - 已恢复（until 在过去）：降级为「… · 已于 X前恢复」历史备注——reason 持久化在
+//     state.json、恢复不清除，此前不分态裸显示，用户重启后看到「可用 / 429 rate limit」
+//     误以为账号仍在限流；
+//   - until 零值/缺失：不显示历史备注（宁缺毋滥）。
+func TestAppJSAccountCoolReasonNote(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; cool reason note test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const mk = () => ({ innerHTML: '', textContent: '', hidden: false, dataset: {}, style: {},
+  classList: { add() {}, remove() {}, toggle() {} },
+  addEventListener() {}, removeEventListener() {}, focus() {}, blur() {}, click() {},
+  querySelector: () => null, querySelectorAll: () => [], appendChild() {}, setAttribute() {}, removeAttribute() {} });
+const sinks = { accBody: mk() };
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+const sandbox = new Proxy({
+  location: { hash: '' }, history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: {
+    querySelectorAll: () => [], querySelector: () => inert,
+    getElementById: id => (sinks[id] || (sinks[id] = mk())),
+    addEventListener() {}, documentElement: inert, head: inert, body: inert,
+    createElement: () => inert, cookie: '',
+  },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src + '\nthis.renderAccounts = renderAccounts;', sandbox, { filename: 'panel.js' });
+const past = new Date(Date.now() - 3600e3).toISOString();
+const future = new Date(Date.now() + 600e3).toISOString();
+const zero = '0001-01-01T00:00:00Z';
+const base = { uid: 'aaaaaaaa-1111-2222-3333-444444444444', nickname: 't', realm: 'cn', credits: 100, credits_total: 200, success_count: 1, err_total: 0, in_flight: 0, token_usage: {}, last_success: past };
+sandbox.renderAccounts([
+  Object.assign({}, base, { reason: '429 rate limit', cool_remaining_sec: 600, until: future }),
+  Object.assign({}, base, { uid: 'bbbbbbbb-1111', reason: '429 rate limit', cool_remaining_sec: 0, until: past }),
+  Object.assign({}, base, { uid: 'cccccccc-1111', reason: '429 rate limit', cool_remaining_sec: 0, until: zero }),
+  Object.assign({}, base, { uid: 'dddddddd-1111', reason: '', cool_remaining_sec: 0, until: zero }),
+]);
+const rows = sinks.accBody.innerHTML.split('<tr').slice(1);
+const out = {
+  cooling_plain: rows[0].includes('429 rate limit') && !rows[0].includes('恢复'),
+  recovered_hist: rows[1].includes('429 rate limit') && rows[1].includes('恢复'),
+  zero_until_hidden: !rows[2].includes('429 rate limit'),
+  no_reason_hidden: !rows[3].includes('429'),
+};
+process.stdout.write(JSON.stringify(out));
+process.exit(0);`
+	f, err := os.CreateTemp(t.TempDir(), "coolnote-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("cool reason note node test failed: %v\n%s", err, out)
+	}
+	const want = `{"cooling_plain":true,"recovered_hist":true,"zero_until_hidden":true,"no_reason_hidden":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("cool reason note=%s\nwant %s", strings.TrimSpace(string(out)), want)
+	}
+}

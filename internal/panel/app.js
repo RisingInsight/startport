@@ -61,7 +61,21 @@ function renderAccounts(list) {
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
     } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
-    const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
+    // 冷却原因备注：仅「正在冷却」时原样显示（与徽标倒计时互补）；已恢复的降级为
+    // 历史备注并标注恢复时间——reason 持久化在 state.json、恢复不清除，裸显示会被
+    // 误读成「仍在限流」（用户实际困惑过：重启后仍看到 429 rate limit）。
+    // until 缺失/零值/未来时不显示历史备注（宁缺毋滥）。
+    let note = '';
+    if (s.reason && cool > 0) {
+      note = '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>';
+    } else if (s.reason && s.until) {
+      const u = new Date(s.until);
+      const rel = ago(s.until);
+      if (!isNaN(u.getTime()) && u.getTime() < Date.now() && rel !== '—') {
+        note = '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px;opacity:.7">' +
+          esc(s.reason) + ' · 已于 ' + rel + '恢复</div>';
+      }
+    }
     const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
     const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
     // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
