@@ -911,7 +911,14 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
      （2026-10-13 用户截图反馈）。basis=0 = 吃掉整行剩余宽度，永不换行；
      月份格子是 1fr，窄了自然收缩。min-width:0 允许压到内容宽以下。 */
   .tr-cal { display: flex; gap: 18px; padding: 12px 14px 10px; flex: 1 1 0; min-width: 0; }
-  .tr-mon { flex: 1 1 0; min-width: 0; }
+  /* .tr-cal 改 flex 列布局：.tr-mons（双月行）吃掉主要高度，.tr-rangefoot（区间
+     摘要）钉底。月份网格 .tr-days 行高 minmax(30px,1fr) 弹性增长——否则 .tr-cal
+     被 flex 拉高时月份内容停在顶部、底部留空白带（字体度量差异下可达 ~120px，
+     2026-10-13 用户截图反馈「红框处特别空」）。 */
+  .tr-cal { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 10px;
+    flex: 1 1 0; min-width: 0; }
+  .tr-mons { display: flex; gap: 18px; flex: 1 1 auto; min-height: 0; }
+  .tr-mon { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
   .tr-mon-h { display: flex; align-items: center; justify-content: space-between;
     font-weight: 700; font-size: var(--fs-sm); margin-bottom: 6px; white-space: nowrap; }
   .tr-nav { border: none; background: none; color: var(--ink-3); cursor: pointer;
@@ -919,9 +926,17 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   .tr-nav:hover { color: var(--accent); }
   .tr-nav.ghost { visibility: hidden; }
   .tr-wk, .tr-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px 0; }
+  .tr-days { flex: 1 1 auto; grid-auto-rows: minmax(30px, 1fr); }
+  /* 区间摘要条：钉底 + 上边线，与 hint 操作行互补（一个说结果、一个说操作）。 */
+  .tr-rangefoot { flex: 0 0 auto; display: flex; align-items: baseline; gap: 8px;
+    border-top: 1px solid var(--line-soft); padding-top: 8px;
+    font-size: var(--fs-2xs); color: var(--ink-3); white-space: nowrap; }
+  .tr-rf-k { flex: 0 0 auto; }
+  .tr-rf-v { color: var(--ink); font-variant-numeric: tabular-nums; }
   .tr-wk i { font-style: normal; text-align: center; font-size: var(--fs-2xs);
     color: var(--ink-3); padding: 2px 0; }
-  .tr-d { border: none; background: none; width: 100%; height: 30px; border-radius: 6px;
+  /* min-height 而非固定 height：grid 行 1fr 长高时日期格随之拉伸（默认 stretch）。 */
+  .tr-d { border: none; background: none; width: 100%; min-height: 30px; border-radius: 6px;
     font-size: var(--fs-xs); font-family: inherit; color: var(--ink); cursor: pointer;
     position: relative; font-variant-numeric: tabular-nums; }
   .tr-d:hover { background: var(--accent-soft); }
