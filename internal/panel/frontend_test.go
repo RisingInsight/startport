@@ -401,6 +401,9 @@ process.stdout.write(JSON.stringify({
 // 用量时序图的柱体类名不得叫 bar：账号池的积分条是 .bar{height:3px}，而 SVG2 里
 // height 是 rect 的 CSS 几何属性——同名类会把每根柱子压成 3px 高，图看起来"没数据"。
 // 这个坑只能在浏览器里看出来，所以在这里钉住类名。
+//
+// DeepSeek 式改版后主图三指标切换：默认「消耗积分」为单段柱（每点 1 根 usbar），
+// 「Tokens」为 prompt/completion 双段堆叠（每点 2 根）。两种模式都在此钉住。
 func TestAppJSUsageChartBarClass(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -418,25 +421,36 @@ const fmtEnd = src.indexOf('function usStat(');
 if ([start, end, escStart, escEnd, fmtStart, fmtEnd].some(v => v < 0)) throw new Error('usage chart helpers not found');
 const host = { innerHTML: '', textContent: '' };
 const ctx = {
-  Date, Number, String, Math, RegExp, isNaN, Set, Array, Object, Infinity,
-  document: { getElementById: () => host },
+  Date, Number, String, Math, RegExp, isNaN, Set, Array, Object, Infinity, Map,
+  document: undefined,
   $: () => host,
 };
 vm.createContext(ctx);
 vm.runInContext(src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(start, end) +
-  '\nthis.renderUsageChart=renderUsageChart;', ctx);
+  '\nthis.renderUsageChart=renderUsageChart; this.setUsMetric=v=>{usMetric=v;};', ctx);
+// 三段堆叠(命中/未命中/输出)要求同量级数据:跨 3 个数量级时小段会被
+// 0.4px 可见阈值裁掉(该阈值是防 0 高度矩形污染 DOM 的,不是 bug)。
 const series = [
-  { t: '2026-09-30T09', scope: 'hour', prompt_tokens: 35, completion_tokens: 16, total_tokens: 51, requests: 1 },
-  { t: '2026-09-30T11', scope: 'hour', prompt_tokens: 978324, completion_tokens: 20621, total_tokens: 998945, requests: 39 },
-  { t: '2026-09-30T13', scope: 'hour', prompt_tokens: 27400952, completion_tokens: 104913, total_tokens: 27505865, requests: 200 },
+  { t: '2026-09-30T09', scope: 'hour', prompt_tokens: 24000, completion_tokens: 6000, total_tokens: 30000, requests: 1, credits: 0.5, cache_hit_tokens: 18000, cache_miss_tokens: 6000 },
+  { t: '2026-09-30T11', scope: 'hour', prompt_tokens: 27000, completion_tokens: 7000, total_tokens: 34000, requests: 39, credits: 2.5, cache_hit_tokens: 21000, cache_miss_tokens: 6000 },
+  { t: '2026-09-30T13', scope: 'hour', prompt_tokens: 30000, completion_tokens: 8000, total_tokens: 38000, requests: 200, credits: 12, cache_hit_tokens: 24000, cache_miss_tokens: 6000 },
 ];
 ctx.renderUsageChart(series);
 const svg = host.innerHTML;
+const count = (s, re) => (s.match(re) || []).length;
+const creditsBars = count(svg, /class="usbar"/g);
+const creditsHits = count(svg, /class="usbar-hit"/g);
+const creditsGroups = count(svg, /<g class="usbarg"/g);
+const creditsTitles = count(svg, /<title>/g);
+ctx.setUsMetric('tokens');
+ctx.renderUsageChart(series);
+const svgTok = host.innerHTML;
 process.stdout.write(JSON.stringify({
   hasUsbar: svg.includes('class="usbar"'),
   hasBareBar: /class="bar"/.test(svg),
-  hasGradient: svg.includes('usGradP') && svg.includes('usGradC'),
-  barCount: (svg.match(/class="usbar"/g) || []).length,
+  creditsBars, creditsHits, creditsGroups, creditsTitles,
+  tokensBars: count(svgTok, /class="usbar"/g),
+  tokensHitMissOut: ['usGradHit', 'usGradMiss', 'usGradOut'].every(g => svgTok.includes('fill="url(#' + g + ')"')),
   hasPeak: svg.includes('峰值'),
   hasAvg: svg.includes('均值'),
   emptyState: (function () { ctx.renderUsageChart([]); return host.innerHTML.includes('us-empty'); })(),
@@ -453,7 +467,7 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("usage chart node test failed: %v\n%s", err, out)
 	}
-	const want = `{"hasUsbar":true,"hasBareBar":false,"hasGradient":true,"barCount":6,"hasPeak":true,"hasAvg":true,"emptyState":true}`
+	const want = `{"hasUsbar":true,"hasBareBar":false,"creditsBars":3,"creditsHits":3,"creditsGroups":3,"creditsTitles":0,"tokensBars":9,"tokensHitMissOut":true,"hasPeak":true,"hasAvg":true,"emptyState":true}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("usage chart=%s\nwant %s", out, want)
 	}
@@ -843,15 +857,17 @@ process.stdout.write(JSON.stringify(names));`
 	}
 }
 
-// TestAppJSChartTooltipInsideBar 图表 tooltip 必须挂在每根柱子内部（issue #128）。
+// TestAppJSChartTooltipDelegated 图表 tooltip 必须是"每根柱子独立寻址"的委托结构。
 //
-// <title> 在 SVG 里描述的是**父元素**。此前它被平铺在 <svg> 根下（<rect> 是自闭合的，
-// 无法包含子节点），于是整张图共用一个 tooltip —— 浏览器取第一个 —— 悬停任何柱子都
-// 显示同一份数据。这类问题不报错、不影响渲染，只靠肉眼看很容易漏。
+// 演进史:issue #128 时代 <title> 平铺在 <svg> 根下,整张图共用一个 tooltip——
+// 浏览器取第一个,悬停任何柱子都显示同一份数据,当时的修复是把 <title> 包进 <g>。
+// DeepSeek 式改版后换成 HTML 富 tooltip(命中/未命中/输出多行明细,<title> 塞不下),
+// 寻址机制变为:g.usbarg[data-i] + 宿主 div 上的委托 mousemove。
 //
-// 断言结构：<g> 数量 == 数据点数，且每个 <g> 紧跟一个 <title>；同时确认没有
-// 游离在 <g> 之外的 <title>。
-func TestAppJSChartTooltipInsideBar(t *testing.T) {
+// 本用例钉住新机制的结构不变量:①分组数 == 数据点数;②每组都带 data-i;
+// ③不再有任何 <title>(残留会被浏览器渲染成原生 tooltip,和富 tooltip 叠加);
+// ④透明命中层(usbar-hit)数量 == 数据点数——没有它,悬停必须精确落在细柱上。
+func TestAppJSChartTooltipDelegated(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; chart tooltip test skipped")
@@ -864,6 +880,11 @@ const chartStart = src.indexOf('function renderUsageChart');
 if (start < 0 || chartStart < 0) throw new Error('chart functions not found');
 let end = src.indexOf('\nfunction ', chartStart + 10);
 if (end < 0) end = src.length;
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('function usStat(');
+if ([escStart, escEnd, fmtStart, fmtEnd].some(v => v < 0)) throw new Error('fmt helpers not found');
 const sinks = {};
 const mk = id => (sinks[id] = { innerHTML: '', textContent: '' });
 const ctx = {
@@ -873,23 +894,35 @@ const ctx = {
   Date, Math, Number, String, Map, Array, Object, isNaN, Infinity, isFinite, Set,
 };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + '\nthis.renderUsageChart = renderUsageChart;', ctx);
+vm.runInContext(src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(start, end) +
+  '\nthis.renderUsageChart = renderUsageChart; this.usMainTipHTML = usMainTipHTML;', ctx);
 const series = [];
 for (let h = 0; h < 5; h++) {
   const d = new Date(); d.setHours(d.getHours() - (4 - h), 0, 0, 0);
   const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' +
               String(d.getDate()).padStart(2, '0') + 'T' + String(d.getHours()).padStart(2, '0');
   series.push({ t: iso, scope: 'hour', prompt_tokens: (h + 1) * 100,
-                completion_tokens: (h + 1) * 10, total_tokens: (h + 1) * 110, requests: h + 1 });
+                completion_tokens: (h + 1) * 10, total_tokens: (h + 1) * 110, requests: h + 1,
+                credits: 0.1 * (h + 1), cache_hit_tokens: (h + 1) * 80, cache_miss_tokens: (h + 1) * 20 });
 }
 ctx.renderUsageChart(series);
 const svg = sinks['usChart'] ? sinks['usChart'].innerHTML : '';
-const groups = svg.match(/<g><title>/g) || [];
-const titles = svg.match(/<title>[^<]*<\/title>/g) || [];
-// 游离的 <title>：前面不是 <g>（即仍平铺在根下）
-const loose = (svg.match(/(?:<rect[^>]*\/>|<\/g>)<title>/g) || []).length;
+const count = (s, re) => (s.match(re) || []).length;
+const tip = ctx.usMainTipHTML({
+  raw: '2026-10-05T14', req: 3, err: 1, credits: 1.5,
+  pt: 100, ct: 20, tt: 120, ch: 80, cm: 20,
+}, false);
 process.stdout.write(JSON.stringify({
-  points: series.length, groups: groups.length, titles: titles.length, loose: loose,
+  points: series.length,
+  groups: count(svg, /<g class="usbarg"/g),
+  dataIdx: count(svg, /data-i="/g),
+  titles: count(svg, /<title>/g),
+  hitLayer: count(svg, /class="usbar-hit"/g),
+  tipRows: count(tip, /class="r"/g),
+  tipHit: tip.includes('输入(命中缓存)'),
+  tipMiss: tip.includes('输入(未命中缓存)'),
+  tipOut: tip.includes('输出'),
+  tipFail: tip.includes('失败'),
 }));`
 	f, err := os.CreateTemp(t.TempDir(), "charttip-*.cjs")
 	if err != nil {
@@ -903,10 +936,89 @@ process.stdout.write(JSON.stringify({
 	if err != nil {
 		t.Fatalf("chart tooltip node test failed: %v\n%s", err, out)
 	}
-	const want = `{"points":5,"groups":5,"titles":5,"loose":0}`
+	const want = `{"points":5,"groups":5,"dataIdx":5,"titles":0,"hitLayer":5,"tipRows":6,"tipHit":true,"tipMiss":true,"tipOut":true,"tipFail":true}`
 	if strings.TrimSpace(string(out)) != want {
-		t.Fatalf("chart tooltip structure=%s\nwant %s（groups 应等于数据点数，loose 应为 0）",
+		t.Fatalf("chart tooltip structure=%s\nwant %s（groups/data-i/hitLayer 应等于数据点数，<title> 应为 0）",
 			strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSUsageDailyMerge 按天归并(DeepSeek 式主图的粒度自适应)与分组小节的数据形状。
+//
+// 要点:①小时桶按日历天归并,同天多桶累加(请求/token/积分/缓存明细各字段都对);
+// ②>72h 的窗口主图自动切按天柱(柱组数 == 天数,说明行带「天」字);
+// ③缓存未观测的样本在 tooltip 里合成一行「输入」,不伪造两行。
+func TestAppJSUsageDailyMerge(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; daily merge test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function parsePointTime');
+const end = src.indexOf('function fmtTokTip');
+const escStart = src.indexOf('function esc(');
+const escEnd = src.indexOf('function ago(');
+const fmtStart = src.indexOf('function fmtTok(');
+const fmtEnd = src.indexOf('function usStat(');
+if ([start, end, escStart, escEnd, fmtStart, fmtEnd].some(v => v < 0)) throw new Error('usage chart helpers not found');
+const sinks = {};
+const mk = id => (sinks[id] = { innerHTML: '', textContent: '' });
+const ctx = {
+  esc: s => String(s == null ? '' : s),
+  fmtTok: v => String(v == null ? 0 : v),
+  $: id => (sinks[id] || mk(id)),
+  Date, Math, Number, String, Map, Array, Object, isNaN, Infinity, isFinite, Set,
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(escStart, escEnd) + src.slice(fmtStart, fmtEnd) + src.slice(start, end) +
+  '\nthis.mergeDaily = mergeDaily; this.renderUsageChart = renderUsageChart; this.usMainTipHTML = usMainTipHTML;', ctx);
+const mkHour = (day, hour, req, credits, ch, cm) => ({
+  t: '2026-10-0' + day + 'T' + String(hour).padStart(2, '0'), scope: 'hour',
+  requests: req, credits: credits, prompt_tokens: 100 * req, completion_tokens: 10 * req,
+  total_tokens: 110 * req, cache_hit_tokens: ch, cache_miss_tokens: cm,
+});
+const merged = ctx.mergeDaily([
+  mkHour(1, 9, 2, 1.0, 150, 50),
+  mkHour(1, 15, 3, 0.5, 0, 0),
+  mkHour(2, 10, 1, 0.2, 80, 20),
+]);
+ctx.renderUsageChart([
+  mkHour(1, 9, 2, 1.0, 150, 50),
+  mkHour(1, 15, 3, 0.5, 0, 0),
+  mkHour(2, 10, 1, 0.2, 80, 20),
+  mkHour(3, 10, 1, 0.1, 0, 0),
+  mkHour(4, 10, 1, 0.1, 0, 0),
+  mkHour(5, 10, 1, 0.1, 0, 0),
+]);
+const svg = sinks['usChart'] ? sinks['usChart'].innerHTML : '';
+const note = sinks['usChartNote'] ? sinks['usChartNote'].textContent : '';
+const count = (s, re) => (s.match(re) || []).length;
+const noCacheTip = ctx.usMainTipHTML({ raw: '2026-10-05', req: 1, err: 0, credits: 0.1, pt: 100, ct: 10, tt: 110, ch: 0, cm: 0 }, true);
+process.stdout.write(JSON.stringify({
+  days: merged.length,
+  day1: { raw: merged[0].raw, req: merged[0].req, credits: merged[0].credits, tt: merged[0].tt, ch: merged[0].ch },
+  dailyBars: count(svg, /<g class="usbarg"/g),
+  noteSaysDays: note.includes('天'),
+  noCacheRows: count(noCacheTip, /class="r"/g),
+  noCacheSingleInput: noCacheTip.includes('输入') && !noCacheTip.includes('命中缓存'),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "dailymg-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("daily merge node test failed: %v\n%s", err, out)
+	}
+	const want = `{"days":2,"day1":{"raw":"2026-10-01","req":5,"credits":1.5,"tt":550,"ch":150},"dailyBars":5,"noteSaysDays":true,"noCacheRows":5,"noCacheSingleInput":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("daily merge=%s\nwant %s", strings.TrimSpace(string(out)), want)
 	}
 }
 
@@ -915,9 +1027,13 @@ process.stdout.write(JSON.stringify({
 // renderAttn 此前直接拿 overview 的 credits_earliest_remaining（该批剩余积分量）
 // 当「天数」与 7 比较，语义全错。改由 attnEarliestExpiry 三级降级取数：
 // ① lastPackages 共享缓存有该账号的实时包明细 → 与到期卡完全同口径（同一
-//    expBatches/expDaysLeft，过滤已到期批次后取最早）；
+//
+//	expBatches/expDaysLeft，过滤已到期批次后取最早）；
+//
 // ② 退回 overview 的 credits_earliest_expiry，按日历日差折算天数；零值
-//    "0001-01-01T00:00:00Z" 视为无数据（Go 的 omitempty 对非指针 time.Time 无效）；
+//
+//	"0001-01-01T00:00:00Z" 视为无数据（Go 的 omitempty 对非指针 time.Time 无效）；
+//
 // ③ 都没有 → null，不产生预警条目。
 //
 // 切片锚点与 TestAppJSExpirySortedByExpiry 保持一致：attnEarliestExpiry 必须落在

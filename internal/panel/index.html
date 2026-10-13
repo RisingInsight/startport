@@ -31,6 +31,11 @@
   /* ── 派生语义令牌（v2 视觉刷新）────────────────────────────────────
      全部由既有令牌派生，浅色主题各自覆盖，保证明暗自动适配。 */
   --hi: var(--gold);        /* 数据高光色：把品牌金提为"重点数据"用色，不再只做署名 */
+  /* 用量页语义色板:与缓存三色(命中绿/未命中蓝/输出金)互不撞色——
+     积分=紫(钱),请求=青(流量)。此前积分/请求柱都是 accent 蓝,与
+     「输入(未命中缓存)」同色,同页两种语义(用户反馈)。 */
+  --viz-credit: #b48efc;    /* 积分消耗:紫 */
+  --viz-req: #38c5d8;       /* 请求次数:青 */
   --cool: color-mix(in srgb, var(--accent) 34%, var(--ink-2)); /* 冷中性：非告警的"暂停/未启用"态 */
   --ring: color-mix(in srgb, var(--accent) 42%, transparent);  /* 焦点环 */
   --glass: color-mix(in srgb, var(--surface) 72%, transparent);/* 玻璃面（顶栏） */
@@ -92,6 +97,8 @@
   --shadow: 0 1px 2px rgba(16,20,32,.06), 0 8px 24px -14px rgba(16,20,32,.14);
   /* 派生令牌：浅色下光晕 / 星点 / 网格整体更淡，避免发灰。 */
   --hi: var(--gold);
+  --viz-credit: #6f4bd8;    /* 积分消耗:紫(亮色主题加深保证对比度) */
+  --viz-req: #0b8ca0;       /* 请求次数:青 */
   --cool: color-mix(in srgb, var(--accent) 30%, var(--ink-2));
   --ring: color-mix(in srgb, var(--accent) 38%, transparent);
   --glass: color-mix(in srgb, var(--surface) 80%, transparent);
@@ -645,15 +652,6 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   .kpi:nth-child(4) { animation-delay: 90ms; }
   .kpi:nth-child(5) { animation-delay: 120ms; }
   .kpi:nth-child(6) { animation-delay: 150ms; }
-  /* 用量总览的「总 token」是这页的头号指标（第 2 张卡）：色轨与数值提为数据高光色
-     （品牌金），让"最重要的那张卡"一眼可辨；其余卡仍走各自语义色。 */
-  /* 「总 token」卡是这页的头号指标：色轨/数值用 --hi，再加一层极淡金底强化层级。
-     用"金色叠加层 + --surface-2 卡面"而非替换底色，保住卡片本身的质感。 */
-  #usStats .kpi:nth-child(2) {
-    --kpi-c: var(--hi);
-    background: linear-gradient(0deg, var(--gold-soft), var(--gold-soft)), var(--surface-2);
-  }
-  #usStats .kpi:nth-child(2) .v { color: var(--hi); }
   /* KPI 内的构成条（总 token 卡的 prompt/completion 占比） */
   .kpi .kbar { display: flex; height: 4px; border-radius: 3px; overflow: hidden;
     background: var(--line); margin-top: 7px; }
@@ -691,13 +689,101 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   .uschart-body rect.ushit:hover, .uschart-body rect.usttfb:hover { opacity: .78; }
   .uschart-body .us-empty { padding: 30px 0; text-align: center; color: var(--ink-3); font-size: var(--fs-sm); }
 
+  /* ── 用量页 DeepSeek 式改版:余额条 / hero 三卡 / 分组小节 / 富 tooltip ──
+     对照 DeepSeek 开放平台的「用量信息」页:顶部余额 → 三张大指标卡
+     (消费金额 / API 请求次数 / Tokens)→ 按天柱状图 → 分模型小节(请求折线 +
+     Token 堆叠柱,悬停显示 命中缓存/未命中缓存/输出 明细)。差异:货币是积分、
+     多一个账号维度。全部走主题 CSS 变量,明暗两套自动适配。 */
+  .us-balance { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px;
+    border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-2);
+    padding: 12px 16px; }
+  .us-balance[hidden] { display: none; }
+  .us-balance .bk { font-size: var(--fs-xs); color: var(--ink-3); margin-right: 6px; }
+  .us-balance .bv { font: 700 var(--fs-num-sm)/1.1 var(--mono); font-variant-numeric: tabular-nums; }
+  .us-balance .bv.of { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 400; }
+  .kpis.ushero { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  @media (max-width: 900px) { .kpis.ushero { grid-template-columns: 1fr; } }
+  .kpis.ushero .kpi { padding: 14px 16px 15px 18px; }
+  /* DeepSeek 式大数字:默认中性 ink,只有首卡(消耗积分)保留主色强调——
+     三张全亮等于没有重点。 */
+  .kpis.ushero .kpi .v { font-size: var(--fs-num-md); color: var(--ink); }
+  .kpis.ushero .kpi .s { white-space: normal; }
+  .us-subnote { padding: 2px 3px 10px; }
+  /* 当天下钻 chip:点击柱子跳到单天后出现在主图上方,提供返回与查看请求记录。 */
+  .us-daychip { display: inline-flex; align-items: center; gap: 10px; margin: 8px 14px 0;
+    border: 1px solid var(--accent); background: var(--accent-soft); color: var(--ink);
+    border-radius: 999px; padding: 3px 6px 3px 12px; font-size: var(--fs-xs); }
+  .us-daychip[hidden] { display: none; }
+  .us-daychip .day { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .us-daychip button { border: 1px solid var(--line); background: var(--surface);
+    border-radius: 999px; padding: 2px 10px; cursor: pointer; color: var(--ink-2);
+    font-size: var(--fs-2xs); }
+  .us-daychip button:hover { color: var(--ink); border-color: var(--accent); }
+  /* 分组小节:每组 = 标题行 + 汇总 + 请求折线 / Token 三段堆叠柱 双联小图。 */
+  .us-group { border: 1px solid var(--line-soft); border-radius: 10px;
+    background: var(--surface-2); padding: 12px 14px; margin-top: 12px; }
+  .us-group:first-child { margin-top: 0; }
+  .us-group-hd { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .us-group-title { font-weight: 700; font-size: var(--fs-md); }
+  .us-group-sum { color: var(--ink-3); font-size: var(--fs-xs);
+    font-variant-numeric: tabular-nums; }
+  .us-group-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px; margin-top: 8px; }
+  @media (max-width: 900px) { .us-group-grid { grid-template-columns: 1fr; } }
+  .us-mini { border: 1px solid var(--line-soft); border-radius: 8px; overflow: hidden;
+    background: var(--surface); }
+  .us-mini-hd { display: flex; align-items: baseline; gap: 8px; padding: 8px 12px;
+    font-size: var(--fs-xs); border-bottom: 1px solid var(--line-soft); }
+  .us-mini-hd .lb { color: var(--ink-2); font-weight: 700; }
+  .us-mini-body { padding: 6px 8px 2px; }
+  .us-mini-body svg { display: block; width: 100%; height: auto; }
+  .us-mini-body .us-empty { padding: 26px 0; text-align: center; color: var(--ink-3);
+    font-size: var(--fs-xs); }
+  .us-group-legend { color: var(--ink-3); font-size: var(--fs-xs); display: flex;
+    align-items: center; gap: 6px; margin-bottom: 10px; }
+  .us-group-legend .sw, .us-tip .sw { width: 9px; height: 9px; border-radius: 2px;
+    display: inline-block; flex: none; }
+  /* 已隐藏的密钥分组条:紧凑一行,每组带「显示」恢复按钮(纯显示偏好)。 */
+  .us-hidden { margin-top: 10px; padding: 8px 12px; border: 1px dashed var(--line);
+    border-radius: 8px; color: var(--ink-3); font-size: var(--fs-xs);
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+  .us-hidden[hidden] { display: none; }
+  .us-hidden-item { display: inline-flex; align-items: center; gap: 6px; }
+  .us-group-hd .xs { flex: none; }
+  .sw-hit { background: var(--ok); }
+  .sw-miss { background: var(--accent); }
+  .sw-out { background: var(--hi); }
+  .sw-credit { background: var(--viz-credit); }
+  .sw-req { background: var(--viz-req); }
+  /* 柱状图的透明命中层:铺满整列高度,悬停/点击不必精确落在细柱上。 */
+  .uschart-body .usbar-hit, .us-mini-body .usbar-hit { fill: transparent; }
+  /* 富 tooltip(HTML 卡片,替代 SVG 原生 <title>):跟随鼠标、边缘翻转。 */
+  .us-tip { position: fixed; z-index: 90; pointer-events: none; max-width: 320px;
+    background: var(--raise); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 10px; box-shadow: var(--shadow-hover); padding: 10px 12px;
+    font-size: var(--fs-xs); }
+  .us-tip[hidden] { display: none; }
+  .us-tip .t { font-weight: 700; font-size: var(--fs-sm); margin-bottom: 6px;
+    font-variant-numeric: tabular-nums; }
+  .us-tip .r { display: flex; align-items: center; gap: 7px; line-height: 1.8;
+    font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .us-tip .r b { margin-left: auto; padding-left: 16px; font-weight: 700; }
+  /* 分组小图内的 SVG 元素类(.gl/.tk/.ax 与主图同名,但作用域不同,各写一份)。 */
+  .us-mini-body .ax { stroke: var(--line); stroke-width: 1; }
+  .us-mini-body .gl { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 2 3; opacity: .75; }
+  .us-mini-body .tk { fill: var(--ink-3); font: 10px var(--mono); }
+  .us-mini-body rect.usbar { transition: opacity .12s; }
+  .us-mini-body rect.usbar:hover { opacity: .78; }
+  .us-mini-body .usdot { fill: var(--viz-req); }
+  .us-mini-body path.usline { stroke: var(--viz-req); stroke-width: 1.6; fill: none; }
+
   /* 用量表内的 prompt/completion 占比条。用 .us-mix 而不是复用账号池的 .bar：
      全局 .bar 是块级容器（积分条），同优先级下会互相覆盖（v1.9.0 回归）。 */
   .us-mix { display: flex; height: 3px; border-radius: 2px; overflow: hidden;
     background: var(--line); margin-top: 5px; min-width: 60px; }
   .us-mix i { display: block; height: 100%; }
-  .us-mix .p { background: var(--accent); }
-  .us-mix .c { background: var(--ok); }
+  .us-mix .p { background: var(--accent); }   /* 输入:蓝(与未命中缓存同族) */
+  .us-mix .c { background: var(--hi); }       /* 输出:金(全页统一) */
   /* 表内 zebra：三张表行数多，靠极淡的交替底色帮眼睛横向对齐。 */
   .acc.zebra tbody tr:nth-child(even) { background: color-mix(in srgb, var(--surface-2) 55%, transparent); }
   .acc.zebra tbody tr:hover { background: var(--surface-2); }
@@ -789,11 +875,60 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   /* ── 时间范围控件（用量 / 请求记录共用）────────────────────────────
      预设下拉 + 「自定义」时展开的起止时间。整组是 inline-flex 且允许换行：
      自定义态下在窄屏会整体折到下一行，而不是把标题挤扁。 */
-  .trange { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .trange .tr-custom { display: inline-flex; align-items: center; gap: 6px; }
-  .trange .tr-sep { color: var(--ink-3); font-size: var(--fs-xs); }
-  .trange select, .trange input { width: auto; padding: 5px 9px; font-size: var(--fs-sm); border-radius: 6px; }
-  .trange input[type=datetime-local] { font-family: var(--mono); font-size: var(--fs-xs); }
+  .trange { position: relative; display: inline-flex; align-items: center; }
+  /* DeepSeek 式时间范围选择器:按钮 + 弹层(左快捷列表 + 右双月日历)。
+     日历只到"自然日"粒度:起 = 当日 00:00,止 = 当日 23:59:59;未来日期禁选。 */
+  .tr-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line);
+    background: var(--surface-2); border-radius: 8px; padding: 6px 12px; font-size: var(--fs-sm);
+    color: var(--ink); cursor: pointer; white-space: nowrap;
+    font-variant-numeric: tabular-nums; }
+  .tr-btn:hover { border-color: var(--accent); }
+  .tr-caret { width: 10px; height: 6px; fill: none; stroke: var(--ink-3); stroke-width: 1.5; }
+  /* width:max-content:弹层锚在 right:0 上,若不给显式宽度会被 200px 级的
+     containing block 钳住 shrink-to-fit,日历被挤到快捷列表下面(踩过)。
+     自定义模式给显式 660px 后恢复 wrap:提示行(width:100%)换到第二行,
+     快捷列表与日历恒在第一行横向铺满。 */
+  .tr-pop { position: absolute; right: 0; top: calc(100% + 8px); z-index: 85;
+    display: flex; flex-wrap: wrap; width: max-content;
+    background: var(--raise); color: var(--ink);
+    border: 1px solid var(--line); border-radius: 12px; box-shadow: var(--shadow-hover);
+    overflow: hidden; }
+  /* 自定义模式:弹层定宽(withcal),两个月平分余宽——否则底部提示文案会把弹层
+     撑宽,多出的宽度全变成日历右侧的空白(踩过)。格子 1fr 弹性拉伸成圆角方块。 */
+  .tr-pop.withcal { width: 660px; }
+  .tr-quick { display: flex; flex-direction: column; padding: 8px; gap: 2px; min-width: 132px;
+    border-right: 1px solid var(--line-soft); }
+  .tr-quick.solo { border-right: none; min-width: 168px; }
+  .tr-q { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    border: none; background: none; text-align: left; padding: 7px 10px; border-radius: 8px;
+    font-size: var(--fs-sm); color: var(--ink-2); cursor: pointer; white-space: nowrap; }
+  .tr-q:hover { background: var(--accent-soft); color: var(--ink); }
+  .tr-q.on { color: var(--accent); font-weight: 700; }
+  .tr-check { width: 10px; height: 8px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+  .tr-cal { display: flex; gap: 18px; padding: 12px 14px 10px; flex: 1 1 auto; min-width: 0; }
+  .tr-mon { flex: 1 1 0; min-width: 0; }
+  .tr-mon-h { display: flex; align-items: center; justify-content: space-between;
+    font-weight: 700; font-size: var(--fs-sm); margin-bottom: 6px; white-space: nowrap; }
+  .tr-nav { border: none; background: none; color: var(--ink-3); cursor: pointer;
+    font-size: 15px; padding: 1px 7px; line-height: 1; }
+  .tr-nav:hover { color: var(--accent); }
+  .tr-nav.ghost { visibility: hidden; }
+  .tr-wk, .tr-days { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px 0; }
+  .tr-wk i { font-style: normal; text-align: center; font-size: var(--fs-2xs);
+    color: var(--ink-3); padding: 2px 0; }
+  .tr-d { border: none; background: none; width: 100%; height: 30px; border-radius: 6px;
+    font-size: var(--fs-xs); font-family: inherit; color: var(--ink); cursor: pointer;
+    position: relative; font-variant-numeric: tabular-nums; }
+  .tr-d:hover { background: var(--accent-soft); }
+  .tr-d.inr { background: var(--accent-soft); border-radius: 0; }
+  .tr-d.edge { background: var(--accent); color: var(--accent-ink); }
+  .tr-d.dis { color: var(--ink-3); opacity: .4; cursor: not-allowed; background: none; }
+  .tr-d.today::after { content: ''; position: absolute; left: 50%; bottom: 2px;
+    transform: translateX(-50%); width: 4px; height: 4px; border-radius: 50%;
+    background: var(--accent); }
+  .tr-d.edge.today::after { background: var(--accent-ink); }
+  .tr-hint { width: 100%; padding: 8px 14px; border-top: 1px solid var(--line-soft);
+    font-size: var(--fs-2xs); color: var(--ink-3); }
   /* 原生日期选择器的弹出面板要跟随明暗主题，否则深色下是一块刺眼的白。 */
   .trange input[type=datetime-local] { color-scheme: light; }
   [data-theme="dark"] .trange input[type=datetime-local] { color-scheme: dark; }
@@ -826,12 +961,20 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
 
   /* 用量统计条已改用 .kpis（见「用量视图」段），此处不再保留 .stats.compact 变体。 */
 
-  /* 到期提醒卡片（首页）：每账号一行，色点=危险度，正文数字用 mono 对齐。 */
-  .exp-row { display: flex; align-items: flex-start; gap: 10px; padding: 8px 0;
-    font-size: var(--fs-sm); }
-  .exp-row + .exp-row { border-top: 1px solid var(--line-soft); }
-  .exp-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; flex: none; }
-  .exp-nm { font-weight: 700; flex: none; min-width: 9em; }
+  /* 到期提醒卡片（首页，置顶）：网格卡片,每账号一张,auto-fit 铺满宽度
+     （空轨道自动收缩——2 个账号就 2 张卡对半分,不会留一截空位;窄屏自动单列）。
+     卡内三行:账号名 / 大号倒计时（语义色,一眼读出紧急度）/ 批次明细。
+     色点=危险度,正文数字 mono 对齐。 */
+  #expList { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+    gap: 12px; }
+  .exp-row { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px;
+    border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-2);
+    font-size: var(--fs-sm); min-width: 0; }
+  .exp-hd { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .exp-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .exp-nm { font-weight: 700; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .exp-days { font: 700 var(--fs-md)/1.2 var(--mono); font-variant-numeric: tabular-nums; }
   .exp-main { color: var(--ink-2, inherit); }
   .exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   .exp-main .note { margin-top: 2px; font-size: var(--fs-2xs); color: var(--ink-3); line-height: 1.6; }
@@ -882,7 +1025,6 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   border-color: color-mix(in srgb, var(--gold) 34%, var(--glass-line));
 }
 :root[data-style="vivid"] .nav a.on { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent), var(--glow-accent); }
-:root[data-style="vivid"] .ring .val { filter: drop-shadow(0 0 10px color-mix(in srgb, var(--accent) 80%, transparent)); }
 
 /* ── 2. 星空漂移层 ─────────────────────────────────────────────────
    body::before 铺一层可平铺的星点阵列，用 transform 缓慢平移（GPU 合成，
@@ -1053,30 +1195,9 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 .hero-h .zh { color: var(--gold); margin-left: 6px; letter-spacing: .12em; }
 .hero-sub { color: var(--ink-3); font-size: var(--fs-xs); font-family: var(--mono); margin-top: 3px; }
 .hero-status { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--ink-2); }
-/* 进度环：SVG 圆环，--p（0-100）驱动 stroke-dashoffset。r=40 → 周长≈251.2。 */
-/* 圆环独立成区：左侧一条发丝线把它与数字组分开，消除"悬在中间"的突兀感。
-   线用 ::before 绝对定位绘制（不用 border/padding），以免 box-sizing 挤压环本身。 */
-.hero-ring { position: relative; width: 72px; height: 72px; flex: none; margin-left: 18px; }
-.hero-ring::before {
-  content: ''; position: absolute; left: -14px; top: 4%; bottom: 4%; width: 1px;
-  background: var(--line-soft);
-}
-.ring { width: 100%; height: 100%; display: block; transform: rotate(-90deg); }
-.ring circle { fill: none; stroke-width: 9; }
-.ring .trk { stroke: var(--line); }
-.ring .val {
-  stroke: var(--accent); stroke-linecap: round;
-  stroke-dasharray: 251.2;
-  stroke-dashoffset: calc(251.2 - 251.2 * var(--p, 0) / 100);
-  transition: stroke-dashoffset .7s cubic-bezier(.4, 0, .2, 1);
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 55%, transparent));
-}
-.ring-txt {
-  position: absolute; inset: 0; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 1px; pointer-events: none;
-}
-.ring-txt b { font: 700 var(--fs-lg)/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
-.ring-txt span { font-size: var(--fs-2xs); color: var(--ink-3); letter-spacing: .06em; }
+/* 可用率圆环已撤销（2026-10）：108px 的大蓝环在扁平的概览带里非常突兀，
+   且可用率与图例「可用/总数」信息重复。改为指标列第一项（hsAvail，主色强调），
+   概览带整体回归 DeepSeek 式纯排版节奏。 */
 /* 右侧关键数字：等宽大字号、字距收紧、tnum 对齐。 */
 /* 4 列不是等分：「积分剩余 / 总额」要放 "4394 / 4800" 这类长串，给它 1.7 份宽，
    否则会被 ellipsis 截成 "4394 / 48…"；列间距同时加大，避免与「实时在途」贴在一起。 */
@@ -1168,8 +1289,6 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 #view-usage .kpi .v { font: 700 var(--fs-num-md)/1.1 var(--mono); letter-spacing: -.03em; margin-top: 8px; color: var(--ink); }
 #view-usage .kpi .s { font-size: var(--fs-xs); margin-top: 6px; }
 /* 单一强调色：头号指标（总 token）用品牌靛蓝，其余保持中性；失败仍走语义色。 */
-#view-usage #usStats .kpi:nth-child(2) { --kpi-c: var(--accent); background: var(--surface-2); }
-#view-usage #usStats .kpi:nth-child(2) .v { color: var(--accent); }
 #view-usage .kpi.c-accent .v { color: var(--accent); }
 #view-usage .kpi.c-ok .v { color: var(--ok); }
 #view-usage .kpi.c-warn .v { color: var(--warn); }
@@ -1198,12 +1317,20 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
    改法：可用率环升为主角；积分/在途/近 7 天请求升为副指标；其余 5 项降级为
    12px 色点图例条（信息一点没少，只是权重重排）。 */
 .hero-core { display: flex; align-items: center; gap: 26px; flex: 1 1 auto; min-width: 0; }
-.hero-ring { width: 108px; height: 108px; margin-left: 18px; }
-.ring-txt b { font-size: var(--fs-lg); }
-.hero-sec { display: flex; align-items: flex-start; gap: 28px; flex: 1 1 auto; min-width: 0; }
+/* 右侧关键数字:4 项均分填满 hero 余宽(积分剩余/在途/近7天请求/最近到期),
+   项间用发丝竖线分隔——既填满宽屏的空旷右半,又给"最近到期"这个紧急指标
+   一个首屏常驻位。每项 flex:1 1 0 等分;「积分剩余 / 总额」串最长,不设
+   nowrap 之外的特例,窄屏由 hero 整体换行兜底(见响应式段)。 */
+.hero-sec { display: flex; align-items: flex-start; flex: 1 1 auto; min-width: 0; }
+.hero-sec .hs { flex: 1 1 0; min-width: 0; padding: 0 20px; border-left: 1px solid var(--line-soft); }
+.hero-sec .hs:first-child { border-left: none; padding-left: 2px; }
+.hero-sec .hs.accent .v { color: var(--accent); }
+.kpis.ushero .kpi.c-credit { --kpi-c: var(--viz-credit); }
+.kpis.ushero .kpi.c-credit .v { color: var(--viz-credit); }
 .hs .v { font: 700 var(--fs-num-sm)/1.1 var(--mono); font-variant-numeric: tabular-nums;
   letter-spacing: -.02em; white-space: nowrap; }
-.hs .k { color: var(--ink-3); font-size: var(--fs-2xs); margin-top: 4px; }
+.hs .k { color: var(--ink-3); font-size: var(--fs-2xs); margin-top: 4px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hero-legend { flex: 1 1 100%; display: flex; flex-wrap: wrap; gap: 6px 18px;
   list-style: none; font-size: var(--fs-2xs); color: var(--ink-3); }
 .hero-legend li { display: flex; align-items: center; gap: 6px; }
@@ -1235,18 +1362,23 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 
 /* ── E3 负载带 / E4 泳道 ──────────────────────────────────────────── */
 .load-chart svg, .live-lanes svg { display: block; width: 100%; height: auto; }
-.load-chart .bar { fill: var(--accent); opacity: .82; }
+.load-chart .bar { fill: var(--viz-req); opacity: .82; }
 .load-chart .bar.err { fill: var(--bad); opacity: .95; }
-.load-chart .cred { fill: none; stroke: var(--gold); stroke-width: 1.5; }
+.load-chart .cred { fill: none; stroke: var(--viz-credit); stroke-width: 1.5; }
 .load-chart .ax { stroke: var(--line); stroke-width: 1; }
 .load-chart .lb { fill: var(--ink-3); font: 10px var(--mono); }
+/* 负载趋势坐标轴：左轴=请求（--ink-3），右轴=积分消耗（--gold,与线同色），
+   网格虚线沿用 .gl；透明命中层供悬停富 tooltip（委托挂在 #loadChart 上）。 */
+.load-chart .gl { stroke: var(--line-soft); stroke-width: 1; stroke-dasharray: 2 3; opacity: .75; }
+.load-chart .lb-r { fill: var(--viz-credit); font: 10px var(--mono); }
+.load-chart .usbar-hit { fill: transparent; }
 /* E3 静态图例：色块/线样与 .bar/.bar.err/.cred 同源（--accent/--bad/--gold）。
    放 header 里 h3 之后、12px 弱化色——职责是让人看懂图，不提供任何开关。 */
 .lg-row { display: inline-flex; align-items: center; gap: 5px; margin-left: 12px;
   font-size: 12px; color: var(--ink-3); white-space: nowrap; }
-.lg-swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--accent); opacity: .82; }
+.lg-swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--viz-req); opacity: .82; }
 .lg-swatch.err { background: var(--bad); opacity: .95; margin-left: 10px; }
-.lg-line { width: 16px; border-top: 1.5px solid var(--gold); margin: 0 10px 0 12px; }
+.lg-line { width: 16px; border-top: 1.5px solid var(--viz-credit); margin: 0 10px 0 12px; }
 .live-stat { display: flex; align-items: center; gap: 18px; margin-bottom: 10px;
   font-size: var(--fs-sm); color: var(--ink-2); }
 /* 指标胶囊组：数字大、标签小，主次分明；成功率按阈值染色（JS 决定 ok/warn/bad）。 */
@@ -1274,24 +1406,14 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 .live-lanes .pt.no { fill: var(--bad); }
 .live-lanes .pt.retry { fill: none; stroke: var(--warn); stroke-width: 1.4; }
 
-/* ── 账号池：宽屏两栏 ────────────────────────────────────────────────
-   宽屏（≥1400px）把「账号池表」与「积分到期提醒」并排，模型锁池仍占整行。
-   用 flex 而不是 grid：到期提醒在无临期积分时是 hidden，grid 会在右栏留下
-   一个空洞；flex 下隐藏元素直接退出布局，主表自动补满整行。 */
-@media (min-width: 1400px) {
-  #view-accounts { display: flex; flex-wrap: wrap; gap: var(--gap-card); align-items: flex-start; }
-  #view-accounts > .hero { flex: 1 1 100%; margin-bottom: 0; order: 1; }
-  #accBox { flex: 1 1 660px; margin-bottom: 0; order: 2; }
-  #expBox { flex: 0 1 320px; margin-bottom: 0; order: 3; }
-  #mlBox  { flex: 1 1 100%; margin-bottom: 0; order: 4; }
-}
-@media (max-width: 1200px) {
-  /* 中等宽度：品牌与圆环同行，四个数字整行铺开（4 列）——
-     否则会退化成 2×2，圆环还孤零零吊在下面一行，很散。 */
-  .hero-brand { flex: 1 1 auto; }
-  .hero-ring { margin-left: auto; order: 2; }
-  .hero-metrics { order: 3; flex-basis: 100%; }
-}
+/* ── 账号池：单一 DOM 序（2026-10 重构）──────────────────────────────
+   旧设计在 ≥1400px 用 flex+order 把「账号池表」与「积分到期提醒」并排，
+   但 order 只覆盖了部分子块——attnBox/loadBox/liveBox 默认 order:0，全部
+   插到 hero 前面，视口一宽整页乱序（放大布局 bug 的根因）。
+   现「积分到期提醒」已置顶（紧随概览带，紧急信息必须首屏可见），两栏布局
+   连同 flex+order 机制一并撤销：块级流按 DOM 序渲染，任何视口宽度下顺序
+   恒定，不再存在「漏写 order」这类坑。到期提醒内容用网格卡片自适应铺宽，
+   宽屏不空旷、窄屏自动堆叠。 */
 @media (max-width: 980px) {
 }
 @media (max-width: 760px) {
@@ -1332,8 +1454,6 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
   .topbar button { white-space: nowrap; flex: none; }
   .seg { order: 9; flex: 1 1 100%; justify-content: flex-start; }
   .hero { gap: 18px; }
-  .hero-ring { width: 78px; height: 78px; }
-  .ring { width: 78px; height: 78px; }
 }
 </style>
 </head>
@@ -1377,6 +1497,9 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       <li><a href="#logs" data-view="logs" title="运行日志">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.5 3.5h11M2.5 8h11M2.5 12.5h7"/></svg>
         <span class="lbl">运行日志</span></a></li>
+      <li><a href="#keys" data-view="keys" title="API 密钥">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5" cy="8" r="2.8"/><path d="M7.8 8h6M11 8v2.4M13.4 8v1.6"/></svg>
+        <span class="lbl">API 密钥</span></a></li>
     </ul>
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
@@ -1434,17 +1557,12 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <div class="hero-status"><span class="pulse" id="heroPulse"></span><span id="heroState">连接中</span></div>
         </div>
         <div class="hero-core">
-          <div class="hero-ring" title="账号健康度：可用 / 总数">
-            <svg class="ring" viewBox="0 0 92 92" aria-hidden="true">
-              <circle class="trk" cx="46" cy="46" r="40"/>
-              <circle class="val" id="heroRing" cx="46" cy="46" r="40"/>
-            </svg>
-            <div class="ring-txt"><b id="heroRingPct">—</b><span>可用率</span></div>
-          </div>
           <div class="hero-sec">
+            <div class="hs accent"><div class="v" id="hsAvail">-</div><div class="k">可用率</div></div>
             <div class="hs"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
             <div class="hs"><div class="v" id="hsInflight">-</div><div class="k">在途请求</div></div>
             <div class="hs"><div class="v" id="hsReq7d">-</div><div class="k">近 7 天请求</div></div>
+            <div class="hs"><div class="v" id="hsExpiryVal">-</div><div class="k" id="hsExpiryK">最近到期</div></div>
           </div>
         </div>
         <ul class="hero-legend">
@@ -1460,11 +1578,32 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       <!-- E2 需要关注：把指标翻译成动作。0 条时显示安静态（留白即健康信号）。 -->
       <div class="attn" id="attnBox"></div>
 
-      <!-- E3 近 7 天负载带：与账号数无关的时间维，2 个账号也照样满。 -->
+      <!-- 积分到期提醒：紧贴概览带置顶（原排在页面底部账号池旁——"积分要过期了"
+           是全系统紧急度最高的信息，必须一打开就能看到）。内容卡片化：每账号
+           一张卡，网格自动铺满宽度。 -->
+      <div class="box" id="expBox" hidden>
+        <header>
+          <h3>积分到期提醒<span class="hint" title="日均需耗 = 批次剩余 ÷ 距到期天数">按最近到期批次估算 · 上游按失效时刻先后优先扣减（FEFO）</span></h3>
+          <span class="grow"></span>
+          <span class="note" id="expNote"></span>
+          <button class="xs" id="btnExp">检查</button>
+        </header>
+        <div class="pad"><div id="expList"></div></div>
+      </div>
+
+      <!-- E3 负载趋势：请求柱(红段=失败) + 积分消耗线(右轴,独立刻度)。范围可选
+           (24h/3天/7天/30天/全部历史)，长范围自动按天聚合；带坐标轴与悬停明细。 -->
       <div class="box" id="loadBox">
         <header>
-          <h3>近 7 天负载</h3><span class="lg-row"><span class="lg-swatch"></span>请求<span class="lg-swatch err"></span>失败<span class="lg-line"></span>积分消耗（独立刻度）</span><span class="grow"></span>
+          <h3>负载趋势</h3><span class="lg-row"><span class="lg-swatch"></span>请求<span class="lg-swatch err"></span>失败<span class="lg-line"></span>积分消耗（右轴）</span><span class="grow"></span>
           <span class="note" id="loadNote">—</span>
+          <select id="loadRange" class="xs" title="统计范围">
+            <option value="24">近 24 小时</option>
+            <option value="72">近 3 天</option>
+            <option value="168" selected>近 7 天</option>
+            <option value="720">近 30 天</option>
+            <option value="0">全部历史</option>
+          </select>
         </header>
         <div class="pad"><div class="load-chart" id="loadChart"></div></div>
       </div>
@@ -1479,16 +1618,6 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <div class="live-stat" id="liveStat"></div>
           <div class="live-lanes" id="liveLanes"></div>
         </div>
-      </div>
-
-      <div class="box" id="expBox" hidden>
-        <header>
-          <h3>积分到期提醒<span class="hint" title="日均需耗 = 批次剩余 ÷ 距到期天数">按最近到期批次估算 · 上游按失效时刻先后优先扣减（FEFO）</span></h3>
-          <span class="grow"></span>
-          <span class="note" id="expNote"></span>
-          <button class="xs" id="btnExp">检查</button>
-        </header>
-        <div class="pad"><div id="expList"></div></div>
       </div>
 
       <div class="box" id="accBox">
@@ -1651,26 +1780,52 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
     <section class="view" id="view-usage" hidden>
       <div class="box">
         <header>
-          <h3>用量总览</h3>
+          <h3>用量信息</h3>
           <span class="grow"></span>
           <span class="note" id="usNote">—</span>
           <span class="trange" id="usRange"></span>
           <button class="xs" id="btnUsage">刷新</button>
         </header>
-        <div class="kpis" id="usStats"></div>
+        <div class="pad" style="padding-bottom:0"><div class="us-balance" id="usBalance" hidden></div></div>
+        <div class="kpis ushero" id="usStats"></div>
         <div class="pad">
+          <div class="note us-subnote" id="usSubNote">—</div>
           <div class="uschart">
             <div class="uschart-hd">
-              <span class="lb">Token 时序</span>
-              <span class="note" id="usChartNote">—</span>
-              <span class="grow"></span>
-              <span class="legend">
-                <i class="sw sw-p"></i>prompt<i class="sw sw-c"></i>completion
-                <span class="sep"></span><i class="sw sw-t"></i>均值
+              <span class="lb" id="usMetricLabel">消耗积分</span>
+              <span class="vtabs" id="usMetricTabs">
+                <button data-metric="credits" class="on">消耗积分</button>
+                <button data-metric="requests">请求次数</button>
+                <button data-metric="tokens">Tokens</button>
               </span>
+              <span class="grow"></span>
+              <span class="note" id="usChartNote">—</span>
+              <span class="legend" id="usLegend"></span>
             </div>
+            <div class="us-daychip" id="usDayChip" hidden></div>
             <div id="usChart" class="uschart-body"></div>
           </div>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>分组用量</h3>
+          <span class="vtabs" id="usGroupTabs">
+            <button data-dim="model" class="on">按模型</button>
+            <button data-dim="account">按账号</button>
+          </span>
+          <span class="grow"></span>
+          <span class="note" id="usGroupsNote">—</span>
+        </header>
+        <div class="pad">
+          <div class="legend us-group-legend">
+            <i class="sw sw-hit"></i>输入(命中缓存)
+            <i class="sw sw-miss"></i>输入(未命中缓存)
+            <i class="sw sw-out"></i>输出
+          </div>
+          <div id="usGroups"></div>
+          <div class="us-hidden" id="usHiddenStrip" hidden></div>
         </div>
       </div>
 
@@ -1731,6 +1886,37 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <table class="acc zebra">
             <thead id="usCreditHead"></thead>
             <tbody id="usCreditBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- API 密钥:agent 接入密钥管理。全钥只在创建弹窗出现一次;
+         表格只展示前缀;端点只对管理密钥开放(agent 密钥打不进面板)。 -->
+    <section class="view" id="view-keys" hidden>
+      <div class="box">
+        <header>
+          <h3>API 密钥</h3>
+          <span class="grow"></span>
+          <span class="note" id="akNote">—</span>
+          <button class="xs" id="btnAkCreate">创建密钥</button>
+        </header>
+        <div class="hint" style="padding:12px 20px 0">
+          用于把 agent / SDK 接入本网关（请求头 <code>Authorization: Bearer sp-…</code>，仅开放
+          /v1 聊天与模型列表，<b>不能访问管理面板</b>）。每把密钥只在创建时完整显示一次，
+          网关只保存其 SHA-256 摘要；泄露时删除重建即可，面板登录密钥不受影响。
+        </div>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead>
+              <tr>
+                <th class="mark" aria-hidden="true"></th>
+                <th>名称</th><th>密钥</th><th>创建时间</th><th>最近使用</th><th class="num">调用次数</th><th class="c-acts"></th>
+              </tr>
+            </thead>
+            <tbody id="akBody">
+              <tr><td colspan="7" class="empty">尚未创建任何密钥——点右上角「创建密钥」生成一把，填进你的 agent</td></tr>
+            </tbody>
           </table>
         </div>
       </div>
@@ -2082,6 +2268,44 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
   </div>
 </div>
 
+<!-- Agent 密钥:创建 / 改名(同一弹窗复用) -->
+<div class="veil" id="akFormVeil">
+  <div class="dlg" style="width:420px">
+    <header>
+      <h3 id="akFormTitle">创建 API 密钥</h3>
+      <div class="hint">给密钥起个名字（比如接的是哪个 agent），方便辨认与管理。</div>
+    </header>
+    <div class="body">
+      <form style="display:contents"><input type="text" id="akNameInput" maxlength="40" placeholder="例如：Claude Code / 我的测试 Agent" autocomplete="off"></form>
+      <div class="state err" id="akFormErr" hidden style="margin-top:10px"></div>
+    </div>
+    <footer>
+      <button class="ghost" id="btnAkFormCancel">取消</button>
+      <span class="grow"></span>
+      <button class="primary" id="btnAkFormOk">创建</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Agent 密钥:全钥仅此一次展示 -->
+<div class="veil" id="akShowVeil">
+  <div class="dlg" style="width:520px">
+    <header>
+      <h3>密钥已创建</h3>
+      <div class="hint">请立即复制并保存到安全的地方。<b>关闭本窗口后将无法再次查看完整密钥</b>，丢失只能删除重建。</div>
+    </header>
+    <div class="body">
+      <div class="inline"><input type="text" id="akFullKey" readonly style="font-family:var(--mono)">
+      <button type="button" class="xs" id="btnAkCopy">复制</button></div>
+      <div class="hint" style="margin-top:10px">不要把密钥暴露在公开代码或浏览器端；接入方只需在请求头带 <code>Authorization: Bearer &lt;密钥&gt;</code>。</div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button class="primary" id="btnAkShowDone">我已保存</button>
+    </footer>
+  </div>
+</div>
+
 <!-- 密钥 -->
 <div class="veil" id="keyVeil" data-lock="1">
   <div class="dlg" style="width:420px">
@@ -2101,6 +2325,8 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 </div>
 
 <div id="toasts"></div>
+
+<div class="us-tip" id="usTip" hidden></div>
 
 <script src="app.js"></script>
 </body>

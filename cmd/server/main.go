@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
 	"github.com/RisingInsight/startport/internal/livecfg"
 	"github.com/RisingInsight/startport/internal/panel"
@@ -162,6 +163,12 @@ func main() {
 		p.Close()
 		_ = store.Close()
 	}()
+
+	// Agent 接入密钥：与 state 文件同目录（data/apikeys.json），只存 SHA-256 摘要。
+	// 面板创建/管理；/v1/* 鉴权接受（chatAuth），面板与 /status 不接受。
+	keyStore := apikeys.New(stateSibling(cfg.StateFile, "apikeys.json"))
+	keyStore.Start()
+	defer keyStore.Stop()
 	p.SetStore(store)
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
 	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
@@ -383,6 +390,7 @@ func main() {
 		Version:     appVersion,
 		Live:        live,
 		Update:      upd,
+		APIKeys:     keyStore,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -413,6 +421,7 @@ func main() {
 		Live:         live,
 		Usage:        rec,
 		RequestLog:   requestLog,
+		APIKeys:      keyStore,
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的

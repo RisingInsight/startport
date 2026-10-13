@@ -476,3 +476,106 @@ func TestCacheTokensPersistRoundtrip(t *testing.T) {
 		t.Fatalf("恢复后 cache_hit_rate=%v want 75", snap.CreditByModel[0].CacheHitRate)
 	}
 }
+
+// TestSeriesGroupsModelAndAccountByDay：「模型×天」「账号×天」分组时序。
+// 要点：①小时桶按归属**天**归并（同一天两个小时的桶合成一个点）；
+// ②组按 credits 降序；③账号组带昵称与域；④显式窗口过滤生效（窗口外的
+// 高积分桶不得撑进小节——它正是 credits 排序里最该被截掉的那个）。
+func TestSeriesGroupsModelAndAccountByDay(t *testing.T) {
+	r := New("")
+	day1AM := time.Date(2026, 9, 30, 9, 0, 0, 0, time.Local)
+	day1PM := time.Date(2026, 9, 30, 14, 0, 0, 0, time.Local)
+	day2 := time.Date(2026, 10, 1, 23, 0, 0, 0, time.Local)
+	old := time.Now().AddDate(0, 0, -100)
+	// glm-5.2 两天都有（day1 两个小时的桶）；deepseek-v4 仅 day1。
+	r.Add(day1AM, "cn", "u1", "glm-5.2", Delta{PromptTokens: 100, HasPromptTokens: true, Credit: 2.0, HasCredit: true}, true)
+	r.Add(day1PM, "cn", "u1", "glm-5.2", Delta{PromptTokens: 10, HasPromptTokens: true, Credit: 0.5, HasCredit: true}, true)
+	r.Add(day2, "cn", "u1", "glm-5.2", Delta{PromptTokens: 20, HasPromptTokens: true}, true)
+	r.Add(day1AM, "cn", "u2", "deepseek-v4", Delta{PromptTokens: 30, HasPromptTokens: true, Credit: 1.0, HasCredit: true}, true)
+	// 窗口外的老桶：积分最高，若窗口过滤失效它会冲到模型/账号小节第一位。
+	r.Add(old, "cn", "u2", "old-model", Delta{PromptTokens: 999, HasPromptTokens: true, Credit: 99, HasCredit: true}, true)
+
+	from := time.Date(2026, 9, 30, 0, 0, 0, 0, time.Local)
+	to := time.Date(2026, 10, 2, 0, 0, 0, 0, time.Local)
+	s := r.SnapshotWindow(Window{From: from, To: to}, map[string]string{"u1": "甲号", "u2": "乙号"}, nil)
+
+	if len(s.ModelSeries) != 2 {
+		t.Fatalf("model_series = %d 组, want 2（窗口外 old-model 不入组）", len(s.ModelSeries))
+	}
+	if s.ModelSeries[0].Key != "glm-5.2" || s.ModelSeries[1].Key != "deepseek-v4" {
+		t.Fatalf("model_series 顺序 = %s,%s, want glm-5.2,deepseek-v4（credits 降序）",
+			s.ModelSeries[0].Key, s.ModelSeries[1].Key)
+	}
+	g := s.ModelSeries[0]
+	if len(g.Points) != 2 || g.Points[0].T != "2026-09-30" || g.Points[1].T != "2026-10-01" {
+		t.Fatalf("glm 组点 = %+v, want 2026-09-30 + 2026-10-01 按天升序", g.Points)
+	}
+	if g.Points[0].Scope != "day" {
+		t.Fatalf("分组点 scope = %s, want day", g.Points[0].Scope)
+	}
+	// 同一天两个小时的桶归并为一个天点：requests=2、credits=2.5。
+	if g.Points[0].Requests != 2 || g.Points[0].Credits != 2.5 {
+		t.Fatalf("day1 点 = req %d / credits %v, want 2 / 2.5", g.Points[0].Requests, g.Points[0].Credits)
+	}
+	if g.Points[1].Requests != 1 || g.Points[1].Credits != 0 {
+		t.Fatalf("day2 点 = req %d / credits %v, want 1 / 0", g.Points[1].Requests, g.Points[1].Credits)
+	}
+
+	if len(s.AccountSeries) != 2 {
+		t.Fatalf("account_series = %d 组, want 2", len(s.AccountSeries))
+	}
+	if s.AccountSeries[0].Key != "u1" || s.AccountSeries[0].Nickname != "甲号" || s.AccountSeries[0].Realm != "cn" {
+		t.Fatalf("account_series[0] = %+v, want u1/甲号/cn", s.AccountSeries[0])
+	}
+	if s.AccountSeries[1].Key != "u2" {
+		t.Fatalf("account_series[1].Key = %s, want u2", s.AccountSeries[1].Key)
+	}
+	// 窗口外 99 分不计：u2 组内只剩 deepseek-v4 的 day1 一天、credits=1.0。
+	if len(s.AccountSeries[1].Points) != 1 || s.AccountSeries[1].Points[0].Credits != 1.0 {
+		t.Fatalf("u2 组点 = %+v, want 单点 credits=1.0（窗口外老桶不入组）", s.AccountSeries[1].Points)
+	}
+}
+
+// TestKeySeriesGrouping：「密钥×天」分组时序。
+// 要点:①Delta.KeyName 进桶键,同一天两个小时的桶按密钥归并;②经管理密钥
+// (空 KeyName)的请求独立成组(前端显示「管理密钥」);③组按 credits 降序。
+func TestKeySeriesGrouping(t *testing.T) {
+	r := New("")
+	day1AM := time.Date(2026, 10, 9, 9, 0, 0, 0, time.Local)
+	day1PM := time.Date(2026, 10, 9, 14, 0, 0, 0, time.Local)
+	day2 := time.Date(2026, 10, 10, 12, 0, 0, 0, time.Local)
+	r.Add(day1AM, "cn", "u1", "glm-5.3", Delta{PromptTokens: 100, HasPromptTokens: true, Credit: 2.0, HasCredit: true, KeyName: "claude-code"}, true)
+	r.Add(day1PM, "cn", "u1", "glm-5.3", Delta{PromptTokens: 10, HasPromptTokens: true, Credit: 0.5, HasCredit: true, KeyName: "claude-code"}, true)
+	r.Add(day2, "cn", "u1", "glm-5.3", Delta{PromptTokens: 20, HasPromptTokens: true, Credit: 1.0, HasCredit: true, KeyName: "my-agent"}, true)
+	// 经管理密钥(api_key)来的请求:KeyName 空,独立成「管理密钥」组。
+	r.Add(day1AM, "cn", "u2", "glm-5.3", Delta{PromptTokens: 5, HasPromptTokens: true, Credit: 0.1, HasCredit: true}, true)
+
+	from := time.Date(2026, 10, 9, 0, 0, 0, 0, time.Local)
+	to := time.Date(2026, 10, 11, 0, 0, 0, 0, time.Local)
+	snap := r.SnapshotWindow(Window{From: from, To: to}, nil, nil)
+
+	if len(snap.KeySeries) != 3 {
+		t.Fatalf("key_series = %d 组, want 3 (claude-code/my-agent/管理密钥)", len(snap.KeySeries))
+	}
+	if snap.KeySeries[0].Key != "claude-code" {
+		t.Fatalf("第一组 = %q, want claude-code (credits 降序)", snap.KeySeries[0].Key)
+	}
+	if len(snap.KeySeries[0].Points) != 1 || snap.KeySeries[0].Points[0].Credits != 2.5 {
+		t.Fatalf("claude-code 组点 = %+v, want 单点 credits=2.5(同日两桶归并)", snap.KeySeries[0].Points)
+	}
+	var mgmtName, agentName string
+	for _, g := range snap.KeySeries {
+		switch g.Key {
+		case "":
+			mgmtName = "found"
+			if len(g.Points) != 1 || g.Points[0].Credits != 0.1 {
+				t.Fatalf("管理密钥组点 = %+v, want 单点 credits=0.1", g.Points)
+			}
+		case "my-agent":
+			agentName = "found"
+		}
+	}
+	if mgmtName == "" || agentName == "" {
+		t.Fatalf("缺少 管理密钥(空名)/my-agent 组: %+v", snap.KeySeries)
+	}
+}

@@ -72,6 +72,9 @@ type bucket struct {
 	// （TTFB 主要由上游 prefill 决定，命中率越高越快）；总延迟还被生成阶段稀释。
 	TTFBMs int64 `json:"tm,omitempty"`
 	TTFBN  int64 `json:"tn,omitempty"`
+	// KN 触发请求的 agent 密钥名（空 = 管理密钥 api_key）。进入桶键：
+	// 同一模型/账号下不同密钥分桶累计,供「按密钥」分组用量使用。
+	KN string `json:"k,omitempty"`
 }
 
 // file 落盘结构。
@@ -161,17 +164,21 @@ type Delta struct {
 	HasCredit        bool
 	ModelRate        string
 	// CacheHitTokens / CacheMissTokens 前缀缓存命中/未命中观测（issue #92）。
-	HasCacheTokens   bool
-	CacheHitTokens   int64
-	CacheMissTokens  int64
-	LatencyMs        int64
-	HasLatency       bool
-	TokensPerSecond  float64
-	HasTPS           bool
+	HasCacheTokens  bool
+	CacheHitTokens  int64
+	CacheMissTokens int64
+	LatencyMs       int64
+	HasLatency      bool
+	TokensPerSecond float64
+	HasTPS          bool
 	// TTFBMs 首字节耗时（ms）。与 LatencyMs 分开记：TTFB 直接反映上游 prefill
 	// （受前缀缓存命中影响），是缓存是否生效的最直接指标；总延迟还被生成阶段稀释。
 	TTFBMs  int64
 	HasTTFB bool
+	// KeyName 触发本请求的「agent 接入密钥」名称（面板创建）；经管理密钥
+	// (api_key)来的请求为空串——聚合为「管理密钥」一组。名称在请求时定格：
+	// 密钥改名/删除后，历史用量仍归属当时的名字（这正是用名称而非 ID 的原因）。
+	KeyName string
 }
 
 // Add 记录一次请求尝试。
@@ -189,14 +196,17 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 		model = "(unknown)"
 	}
 	scope := "h:" + now.Format(hourLayout)
-	key := scope + "|" + realm + "|" + uid + "|" + model + "|" + d.ModelRate
+	// 密钥名进桶键:同小时/账号/模型下按密钥分桶。名称含竖线会与分隔符冲突,
+	// 统一转义(apikeys.Create 侧也会拦,这里兜底)。
+	kn := strings.ReplaceAll(d.KeyName, "|", "_")
+	key := scope + "|" + realm + "|" + uid + "|" + model + "|" + d.ModelRate + "|" + kn
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	b := r.buckets[key]
 	if b == nil {
-		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate}
+		b = &bucket{Scope: scope, Realm: realm, UID: uid, Model: model, Rate: d.ModelRate, KN: kn}
 		r.buckets[key] = b
 	}
 	b.Req++
@@ -267,7 +277,7 @@ func (r *Recorder) Rollup(now time.Time) {
 			continue
 		}
 		day := "d:" + ts.Format(dayLayout)
-		moves = append(moves, move{from: k, to: day + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate})
+		moves = append(moves, move{from: k, to: day + "|" + b.Realm + "|" + b.UID + "|" + b.Model + "|" + b.Rate + "|" + b.KN})
 	}
 	for _, m := range moves {
 		src := r.buckets[m.from]
@@ -322,7 +332,7 @@ func (r *Recorder) load() error {
 	}
 	for i := range f.Buckets {
 		b := f.Buckets[i]
-		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate] = &b
+		r.buckets[b.Scope+"|"+b.Realm+"|"+b.UID+"|"+b.Model+"|"+b.Rate+"|"+b.KN] = &b
 	}
 	log.Printf("[usage] 已恢复 %d 个用量桶（%s）", len(r.buckets), r.path)
 	return nil
@@ -409,11 +419,11 @@ type Agg struct {
 // 正确加权（不能对每桶的均值再取平均），所以样本数留在这里。
 type aggAcc struct {
 	Agg
-	latSum     int64
-	latSamples int64
-	tpsSum     float64
-	tpsSamples int64
-	ttfbSum    int64
+	latSum      int64
+	latSamples  int64
+	tpsSum      float64
+	tpsSamples  int64
+	ttfbSum     int64
 	ttfbSamples int64
 }
 
@@ -471,6 +481,17 @@ type Point struct {
 	Agg
 }
 
+// SeriesGroup 「维度 × 天」的分组时序（模型×天 / 账号×天），供用量页 DeepSeek 式
+// 分组小节使用：每组一张请求折线 + 一张 Token 三段堆叠柱。全局 Series 只有单一
+// 时间轴，没有交叉维度——分组小节的数据源是这里。
+// Points 的 Scope 恒为 "day"（小时桶按归属天归并），按天升序。
+type SeriesGroup struct {
+	Key      string  `json:"key"`
+	Realm    string  `json:"realm,omitempty"`    // 账号维度：所属域；模型维度：空
+	Nickname string  `json:"nickname,omitempty"` // 账号维度：昵称；模型维度：空
+	Points   []Point `json:"points"`
+}
+
 // CreditAgg 积分扣除统计的一行。Key 在账号维度是 UID，在模型维度是裸模型名；
 // Rate 仅模型维度使用；比例分母只统计与 credit 同时存在的 Token 样本。
 type CreditAgg struct {
@@ -521,9 +542,15 @@ type Snapshot struct {
 	Series          []Point     `json:"series"`
 	CreditByAccount []CreditAgg `json:"credit_by_account"`
 	CreditByModel   []CreditAgg `json:"credit_by_model"`
-	Buckets         int         `json:"buckets"`
-	FileBytes       int64       `json:"file_bytes"`
-	Since           string      `json:"since,omitempty"`
+	// ModelSeries / AccountSeries / KeySeries 「模型×天」「账号×天」「密钥×天」
+	// 分组时序（窗口内），供用量页分组小节（按模型 | 按账号 | 按密钥）使用。
+	// 无数据（窗口内没有请求）时为 nil。
+	ModelSeries   []SeriesGroup `json:"model_series,omitempty"`
+	AccountSeries []SeriesGroup `json:"account_series,omitempty"`
+	KeySeries     []SeriesGroup `json:"key_series,omitempty"`
+	Buckets       int           `json:"buckets"`
+	FileBytes     int64         `json:"file_bytes"`
+	Since         string        `json:"since,omitempty"`
 	// WindowFrom/WindowTo 本次实际生效的统计区间（本地时间，RFC3339），供面板
 	// 回显口径——「自定义」区间下用户必须能确认服务端到底按哪段算的。
 	// 空串 = 该侧不设界（全部历史 / 到今天为止）。
@@ -620,6 +647,12 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	modelAgg := map[string]*aggAcc{}
 	hourSeries := map[string]*aggAcc{}
 	daySeries := map[string]*aggAcc{}
+	// 「维度 × 天」交叉序列累加器（模型×天 / 账号×天 / 密钥×天）：小时桶归到
+	// 所属天，日桶自身即一天。与 hourSeries/daySeries 同窗口口径（同一循环、
+	// 同一过滤）。
+	modelDayAgg := map[string]map[string]*aggAcc{}
+	acctDayAgg := map[string]map[string]*aggAcc{}
+	keyDayAgg := map[string]map[string]*aggAcc{}
 	creditAcctAgg := map[string]*creditAcc{}
 	creditModelAgg := map[string]*creditAcc{}
 	rateCache := map[string]string{}
@@ -681,6 +714,33 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 				daySeries[scope] = &aggAcc{}
 			}
 			daySeries[scope].add(b)
+		}
+		// 交叉序列：按（维度, 天）归并。脏 scope（取不出天键）不进小节，
+		// 但不影响上面那些主口径——两者独立判定。
+		if day := bucketDayKey(b.Scope); day != "" {
+			if modelDayAgg[b.Model] == nil {
+				modelDayAgg[b.Model] = map[string]*aggAcc{}
+			}
+			if modelDayAgg[b.Model][day] == nil {
+				modelDayAgg[b.Model][day] = &aggAcc{}
+			}
+			modelDayAgg[b.Model][day].add(b)
+
+			if acctDayAgg[b.UID] == nil {
+				acctDayAgg[b.UID] = map[string]*aggAcc{}
+			}
+			if acctDayAgg[b.UID][day] == nil {
+				acctDayAgg[b.UID][day] = &aggAcc{}
+			}
+			acctDayAgg[b.UID][day].add(b)
+
+			if keyDayAgg[b.KN] == nil {
+				keyDayAgg[b.KN] = map[string]*aggAcc{}
+			}
+			if keyDayAgg[b.KN][day] == nil {
+				keyDayAgg[b.KN][day] = &aggAcc{}
+			}
+			keyDayAgg[b.KN][day].add(b)
 		}
 		if b.CRN > 0 {
 			ca := creditAcctAgg[b.UID]
@@ -750,6 +810,20 @@ func (r *Recorder) SnapshotWindow(w Window, nicks map[string]string, currentRate
 	for _, k := range hourKeys {
 		snap.Series = append(snap.Series, Point{T: k, Scope: "hour", Agg: hourSeries[k].finish()})
 	}
+
+	// 分组时序：模型×天 / 账号×天。账号组带昵称与域（前端小节标题用）；
+	// 模型组 Key 已在 Add 侧归一（canonicalUsageModel），无需再处理。
+	snap.ModelSeries = buildSeriesGroups(modelDayAgg, func(key string) (string, string) {
+		return "", ""
+	})
+	snap.AccountSeries = buildSeriesGroups(acctDayAgg, func(key string) (string, string) {
+		return acctRealm[key], nicks[key]
+	})
+	// 密钥组:Key = 密钥名(空串 = 经管理密钥 api_key 的请求,前端显示「管理密钥」)。
+	// 名称在请求时定格,改名/删除不影响历史归属。
+	snap.KeySeries = buildSeriesGroups(keyDayAgg, func(string) (string, string) {
+		return "", ""
+	})
 
 	if r.path != "" {
 		if fi, err := os.Stat(r.path); err == nil {
@@ -822,6 +896,80 @@ func keyed(m map[string]*aggAcc, label func(string) (string, string)) []KeyedAgg
 		}
 		return out[i].Key < out[j].Key
 	})
+	return out
+}
+
+// seriesGroupCap 分组时序每维度返回的组数上限。个人池的账号数与活跃模型数都很小，
+// 12 已远超可见需求；封顶只为响应体积提供上界（防历史脏数据撑出几百个模型名，
+// 每组再带一条完整日序列）。被截掉的组在「用量明细」表里仍完整可见（那是不封顶的）。
+const seriesGroupCap = 12
+
+// bucketDayKey 从桶 scope 提取天键（"2026-01-02"）；取不出返回空串。
+// 小时桶 "h:2026-01-02T15" → 前 10 位；日桶 "d:2026-01-02" → 自身。
+// 纯形状校验的字符串切片，不解析时间：时间合法性由 bucketTime 在窗口过滤侧负责，
+// 这里只需保证不把脏 scope 切出伪日期（长度不符即返回空串）。
+func bucketDayKey(scope string) string {
+	if strings.HasPrefix(scope, "h:") {
+		if len(scope) == 15 && scope[12] == 'T' {
+			return scope[2:12]
+		}
+		return ""
+	}
+	if strings.HasPrefix(scope, "d:") && len(scope) == 12 {
+		return scope[2:]
+	}
+	return ""
+}
+
+// buildSeriesGroups 把「key → 天 → 累加器」折叠为分组时序：
+// 组按（credits, requests, key）降序取前 seriesGroupCap 组，组内按天升序。
+// meta 返回 (realm, nickname)，仅账号维度非空。
+func buildSeriesGroups(perKey map[string]map[string]*aggAcc, meta func(key string) (string, string)) []SeriesGroup {
+	if len(perKey) == 0 {
+		return nil
+	}
+	type rank struct {
+		key      string
+		requests int64
+		credits  float64
+	}
+	ranks := make([]rank, 0, len(perKey))
+	for k, days := range perKey {
+		var r rank
+		r.key = k
+		for _, acc := range days {
+			r.requests += acc.Requests
+			r.credits += acc.Credits
+		}
+		ranks = append(ranks, r)
+	}
+	sort.Slice(ranks, func(i, j int) bool {
+		if ranks[i].credits != ranks[j].credits {
+			return ranks[i].credits > ranks[j].credits
+		}
+		if ranks[i].requests != ranks[j].requests {
+			return ranks[i].requests > ranks[j].requests
+		}
+		return ranks[i].key < ranks[j].key
+	})
+	if len(ranks) > seriesGroupCap {
+		ranks = ranks[:seriesGroupCap]
+	}
+	out := make([]SeriesGroup, 0, len(ranks))
+	for _, r := range ranks {
+		days := perKey[r.key]
+		dayKeys := make([]string, 0, len(days))
+		for k := range days {
+			dayKeys = append(dayKeys, k)
+		}
+		sort.Strings(dayKeys)
+		g := SeriesGroup{Key: r.key}
+		g.Realm, g.Nickname = meta(r.key)
+		for _, k := range dayKeys {
+			g.Points = append(g.Points, Point{T: k, Scope: "day", Agg: days[k].finish()})
+		}
+		out = append(out, g)
+	}
 	return out
 }
 

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
 	"github.com/RisingInsight/startport/internal/httpauth"
 	"github.com/RisingInsight/startport/internal/livecfg"
@@ -71,6 +72,10 @@ type Config struct {
 	// Update 版本检查器（nil = 不提供更新信息）。只做「检查 + 提示」，
 	// 不自动下载——安全边界见 internal/update 包注释。
 	Update *update.Checker
+
+	// APIKeys 「agent 接入密钥」存储（nil = 密钥管理端点返回 501）。
+	// 端点只对管理密钥(api_key)开放;agent 密钥仅在 /v1/* 生效（见 server.chatAuth）。
+	APIKeys *apikeys.APIKeys
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/startport/", panel)，
@@ -160,6 +165,12 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /startport/api/request_logs", p.withAuth(p.requestLogs))
 	p.mux.HandleFunc("GET /startport/api/models", p.withAuth(p.models))
+	p.mux.HandleFunc("GET /startport/api/keys", p.withAuth(p.keysList))
+	p.mux.HandleFunc("POST /startport/api/keys", p.withAuth(p.keysCreate))
+	p.mux.HandleFunc("POST /startport/api/keys/{id}/rename", p.withAuth(p.keysRename))
+	p.mux.HandleFunc("POST /startport/api/keys/{id}/disable", p.withAuth(p.keysSetDisabled))
+	p.mux.HandleFunc("POST /startport/api/keys/{id}/delete", p.withAuth(p.keysDelete))
+	p.mux.HandleFunc("POST /startport/api/keys/hidden", p.withAuth(p.keysSetHidden))
 	p.mux.HandleFunc("POST /startport/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /startport/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /startport/api/login/regions", p.withAuth(p.loginRegions))
@@ -796,7 +807,30 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Upstream != nil {
 		currentRate = p.cfg.Upstream.ModelRate
 	}
-	writeJSON(w, http.StatusOK, p.cfg.Usage.SnapshotWindow(win, nicks, currentRate))
+	snap := p.cfg.Usage.SnapshotWindow(win, nicks, currentRate)
+	// 「按密钥」分组的显示偏好:被隐藏的密钥名由 apikeys 存储持有,这里
+	// 过滤掉对应分组并回显名单(前端渲染「已隐藏」条供恢复)。桶数据不动。
+	hiddenKeys := []string(nil)
+	if st := p.cfg.APIKeys; st != nil {
+		hiddenKeys = st.HiddenNames()
+	}
+	if len(hiddenKeys) > 0 {
+		hs := make(map[string]bool, len(hiddenKeys))
+		for _, n := range hiddenKeys {
+			hs[n] = true
+		}
+		filtered := make([]usage.SeriesGroup, 0, len(snap.KeySeries))
+		for _, g := range snap.KeySeries {
+			if !hs[g.Key] {
+				filtered = append(filtered, g)
+			}
+		}
+		snap.KeySeries = filtered
+	}
+	writeJSON(w, http.StatusOK, struct {
+		usage.Snapshot
+		HiddenKeys []string `json:"hidden_keys,omitempty"`
+	}{Snapshot: snap, HiddenKeys: hiddenKeys})
 }
 
 // parseTimeParam 解析时间查询参数：unix 秒（前端默认）或 RFC3339（便于手工调

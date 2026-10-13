@@ -157,28 +157,18 @@ function fmtLocalDateTime(ms) {
    行为逐位一致，前端自己减 N 小时会多算/少算一个边界桶。 */
 const TRANGE_PRESETS = [
   ['today', '今天'],
+  ['yesterday', '昨天'],
   ['24', '近 24 小时'],
   ['72', '近 3 天'],
   ['168', '近 7 天'],
   ['720', '近 30 天'],
+  ['month', '本月'],
+  ['lastmonth', '上月'],
   ['0', '全部历史'],
   ['custom', '自定义…'],
 ];
 const TRANGE_DEFAULT = '72';
-const trangeStates = new Map(); // hostId → { preset, from: Date|null, to: Date|null }
-
-// dtLocalValue / dtLocalParse 与 <input type=datetime-local> 的取值格式互转
-// （YYYY-MM-DDTHH:mm，本地时区；ES 里"带时间的日期串"按本地解析，正是我们要的）。
-function dtLocalValue(d) {
-  const p = n => String(n).padStart(2, '0');
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' +
-    p(d.getHours()) + ':' + p(d.getMinutes());
-}
-function dtLocalParse(s) {
-  if (!s) return null;
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d;
-}
+const trangeStates = new Map(); // hostId → { preset, from, to, open, calY, calM, pickStart }
 
 // trangeMidnight 今天 00:00（本地时区）。
 function trangeMidnight() {
@@ -195,45 +185,184 @@ function trangeState(id) {
   return trangeStates.get(id);
 }
 
-// trangeRender 画出控件骨架（幂等：重复调用会保留当前状态）。
+/* trDateKey 本地日期键 "YYYY-MM-DD"（日历的 data-d 与区间判定统一用它）。 */
+function trDateKey(d) {
+  const p2 = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
+}
+
+/* initCalNow 日历定位到 [上一月, 当前月]:右月 = 当前(「外面的时间」),
+   左月 = 之前的一个月——与 DeepSeek 开放平台的布局一致。 */
+function initCalNow(st) {
+  const n = new Date();
+  const d0 = new Date(n.getFullYear(), n.getMonth() - 1, 1);
+  st.calY = d0.getFullYear();
+  st.calM = d0.getMonth();
+}
+
+// trangeRender 渲染选择器：按钮（显示当前口径）+ 弹层（左快捷列表 + 右双月日历）。
+// 弹层只在 st.open 时渲染；点击弹层外自动收起（bindTrOutsideOnce 全局一次）。
 function trangeRender(id) {
   const host = $(id);
   if (!host) return;
   const st = trangeState(id);
-  const custom = st.preset === 'custom';
-  host.innerHTML =
-    '<select class="tr-preset" aria-label="时间范围">' +
-    TRANGE_PRESETS.map(([v, label]) =>
-      '<option value="' + v + '"' + (v === st.preset ? ' selected' : '') + '>' + esc(label) + '</option>').join('') +
-    '</select>' +
-    '<span class="tr-custom"' + (custom ? '' : ' hidden') + '>' +
-    '<input type="datetime-local" class="tr-from" value="' + esc(st.from ? dtLocalValue(st.from) : '') + '" aria-label="起始时间">' +
-    '<span class="tr-sep">→</span>' +
-    '<input type="datetime-local" class="tr-to" value="' + esc(st.to ? dtLocalValue(st.to) : '') + '" aria-label="结束时间">' +
-    '</span>';
-  const preset = host.querySelector('.tr-preset');
-  if (preset) preset.onchange = () => {
-    st.preset = preset.value;
-    // 从别的预设切到自定义时，把区间重置为"今天 00:00 → 现在"，
-    // 免得用户上次留下的半年区间被无声沿用。
-    if (st.preset === 'custom' && (!st.from || !st.to)) { st.from = trangeMidnight(); st.to = new Date(); }
+  host.innerHTML = '<button type="button" class="tr-btn"><span>' + esc(trangeBtnLabel(id)) +
+    '</span><svg class="tr-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4"/></svg></button>' +
+    (st.open ? trangePopHtml(id) : '');
+  const btn = host.querySelector('.tr-btn');
+  if (btn) btn.onclick = ev => {
+    ev.stopPropagation();
+    st.open = !st.open;
+    if (st.open && !st.calY) initCalNow(st);
     trangeRender(id);
-    trangeEmit(id);
   };
-  const fromEl = host.querySelector('.tr-from');
-  const toEl = host.querySelector('.tr-to');
-  const readCustom = () => {
-    st.from = dtLocalParse(fromEl.value);
-    st.to = dtLocalParse(toEl.value);
-    // 起止颠倒就地标红（不静默纠正：用户可能正输到一半）。
-    const bad = st.from && st.to && st.from > st.to;
-    fromEl.classList.toggle('tr-bad', !!bad);
-    toEl.classList.toggle('tr-bad', !!bad);
-    if (bad) return;
-    trangeEmit(id);
-  };
-  if (fromEl) fromEl.onchange = readCustom;
-  if (toEl) toEl.onchange = readCustom;
+  if (st.open) bindTrPop(id, host);
+  bindTrOutsideOnce();
+}
+
+/* trangeBtnLabel 按钮上的紧凑口径：预设用名称；自定义日期区间（00:00→23:59:59
+   的自然日形态）显示 "M-D → M-D"，其余自定义（保留旧精度）回退 trangeLabel。 */
+function trangeBtnLabel(id) {
+  const st = trangeState(id);
+  if (st.preset !== 'custom') {
+    const f = TRANGE_PRESETS.find(p => p[0] === st.preset);
+    return f ? f[1] : '';
+  }
+  if (!st.from || !st.to) return '自定义…';
+  const dayForm = st.from.getHours() === 0 && st.from.getMinutes() === 0 &&
+    st.to.getHours() === 23 && st.to.getMinutes() === 59;
+  if (dayForm) {
+    const md = d => (d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0');
+    return md(st.from) + ' → ' + md(st.to);
+  }
+  return trangeLabel(id);
+}
+
+/* trangePopHtml 弹层：左快捷列表（含全部历史）+ 右双月日历 + 底部提示行。 */
+function trangePopHtml(id) {
+  const st = trangeState(id);
+  // 日历只在「自定义…」模式下出现:默认弹层只有快捷口径列表(窄、干净),
+  // 点自定义才在右侧展开双月日历(DeepSeek 同布局)。
+  const showCal = st.preset === 'custom';
+  const quick = TRANGE_PRESETS.map(([v, label]) =>
+    '<button type="button" class="tr-q' + (st.preset === v ? ' on' : '') + '" data-q="' + v + '">' +
+    esc(label) + (st.preset === v ? '<svg class="tr-check" viewBox="0 0 10 8" aria-hidden="true"><path d="M1 4l3 3 5-6"/></svg>' : '') +
+    '</button>').join('');
+  const now = new Date();
+  const todayKey = trDateKey(now);
+  const pick = st.pickStart || null;
+  const fromKey = st.from ? trDateKey(st.from) : null;
+  const toKey = st.to ? trDateKey(st.to) : null;
+  let cal = '';
+  for (let m = 0; m < 2; m++) {
+    const y = st.calY + Math.floor((st.calM + m) / 12);
+    const mo = (st.calM + m) % 12;
+    const first = new Date(y, mo, 1);
+    const lead = first.getDay(); // 0 = 周日,与 DeepSeek 的「日一二三四五六」对齐
+    const dim = new Date(y, mo + 1, 0).getDate();
+    let days = '';
+    for (let b = 0; b < lead; b++) days += '<i></i>';
+    for (let d = 1; d <= dim; d++) {
+      const dte = new Date(y, mo, d);
+      const key = trDateKey(dte);
+      let cls = 'tr-d';
+      if (dte > now) cls += ' dis';                 // 没到达的日子不可选
+      if (key === todayKey) cls += ' today';
+      if (fromKey && key === fromKey) cls += ' edge';
+      if (toKey && key === toKey) cls += ' edge';
+      if (fromKey && toKey && key > fromKey && key < toKey) cls += ' inr';
+      if (pick && key === trDateKey(pick)) cls += ' edge';
+      days += '<button type="button" class="' + cls + '" data-d="' + key + '"' +
+        (cls.includes('dis') ? ' tabindex="-1"' : '') + '>' + d + '</button>';
+    }
+    const navL = m === 0 ? '<button type="button" class="tr-nav" data-nav="prev" aria-label="上个月">‹</button>'
+      : '<span class="tr-nav ghost">‹</span>';
+    const navR = m === 1 ? '<button type="button" class="tr-nav" data-nav="next" aria-label="下个月">›</button>'
+      : '<span class="tr-nav ghost">›</span>';
+    cal += '<div class="tr-mon"><div class="tr-mon-h">' + navL +
+      '<span>' + y + ' 年 ' + (mo + 1) + ' 月</span>' + navR + '</div>' +
+      '<div class="tr-wk">' + '日一二三四五六'.split('').map(c => '<i>' + c + '</i>').join('') + '</div>' +
+      '<div class="tr-days">' + days + '</div></div>';
+  }
+  // 提示行刻意短句:这行的宽度会参与 max-content 撑宽弹层,长句曾把弹层
+  // 撑出一条大空白带(日历只占左半,右侧全空)。
+  const hint = st.pickStart
+    ? '已选 ' + trDateKey(st.pickStart).slice(5) + ' · 点另一个日期完成（再点同一天 = 单日）'
+    : '点两天生成区间 · 灰色为未到达的日子';
+  return '<div class="tr-pop' + (showCal ? ' withcal' : '') + '"><div class="tr-quick' +
+    (showCal ? '' : ' solo') + '">' + quick + '</div>' +
+    (showCal ? '<div class="tr-cal">' + cal + '</div>' +
+      '<div class="tr-hint">' + esc(hint) + '</div>' : '') +
+    '</div>';
+}
+
+/* bindTrPop 弹层内交互:快捷口径立即生效并收起;「自定义…」停留进入日历点选;
+   日历两天完成区间(自动交换首尾),同日两次 = 单日。弹层内点击不冒泡到
+   document 的"点外收起"监听。 */
+function bindTrPop(id, host) {
+  const pop = host.querySelector('.tr-pop');
+  if (!pop) return;
+  pop.addEventListener('click', ev => ev.stopPropagation());
+  pop.querySelectorAll('.tr-q').forEach(b => {
+    b.onclick = () => {
+      const st = trangeState(id);
+      st.preset = b.dataset.q;
+      st.pickStart = null;
+      if (st.preset === 'custom') {
+        initCalNow(st); // 每次进入自定义都重定位到 [上一月, 当前月],不残留历史翻页位置
+        trangeRender(id); // 停留在弹层,进入日历点选
+        return;
+      }
+      st.open = false;
+      trangeRender(id);
+      trangeEmit(id);
+    };
+  });
+  pop.querySelectorAll('[data-nav]').forEach(b => {
+    b.onclick = () => {
+      const st = trangeState(id);
+      const d0 = new Date(st.calY, st.calM + (b.dataset.nav === 'next' ? 1 : -1), 1);
+      st.calY = d0.getFullYear();
+      st.calM = d0.getMonth();
+      trangeRender(id);
+    };
+  });
+  pop.querySelectorAll('.tr-d:not(.dis)').forEach(b => {
+    b.onclick = () => {
+      const st = trangeState(id);
+      const parts = b.dataset.d.split('-').map(Number);
+      const d00 = new Date(parts[0], parts[1] - 1, parts[2]);
+      if (!st.pickStart) {
+        st.pickStart = d00;
+        st.preset = 'custom';
+        st.from = d00;
+        st.to = null;
+        trangeRender(id);
+        return;
+      }
+      const a = st.pickStart, b2 = d00;
+      const lo = a <= b2 ? a : b2;
+      const hi = a <= b2 ? b2 : a;
+      st.from = new Date(lo.getFullYear(), lo.getMonth(), lo.getDate());
+      st.to = new Date(hi.getFullYear(), hi.getMonth(), hi.getDate(), 23, 59, 59);
+      st.pickStart = null;
+      st.open = false;
+      trangeRender(id);
+      trangeEmit(id);
+    };
+  });
+}
+
+/* bindTrOutsideOnce 点击弹层外收起全部弹层(全局只绑一次;测试桩无 DOM 时跳过)。 */
+let trangeOutsideBound = false;
+function bindTrOutsideOnce() {
+  if (trangeOutsideBound || typeof document === 'undefined' || !document.addEventListener) return;
+  trangeOutsideBound = true;
+  document.addEventListener('click', () => {
+    let dirty = false;
+    trangeStates.forEach(st => { if (st.open) { st.open = false; dirty = true; } });
+    if (dirty) trangeStates.forEach((st, hid) => trangeRender(hid));
+  });
 }
 
 const trangeHandlers = new Map();
@@ -250,9 +379,9 @@ function trangeEmit(id) {
 }
 
 // trangeQuery 把当前选择翻译成查询参数。
-//   rolling=true  → 滚动预设发 hours（服务端整点对齐），今天/自定义发 from/to
+//   rolling=true  → 滚动预设发 hours（服务端整点对齐），今天/昨天/本月/上月/自定义发 from/to
 //   rolling=false → 一律发 from/to（归档是线性日志，前端算区间更直观）
-// 「全部历史」两者都不发。
+// 「全部历史」两者都不发（滚动端点显式 hours=0，见下）。
 function trangeQuery(id, rolling) {
   const st = trangeState(id);
   const q = new URLSearchParams();
@@ -264,6 +393,26 @@ function trangeQuery(id, rolling) {
   }
   if (st.preset === 'today') {
     q.set('from', sec(trangeMidnight()));
+    return q;
+  }
+  if (st.preset === 'yesterday') {
+    const y = new Date(); y.setDate(y.getDate() - 1); y.setHours(0, 0, 0, 0);
+    const end = new Date(y); end.setDate(end.getDate() + 1); end.setSeconds(end.getSeconds() - 1);
+    q.set('from', sec(y));
+    q.set('to', sec(end));
+    return q;
+  }
+  if (st.preset === 'month') {
+    const n = new Date();
+    q.set('from', sec(new Date(n.getFullYear(), n.getMonth(), 1)));
+    return q;
+  }
+  if (st.preset === 'lastmonth') {
+    const n0 = new Date(); n0.setDate(1); n0.setHours(0, 0, 0, 0);
+    const p0 = new Date(n0); p0.setMonth(p0.getMonth() - 1);
+    const end = new Date(n0); end.setSeconds(end.getSeconds() - 1);
+    q.set('from', sec(p0));
+    q.set('to', sec(end));
     return q;
   }
   // 全部历史：滚动端点（用量）必须**显式**传 hours=0。
@@ -293,6 +442,7 @@ function trangeLabel(id) {
     String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') : '…';
   return f(st.from) + ' → ' + f(st.to);
 }
+
 function rateLimitMeta(row, now) {
   const model = String(row && row.model || '未知模型');
   const kind = String(row && row.kind || 'rate_limit');
@@ -387,7 +537,7 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志' };
+const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志', keys: 'API 密钥' };
 function go(v) {
   view = v;
   document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
@@ -396,6 +546,7 @@ function go(v) {
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
+  if (v === 'keys') loadKeys();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   if (v === 'accounts') loadExpiry();
@@ -606,45 +757,131 @@ function renderAttn(d) {
     items.map(i => '<div class="row">' + i.html + '</div>').join('');
 }
 
-/* ── E3 近 7 天负载带：与账号数无关的时间维，2 个账号也照样满 ────────
-   刻意不加任何交互控件（时间切换/筛选/图例开关）——一加就变成第二个用量页。 */
+/* ── 负载趋势（原「近 7 天负载」）────────────────────────────────────
+   柱 = 请求（红段 = 失败），线 = 积分消耗（右轴独立刻度）。带完整坐标轴
+   （左轴请求 / 右轴积分 / 底部时间）与悬停富 tooltip（复用用量页的 usTip
+   委托组件）；范围可选（24h/3天/7天/30天/全部历史），长范围自动按天聚合
+   （复用用量页的 mergeDaily），短范围保持小时粒度——与用量页主图同口径。 */
+let loadRangeHours = 168;
 async function loadUsageMini() {
   try {
-    const d = await api('usage?hours=168');
+    const d = await api('usage?hours=' + loadRangeHours);
     const s = d.series || [];
     const host = $('loadChart'); if (!host) return;
     const note = $('loadNote');
-    if (!s.length) { host.innerHTML = '<div class="us-empty">近 7 天暂无请求数据</div>'; if (note) note.textContent = '—'; return; }
-    const W = 640, H = 96, pad = 4, base = H - 12;
-    const max = Math.max(1, ...s.map(b => b.requests || 0));
-    const bw = (W - pad * 2) / s.length;
-    let bars = '';
-    s.forEach((b, i) => {
-      const r = b.requests || 0;
-      const h = Math.round((r / max) * (base - 6));
-      const x = pad + i * bw;
-      bars += '<rect class="bar" x="' + (x + 1).toFixed(1) + '" y="' + (base - h) +
-        '" width="' + (bw - 2).toFixed(1) + '" height="' + Math.max(1, h) + '"><title>' +
-        esc(String(b.t)) + ' · ' + r + ' 请求 / ' + (b.errors || 0) + ' 失败</title></rect>';
-      const e = b.errors || 0;
-      if (e > 0 && r > 0) {
-        const eh = Math.max(2, Math.round(h * e / r));
-        bars += '<rect class="bar err" x="' + (x + 1).toFixed(1) + '" y="' + (base - eh) +
-          '" width="' + (bw - 2).toFixed(1) + '" height="' + eh + '"/>';
+    if (!s.length) { host.innerHTML = '<div class="us-empty">该范围暂无请求数据</div>'; if (note) note.textContent = '—'; return; }
+    // 粒度自适应：>72h 或含折叠日桶 → 按天；否则小时（与用量页主图同判据）。
+    const raw = [];
+    for (const p of s) { const n = normUsagePoint(p); if (n) raw.push(n); }
+    if (!raw.length) { host.innerHTML = '<div class="us-empty">该范围暂无请求数据</div>'; if (note) note.textContent = '—'; return; }
+    const spanH = (raw[raw.length - 1].t - raw[0].t) / 3600e3;
+    const daily = spanH > 72 || raw.some(p => p.scope === 'day');
+    const pts = daily ? mergeDaily(s) : raw;
+
+    const W = 1200, H = 260, PL = 52, PR = 60, PT = 16, PB = 30;
+    const iw = W - PL - PR, ih = H - PT - PB;
+    const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+    const span = Math.max(1, t1 - t0);
+    const max = Math.max(1, ...pts.map(p => p.req));
+    let minGap = Infinity;
+    for (let i = 1; i < pts.length; i++) minGap = Math.min(minGap, pts[i].t - pts[i - 1].t);
+    if (!isFinite(minGap) || minGap <= 0) minGap = span;
+    const bw = Math.max(2, Math.min(34, iw * (minGap / span) * 0.7));
+    const xOf = t => PL + bw / 2 + (t - t0) / span * Math.max(1, iw - bw);
+    const yOf = v => PT + ih - ih * (v / max);
+    const cMax = Math.max(0.0001, ...pts.map(p => p.credits));
+    const cyOf = v => PT + ih - ih * (v / cMax);
+
+    let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" preserveAspectRatio="xMidYMid meet">';
+    // 网格 + 双轴刻度:左轴请求(ink),右轴积分(gold,与线同色系)
+    for (let i = 0; i <= 4; i++) {
+      const y = PT + ih - ih * i / 4;
+      out += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) +
+        '" y2="' + y.toFixed(1) + '"/>';
+      out += '<text class="lb" x="' + (PL - 6) + '" y="' + (y + 3.5).toFixed(1) +
+        '" text-anchor="end">' + fmtTok(max * i / 4) + '</text>';
+      out += '<text class="lb-r" x="' + (W - PR + 6) + '" y="' + (y + 3.5).toFixed(1) +
+        '">' + fmtCredit(cMax * i / 4) + '</text>';
+    }
+    const yBase = PT + ih;
+    pts.forEach((p, i) => {
+      const x = xOf(p.t) - bw / 2;
+      out += '<g class="usbarg" data-i="' + i + '">';
+      const h = ih * (p.req / max);
+      if (p.req > 0) {
+        out += '<rect class="bar" x="' + x.toFixed(1) + '" y="' + (yBase - h).toFixed(1) +
+          '" width="' + bw.toFixed(1) + '" height="' + Math.max(1, h).toFixed(1) + '"/>';
+        if (p.err > 0) {
+          const eh = Math.max(2, h * p.err / p.req);
+          out += '<rect class="bar err" x="' + x.toFixed(1) + '" y="' + (yBase - eh).toFixed(1) +
+            '" width="' + bw.toFixed(1) + '" height="' + eh.toFixed(1) + '"/>';
+        }
       }
+      out += '<rect class="usbar-hit" x="' + x.toFixed(1) + '" y="' + PT +
+        '" width="' + bw.toFixed(1) + '" height="' + ih + '"/>';
+      out += '</g>';
     });
-    const cMax = Math.max(0.0001, ...s.map(b => b.credits || 0));
-    const pts = s.map((b, i) => (pad + i * bw + bw / 2).toFixed(1) + ', ' +
-      (base - ((b.credits || 0) / cMax) * (base - 6)).toFixed(1)).join(' ');
-    host.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '">' +
-      '<line class="ax" x1="0" y1="' + base + '" x2="' + W + '" y2="' + base + '"/>' + bars +
-      '<polyline class="cred" points="' + pts + '"/></svg>';
+    // 积分消耗折线(右轴)
+    const line = pts.map(p => xOf(p.t).toFixed(1) + ',' + cyOf(p.credits).toFixed(1)).join(' ');
+    out += '<polyline class="cred" points="' + line + '"/>';
+    out += '<line class="ax" x1="' + PL + '" y1="' + yBase + '" x2="' + (W - PR) + '" y2="' + yBase + '"/>';
+    // x 轴刻度:4 个等距位置取最近实际点;小时粒度跨天时补日界线
+    const TICKS = Math.min(4, pts.length);
+    const used = new Set();
+    for (let k = 0; k < TICKS; k++) {
+      const target = t0 + span * (TICKS === 1 ? 0.5 : k / (TICKS - 1));
+      let bi = 0, best = Infinity;
+      for (let i = 0; i < pts.length; i++) {
+        const dd = Math.abs(pts[i].t - target);
+        if (dd < best) { best = dd; bi = i; }
+      }
+      if (used.has(bi)) continue;
+      used.add(bi);
+      const p = pts[bi];
+      const cx = xOf(p.t);
+      const anchor = cx < PL + 16 ? 'start' : (cx > W - PR - 16 ? 'end' : 'middle');
+      out += '<text class="lb" x="' + Math.max(PL, Math.min(W - PR, cx)).toFixed(1) +
+        '" y="' + (H - 8) + '" text-anchor="' + anchor + '">' + esc(fmtTokTimeLabel(p)) + '</text>';
+    }
+    if (!daily) {
+      let prevDay = null;
+      for (const p of pts) {
+        const dd = new Date(p.t).getDate();
+        if (prevDay !== null && dd !== prevDay) {
+          out += '<line class="gl" x1="' + xOf(p.t).toFixed(1) + '" y1="' + PT + '" x2="' +
+            xOf(p.t).toFixed(1) + '" y2="' + yBase + '" style="opacity:.45"/>';
+        }
+        prevDay = dd;
+      }
+    }
+    out += '</svg>';
+    host.innerHTML = out;
+    usTipHide(); // 重渲染后旧 tooltip 已过期
+    // 悬停富 tooltip(无点击跳转:这里的时间粒度与用量页范围选择是两套口径)
+    bindChartTips(host, pts, { html: p => usLoadTipHTML(p, daily) });
     const t = d.totals || {};
     if (note) note.textContent = (t.requests || 0) + ' 请求 / ' + (t.errors || 0) + ' 失败' +
       (t.cache_hit_rate != null ? ' · 缓存命中 ' + t.cache_hit_rate.toFixed(1) + '%' : '');
-    const r7 = $('hsReq7d'); if (r7) r7.textContent = t.requests || 0;
+    // 「近 7 天请求」是概览带的固定口径:只在 7 天范围时用它回写,其他范围不动
+    const r7 = $('hsReq7d');
+    if (r7 && loadRangeHours === 168) r7.textContent = t.requests || 0;
   } catch (e) { /* 增强项：失败不打断主流程 */ }
 }
+
+/* usLoadTipHTML 负载趋势的悬停明细:请求数(含失败) / 积分消耗 / 总 Tokens。 */
+function usLoadTipHTML(p, daily) {
+  const title = daily ? p.raw : (p.raw.length === 13 ? p.raw.replace('T', ' ') + ':00' : p.raw);
+  return '<div class="t">' + esc(title) + '</div>' +
+    usTipRow('请求数', String(p.req) + (p.err ? '（失败 ' + p.err + '）' : ''), 'sw-req') +
+    usTipRow('积分消耗', fmtCredit(p.credits), 'sw-credit') +
+    usTipRow('总 Tokens', fmtTok(p.tt), null);
+}
+
+/* 范围选择:切换即重拉(0 = 全部历史)。 */
+if ($('loadRange')) $('loadRange').onchange = () => {
+  loadRangeHours = Number($('loadRange').value) || 0;
+  loadUsageMini();
+};
 
 /* ── E4 在途与最近请求泳道：每条泳道 = 一个账号，账号越少越清晰 ──────
    与「运行日志」页的边界：≤40 点、无翻页、无筛选、不显示 path/request_id 文本。 */
@@ -733,6 +970,28 @@ async function loadOverview(quiet) {
   if (totSum > 0) $('sCredits').innerHTML = esc(remSum) + '<span class="of">/' + esc(totSum) + '</span>';
   else $('sCredits').textContent = remSum;
     $('sSticky').textContent = d.sticky_sessions;
+    // Hero 第 4 指标「最近到期」：全池最早到期批次的倒计时，按紧急度着色
+    // （≤3 天红 / ≤7 天琥珀）。复用 attnEarliestExpiry 三级降级口径——与 E2
+    // 预警同源，两处数字恒一致；纯本地计算，不打上游。
+    {
+      let best = null;
+      for (const s of (d.accounts || [])) {
+        const e = attnEarliestExpiry(s);
+        if (e && (best === null || e.days < best.days)) best = e;
+      }
+      const val = $('hsExpiryVal'), kEl = $('hsExpiryK');
+      if (val && kEl) {
+        if (best) {
+          val.textContent = best.days === 0 ? '今天' : best.days + ' 天';
+          val.style.color = best.days <= 3 ? 'var(--bad)' : best.days <= 7 ? 'var(--warn)' : '';
+          kEl.textContent = '最近到期 · 剩 ' + fmtTok(best.remain) + ' 积分';
+        } else {
+          val.textContent = '—';
+          val.style.color = '';
+          kEl.textContent = '最近到期';
+        }
+      }
+    }
     // Hero 概览带：实时在途（池内在途请求合计）+ 可用率进度环 + 运行状态灯。
     // 全部由本函数已拿到的 overview 数据派生，不新增任何请求。
     const heroInflight = (d.accounts || []).reduce((a, s) => a + (s.in_flight || 0), 0);
@@ -741,9 +1000,7 @@ async function loadOverview(quiet) {
     const hsInf = $('hsInflight');
     if (hsInf) hsInf.textContent = heroInflight;
     const hp = Math.round(d.total ? d.healthy / d.total * 100 : 0);
-    const ring = $('heroRing');
-    if (ring) ring.style.setProperty('--p', String(hp));
-    const rp = $('heroRingPct');
+    const rp = $('hsAvail');
     if (rp) rp.textContent = d.total ? hp + '%' : '—';
     const heroPulse = $('heroPulse');
     if (heroPulse) heroPulse.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
@@ -1896,6 +2153,111 @@ function qrSVG(M, px) {
   return s + '</svg>';
 }
 
+/* ── API 密钥:agent 接入密钥管理 ───────────────────────────────────
+   全钥只在创建响应里出现一次(网关只存 SHA-256 摘要);列表仅前缀。
+   agent 密钥只开放 /v1/*,面板端点对它们一律 401(隔离边界在服务端)。 */
+let akList = [];
+
+async function loadKeys() {
+  try {
+    const d = await api('keys');
+    akList = d.keys || [];
+    renderKeys();
+  } catch (e) {
+    $('akNote').textContent = '—';
+    $('akBody').innerHTML = '<tr><td colspan="7" class="empty">读取失败：' + esc(e.message) + '</td></tr>';
+  }
+}
+
+function renderKeys() {
+  $('akNote').textContent = akList.length + ' 把密钥 · 上限 50';
+  if (!akList.length) {
+    $('akBody').innerHTML = '<tr><td colspan="7" class="empty">尚未创建任何密钥——点右上角「创建密钥」生成一把，填进你的 agent</td></tr>';
+    return;
+  }
+  $('akBody').innerHTML = akList.map(k => {
+    const st = k.disabled ? '<span class="tag" style="color:var(--cool)">已禁用</span>' : '<span class="tag" style="color:var(--ok)">启用中</span>';
+    return '<tr>' +
+      '<td class="mark" aria-hidden="true"></td>' +
+      '<td><b>' + esc(k.name) + '</b>' + (k.disabled ? '<div class="note">' + st + '</div>' : '<div class="note">' + st + '</div>') + '</td>' +
+      '<td><code>' + esc(k.prefix) + '…</code></td>' +
+      '<td>' + esc(ago(k.created_at)) + '</td>' +
+      '<td>' + (k.last_used ? esc(ago(k.last_used)) : '—') + '</td>' +
+      '<td class="num">' + fmtTok(k.used_count) + '</td>' +
+      '<td class="c-acts">' +
+        '<button class="xs" data-ak="rename" data-id="' + esc(k.id) + '">改名</button>' +
+        '<button class="xs" data-ak="toggle" data-id="' + esc(k.id) + '">' + (k.disabled ? '启用' : '禁用') + '</button>' +
+        '<button class="xs" data-ak="del" data-id="' + esc(k.id) + '">删除</button>' +
+      '</td></tr>';
+  }).join('');
+}
+
+/* akForm 打开创建/改名弹窗(mode: create | rename, rename 带 id 与当前名) */
+let akFormMode = { mode: 'create', id: null };
+function akOpenForm(mode, k) {
+  akFormMode = { mode, id: k ? k.id : null };
+  $('akFormTitle').textContent = mode === 'create' ? '创建 API 密钥' : '重命名密钥';
+  $('btnAkFormOk').textContent = mode === 'create' ? '创建' : '保存';
+  $('akNameInput').value = k ? k.name : '';
+  $('akFormErr').hidden = true;
+  $('akFormVeil').classList.add('on');
+  setTimeout(() => $('akNameInput').focus(), 60);
+}
+function akCloseForm() { $('akFormVeil').classList.remove('on'); }
+
+async function akSubmitForm() {
+  const name = $('akNameInput').value.trim();
+  if (!name) { $('akFormErr').textContent = '名称不能为空'; $('akFormErr').hidden = false; return; }
+  try {
+    if (akFormMode.mode === 'create') {
+      const d = await api('keys', { method: 'POST', body: JSON.stringify({ name }) });
+      akCloseForm();
+      loadKeys();
+      $('akFullKey').value = d.full;
+      $('akShowVeil').classList.add('on');
+    } else {
+      await api('keys/' + encodeURIComponent(akFormMode.id) + '/rename', { method: 'POST', body: JSON.stringify({ name }) });
+      akCloseForm();
+      loadKeys();
+    }
+  } catch (e) {
+    $('akFormErr').textContent = e.message;
+    $('akFormErr').hidden = false;
+  }
+}
+
+if ($('btnAkCreate')) $('btnAkCreate').onclick = () => akOpenForm('create', null);
+if ($('btnAkFormCancel')) $('btnAkFormCancel').onclick = akCloseForm;
+if ($('btnAkFormOk')) $('btnAkFormOk').onclick = akSubmitForm;
+if ($('akNameInput')) $('akNameInput').addEventListener('keydown', e => { if (e.key === 'Enter') akSubmitForm(); });
+if ($('akFormVeil')) $('akFormVeil').addEventListener('click', e => { if (e.target === $('akFormVeil')) akCloseForm(); });
+if ($('btnAkShowDone')) $('btnAkShowDone').onclick = () => $('akShowVeil').classList.remove('on');
+if ($('btnAkCopy')) $('btnAkCopy').onclick = () => {
+  copyText($('akFullKey').value).then(() => toast('已复制', 'ok')).catch(() => {});
+};
+
+if ($('akBody')) $('akBody').addEventListener('click', async ev => {
+  const b = ev.target.closest('button[data-ak]');
+  if (!b) return;
+  const id = b.dataset.id;
+  const k = akList.find(x => x.id === id);
+  if (!k) return;
+  if (b.dataset.ak === 'rename') {
+    akOpenForm('rename', k);
+  } else if (b.dataset.ak === 'toggle') {
+    try {
+      await api('keys/' + encodeURIComponent(id) + '/disable', { method: 'POST', body: JSON.stringify({ disabled: !k.disabled }) });
+      loadKeys();
+    } catch (e) { toast(e.message, 'err'); }
+  } else if (b.dataset.ak === 'del') {
+    if (!confirm('删除后该密钥立即失效，使用它的 agent 会收到 401，需要换用其他密钥。确认删除「' + k.name + '」？')) return;
+    try {
+      await api('keys/' + encodeURIComponent(id) + '/delete', { method: 'POST' });
+      loadKeys();
+    } catch (e) { toast(e.message, 'err'); }
+  }
+});
+
 /* ── 开学季券码查询（弹窗，仿活动页 #/prizes?tab=vouchers）──────────── */
 /* copyText：clipboard API 只在 secure context（https/localhost）可用，
    远程 http 面板会拿不到 navigator.clipboard → 降级 execCommand。 */
@@ -2171,7 +2533,7 @@ function usMixBar(prompt, completion, total) {
   if (!t) return '';
   const pp = Math.max(0, Math.min(100, Number(prompt || 0) / t * 100));
   const pc = Math.max(0, Math.min(100, Number(completion || 0) / t * 100));
-  return '<span class="us-mix" title="prompt ' + pp.toFixed(1) + '% · completion ' + pc.toFixed(1) + '%">' +
+  return '<span class="us-mix" title="输入 ' + pp.toFixed(1) + '% · 输出 ' + pc.toFixed(1) + '%">' +
     '<i class="p" style="width:' + pp.toFixed(2) + '%"></i>' +
     '<i class="c" style="width:' + pc.toFixed(2) + '%"></i>' +
     '</span>';
@@ -2230,7 +2592,7 @@ function usDimHead(dim) {
   return '<tr><th class="mark" aria-hidden="true"></th><th>' + esc(m.title) + '</th>' +
     (m.withRealm ? '<th>域</th>' : '') +
     '<th class="num">请求</th><th class="num">失败</th>' +
-    '<th class="num">Prompt</th><th class="num">Completion</th><th class="num">合计</th>' +
+    '<th class="num">输入</th><th class="num">输出</th><th class="num">合计</th>' +
     (m.withPerf ? '<th class="num">均延迟</th><th class="num">均速率</th>' : '') +
     '</tr>';
 }
@@ -2340,21 +2702,27 @@ function renderUsage(d) {
   const okRate = reqs ? (reqs - errs) / reqs * 100 : null;
   // 构成条要的是合法 CSS 宽度，usPct 在无样本时返回 "—"，不能直接拼进 style。
   const pctW = (part) => total ? Math.max(0, Math.min(100, Number(part || 0) / total * 100)).toFixed(2) + '%' : '0%';
-  // 六张卡：主指标用强调色，completion 用成功色（与图表里的绿柱呼应），
-  // 失败/延迟只在有值时上语义色——全绿全黄的仪表盘等于没有重点。
+  // DeepSeek 式三张 hero 卡:消耗积分 / API 请求次数 / Tokens。原六张卡的信息
+  // 压缩进副文与下方 usSubNote 一行(信息不丢,视觉聚焦在三个量级上)。
+  const cacheTotal = Number(t.cache_hit_tokens || 0) + Number(t.cache_miss_tokens || 0);
   $('usStats').innerHTML =
-    usKpi(fmtTok(reqs), '请求数', 'c-accent',
-      errs ? '其中失败 ' + errs + ' 次' : '全部成功') +
-    usKpi(fmtTok(total), '总 token', 'c-accent',
-      'prompt ' + usPct(pt, total) + ' · completion ' + usPct(ct, total),
-      '<div class="kbar"><i style="width:' + pctW(pt) + ';background:var(--accent)"></i>' +
-      '<i style="width:' + pctW(ct) + ';background:var(--ok)"></i></div>') +
-    usKpi(fmtTok(pt), 'prompt', 'c-soft', '占比 ' + usPct(pt, total)) +
-    usKpi(fmtTok(ct), 'completion', 'c-ok', '占比 ' + usPct(ct, total)) +
-    usKpi(String(errs), '失败尝试', errs ? 'c-warn' : 'c-mute',
-      okRate == null ? '—' : (errs ? '成功率 ' + okRate.toFixed(1) + '%' : '成功率 100%')) +
-    usKpi(fmtMs(t.avg_latency_ms), '平均延迟', 'c-soft',
-      t.avg_tokens_per_second ? '吐字 ' + fmtRate(t.avg_tokens_per_second) : '无速率样本');
+    usKpi(fmtCredit(t.credits), '消耗积分', 'c-credit',
+      t.credit_samples
+        ? '有效样本 ' + fmtTok(t.credit_samples) + ' · ' + fmtCreditRatio(t.credits_per_1m_tokens, t.credit_samples, t.credit_tokens)
+        : '窗口内无积分样本') +
+    usKpi(fmtTok(reqs), 'API 请求次数', '',
+      errs ? '失败 ' + errs + ' · 成功率 ' + okRate.toFixed(1) + '%' : '全部成功') +
+    usKpi(fmtTok(total), 'Tokens', '',
+      '缓存命中率 ' + (cacheTotal > 0 ? trimFixed(Number(t.cache_hit_rate || 0).toFixed(1)) + '%' : '—'),
+      '<div class="kbar"><i style="width:' + pctW(t.cache_hit_tokens) + ';background:var(--ok)"></i>' +
+      '<i style="width:' + pctW(t.cache_miss_tokens) + ';background:var(--accent)"></i>' +
+      '<i style="width:' + pctW(ct) + ';background:var(--hi)"></i></div>');
+  // 副指标行全中文:输入(含命中占比) / 输出 —— 与图表、明细表的口径逐字一致。
+  $('usSubNote').textContent =
+    '输入 ' + usPct(pt, total) + '（' + fmtTok(pt) + (pt > 0 && cacheTotal > 0 ? ' · 命中 ' + usPct(t.cache_hit_tokens, pt) : '') + '）' +
+    ' · 输出 ' + usPct(ct, total) + '（' + fmtTok(ct) + '）' +
+    ' · 平均延迟 ' + fmtMs(t.avg_latency_ms) +
+    (t.avg_tokens_per_second ? ' · 吐字 ' + fmtRate(t.avg_tokens_per_second) : '');
 
   // 卡片、明细表与时序图全部按所选窗口统计（切窗口数字随之变化）；
   // 「全部历史」含 90 天前折叠出的日桶。这里标注当前口径与数据起点。
@@ -2385,10 +2753,14 @@ function renderUsage(d) {
     (usageData.credit_by_account || []).length + ' 个账号 · ' +
     (usageData.credit_by_model || []).length + ' 个模型倍率分组 · 仅统计与积分同时观测到的 Token';
 
+  $('usMetricLabel').textContent = (US_METRICS[usMetric] || US_METRICS.credits).label;
+  setUsLegend();
   renderUsageDim();
   renderCreditDim();
   renderUsageChart(usageData.series || []);
+  renderUsageGroups();
   renderHealthChart(usageData.series || []);
+  renderDayChip();
 }
 
 // renderHealthChart 「缓存命中率 + TTFB」双联趋势图（共享时间轴，上下两栏）。
@@ -2512,21 +2884,14 @@ if ($('usSort')) $('usSort').onchange = () => {
   renderUsageDim();
 };
 
-/* renderUsageChart 画堆叠柱状图。
- *
- * x 轴是**真实时间轴**，不是按序号等距。这一点很重要：数据里存在 1 小时的
- * 间隔，也存在 6~8 小时的断档（没请求的时段不产生桶），等距排布会把 8 小时
- * 画得和 1 小时一样宽，让「什么时候用的」完全失真。
- *
- * 另外不再用 preserveAspectRatio="none"：那会把 viewBox 横向拉伸到容器宽度，
- * 柱子和文字都变形。改为固定比例、按容器宽度自适应高度。
- *
- * viewBox 取 1200×200（原 760×180）：SVG 以 width:100% 渲染，高宽比决定实际
- * 高度——旧比例在 1500px 宽的主区里会撑到 ~355px，只有一两根柱子时整块几乎是
- * 空白。宽 viewBox 把同宽度下的高度压到 ~250px，与下方表格的视觉重量相当。
- *
- * 时间轴用本地时间解析（后端返回的就是本地时区），day 点按当天 00:00 参与定位，
- * 与 hour 点在同一个连续轴上——日桶本来就是他那天所有小时的聚合。
+/* 绘图骨架约定(新旧主图/小图共用):
+ * x 轴是**真实时间轴**，不是按序号等距。数据里存在 1 小时的间隔，也存在
+ * 6~8 小时的断档（没请求的时段不产生桶），等距排布会把 8 小时画得和 1 小时
+ * 一样宽，让「什么时候用的」完全失真。
+ * 不用 preserveAspectRatio="none"（横向拉伸会让柱子文字变形），SVG 以
+ * width:100% 渲染、按 viewBox 高宽比自适应高度；时间轴用本地时间解析
+ * （后端返回的就是本地时区），day 点按当天 00:00 参与定位，与 hour 点在
+ * 同一个连续轴上——日桶本来就是那天所有小时的聚合。
  */
 
 /* parsePointTime 把后端的 t 解析成毫秒时间戳。 */
@@ -2545,24 +2910,178 @@ function fmtTokTimeLabel(p) {
     : String(d.getHours()).padStart(2, '0') + ':00';
 }
 
+/* ── 用量图表(DeepSeek 式改版)──────────────────────────────────────
+ * 主图三指标可切换:消耗积分(usage.credit 累计)/ API 请求次数 / Tokens。
+ * 粒度自适应:窗口跨度 >72h(或含折叠日桶)时把小时点归并成**按天**柱——
+ * 对齐 DeepSeek「近 30 天看天」的读法;≤72h 保持小时粒度(近 3 天看小时)。
+ * 悬停显示 HTML 富 tooltip(日期/积分/请求/命中缓存/未命中缓存/输出),
+ * 点击柱子跳到该天用量;分组小节(按模型|按账号)复用同一套 tooltip。
+ *
+ * 旧版是 <title> 原生 tooltip + 单一 Token 堆叠指标(<title> 必须包进 <g>,
+ * issue #128)。改版后 tooltip 由宿主 div 上的委托式 mousemove 驱动,柱子带
+ * data-i 供寻址;柱类名继续用 usbar 而不是 bar(原因见 TestAppJSUsageChartBarClass)。
+ */
+
+const US_METRICS = {
+  credits: { label: '消耗积分', axis: fmtCredit },
+  // 请求次数取整:均值线等位置曾把浮点均值原样打出(61.15384615384615)。
+  requests: { label: 'API 请求次数', axis: v => fmtTok(Math.round(v)) },
+  tokens: { label: 'Tokens', axis: v => fmtTok(Math.round(v)) },
+};
+let usMetric = 'credits';   // 主图当前指标:credits | requests | tokens
+let usGroupDim = 'model';   // 分组小节维度:model | account | key
+
+/* usMiniGrad 小图渐变定义(按实例带 gid 后缀:同页多张小图的渐变 id 不能重复,
+ * 否则 url(#id) 全部解析到第一张图,后画的小图渐变失效)。 */
+function usMiniGrad(id, cssVar) {
+  return '<linearGradient id="' + id + '" x1="0" y1="0" x2="0" y2="1">' +
+    '<stop offset="0" style="stop-color:var(' + cssVar + ');stop-opacity:1"/>' +
+    '<stop offset="1" style="stop-color:var(' + cssVar + ');stop-opacity:.75"/></linearGradient>';
+}
+
+/* normUsagePoint 把后端 series 点(小时桶或日桶)归一为绘图点;时间解析失败返回 null。 */
+function normUsagePoint(p) {
+  const t = parsePointTime(p);
+  if (t === null) return null;
+  const pt = Number(p.prompt_tokens || 0);
+  const ct = Number(p.completion_tokens || 0);
+  return {
+    t, scope: p.scope, raw: String(p.t || ''),
+    pt, ct, tt: Number(p.total_tokens || 0) || (pt + ct),
+    req: Number(p.requests || 0), err: Number(p.errors || 0),
+    credits: Number(p.credits || 0), creditSamples: Number(p.credit_samples || 0),
+    ch: Number(p.cache_hit_tokens || 0), cm: Number(p.cache_miss_tokens || 0),
+  };
+}
+
+/* mergeDaily 把 hour 点与折叠 day 点按日历天归并(DeepSeek 式按天柱)。
+ * 同一天的多个小时桶累加(token/请求/积分/缓存明细);输出按天升序。 */
+function mergeDaily(series) {
+  const byDay = new Map();
+  const out = [];
+  for (const p of series || []) {
+    const key = String(p.t || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(key)) continue;
+    let e = byDay.get(key);
+    if (!e) {
+      e = { t: parsePointTime({ t: key, scope: 'day' }), scope: 'day', raw: key,
+            pt: 0, ct: 0, tt: 0, req: 0, err: 0,
+            credits: 0, creditSamples: 0, ch: 0, cm: 0 };
+      byDay.set(key, e);
+      out.push(e);
+    }
+    const n = normUsagePoint(p);
+    if (!n) continue;
+    e.pt += n.pt; e.ct += n.ct; e.tt += n.tt;
+    e.req += n.req; e.err += n.err;
+    e.credits += n.credits; e.creditSamples += n.creditSamples;
+    e.ch += n.ch; e.cm += n.cm;
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+
+/* ── 富 tooltip(usTip):HTML 卡片替代 SVG 原生 <title> ─────────────────
+ * 原生 <title> 有约 1s 延迟、样式不可控、塞不下「命中/未命中/输出」多行明细。
+ * usTip 是 body 级单例(index.html 静态节点),由图表宿主上的委托式 mousemove
+ * 驱动;无 DOM 的测试桩环境(uspTip 依赖 document/window)静默跳过。 */
+function usTipRow(label, value, swatch) {
+  return '<div class="r">' + (swatch ? '<i class="sw ' + swatch + '"></i>' : '') +
+    '<span>' + esc(label) + '</span><b>' + esc(value) + '</b></div>';
+}
+
+/* usMainTipHTML 单个时间点(或天)的明细,行序对齐 DeepSeek 悬停卡:
+ * 积分 → 请求(含失败) → 输入(命中缓存)/输入(未命中缓存) → 输出 → 总计。
+ * 缓存未观测的旧样本不伪造两行,合成一行「输入」。 */
+function usMainTipHTML(p, daily) {
+  const title = daily ? p.raw : (p.raw.length === 13 ? p.raw.replace('T', ' ') + ':00' : p.raw);
+  let rows = usTipRow('消耗积分', fmtCredit(p.credits), 'sw-credit') +
+    usTipRow('请求次数', String(p.req) + (p.err ? '（失败 ' + p.err + '）' : ''), null);
+  if (p.ch + p.cm > 0) {
+    rows += usTipRow('输入(命中缓存)', fmtTok(p.ch), 'sw-hit') +
+      usTipRow('输入(未命中缓存)', fmtTok(p.cm), 'sw-miss');
+  } else if (p.pt > 0) {
+    rows += usTipRow('输入', fmtTok(p.pt), 'sw-miss');
+  }
+  rows += usTipRow('输出', fmtTok(p.ct), 'sw-out') +
+    usTipRow('总 Tokens', fmtTok(p.tt), null);
+  return '<div class="t">' + esc(title) + '</div>' + rows;
+}
+
+let usTipEl = null;
+function usTipElOf() {
+  if (usTipEl === null) usTipEl = $('usTip') || false;
+  return usTipEl || null;
+}
+function usTipShow(html, ev) {
+  const el = usTipElOf();
+  if (!el || typeof document === 'undefined' || !document.body) return;
+  el.innerHTML = html;
+  el.hidden = false;
+  usTipMove(ev);
+}
+function usTipMove(ev) {
+  const el = usTipElOf();
+  if (!el || el.hidden || typeof window === 'undefined' || !ev) return;
+  const pad = 14;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  const w = el.offsetWidth || 220, h = el.offsetHeight || 120;
+  if (x + w > window.innerWidth - 8) x = ev.clientX - w - pad;
+  if (y + h > window.innerHeight - 8) y = ev.clientY - h - pad;
+  el.style.left = Math.max(8, x) + 'px';
+  el.style.top = Math.max(8, y) + 'px';
+}
+function usTipHide() {
+  const el = usTipElOf();
+  if (!el) return;
+  el.hidden = true;
+}
+
+/* bindChartTips 图表宿主 div 上的委托式悬停/点击。sel 是可悬停分组的选择器
+ * (柱状图 = g.usbarg,折线的数据点 = g.usptg);innerHTML 重建柱子无需重绑。 */
+function bindChartTips(host, pts, opt) {
+  if (!host) return;
+  const sel = opt.sel || 'g.usbarg';
+  host.onmousemove = ev => {
+    const g = ev.target.closest ? ev.target.closest(sel) : null;
+    if (!g) { usTipHide(); return; }
+    const p = pts[Number(g.dataset.i)];
+    if (!p) { usTipHide(); return; }
+    usTipShow(opt.html(p), ev);
+  };
+  host.onmouseleave = () => usTipHide();
+  if (opt.click) {
+    host.onclick = ev => {
+      const g = ev.target.closest ? ev.target.closest(sel) : null;
+      if (!g) return;
+      const p = pts[Number(g.dataset.i)];
+      if (p) opt.click(p);
+    };
+  }
+}
+
 function renderUsageChart(series) {
   const host = $('usChart');
 
   // 丢掉时间解析不出来的点，而不是让 NaN 传染整张图。
-  const pts = [];
-  for (const p of series) {
-    const t = parsePointTime(p);
-    if (t === null) continue;
-    const pt = Number(p.prompt_tokens || 0);
-    const ct = Number(p.completion_tokens || 0);
-    pts.push({ t, scope: p.scope, raw: p.t, pt, ct, tt: Number(p.total_tokens || 0) || (pt + ct),
-               req: p.requests || 0 });
+  const raw = [];
+  for (const p of series || []) {
+    const n = normUsagePoint(p);
+    if (n) raw.push(n);
   }
-  if (!pts.length) {
+  if (!raw.length) {
     host.innerHTML = '<div class="us-empty">暂无用量数据。发起一次对话后再刷新。</div>';
     $('usChartNote').textContent = '—';
     return;
   }
+  // 粒度自适应:>72h 或含折叠日桶 → 按天;否则保持小时(近 3 天窗口看小时更有用)。
+  const spanH = (raw[raw.length - 1].t - raw[0].t) / 3600e3;
+  const daily = spanH > 72 || raw.some(p => p.scope === 'day');
+  const pts = daily ? mergeDaily(series) : raw;
+
+  const m = US_METRICS[usMetric] || US_METRICS.credits;
+  const stacked = usMetric === 'tokens';
+  const val = p => usMetric === 'credits' ? p.credits : usMetric === 'requests' ? p.req : p.tt;
 
   const W = 1200, H = 200, PL = 58, PR = 14, PT = 18, PB = 30;
   const iw = W - PL - PR, ih = H - PT - PB;
@@ -2571,12 +3090,14 @@ function renderUsageChart(series) {
   const t1 = pts[pts.length - 1].t;
   const span = Math.max(1, t1 - t0);
 
-  const max = Math.max(1, ...pts.map(p => p.tt));
-  const peak = pts.reduce((a, b) => (b.tt > a.tt ? b : a), pts[0]);
-  const avg = pts.reduce((s, p) => s + p.tt, 0) / pts.length;
+  const max = Math.max(1, ...pts.map(p => val(p)));
+  const peak = pts.reduce((a, b) => (val(b) > val(a) ? b : a), pts[0]);
+  const avg = pts.reduce((s, p) => s + val(p), 0) / pts.length;
   $('usChartNote').textContent =
-    pts.length + ' 个点 · 峰值 ' + fmtTok(peak.tt) + ' @ ' + fmtTokTimeLabel(peak) +
-    ' · 均值 ' + fmtTok(avg);
+    (daily ? pts.length + ' 天' : pts.length + ' 个时点') +
+    (val(peak) > 0
+      ? ' · 峰值 ' + m.axis(val(peak)) + ' @ ' + fmtTokTimeLabel(peak) + ' · 均值 ' + m.axis(avg)
+      : ' · 暂无该指标数据');
 
   // 柱宽取「最小真实间隔」的 70%，并夹在合理区间内——窗口拉到 30 天时柱子会
   // 变细，但不会细到看不见。
@@ -2594,16 +3115,18 @@ function renderUsageChart(series) {
   let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" ' +
             'preserveAspectRatio="xMidYMid meet">';
 
-  // 柱体渐变：顶部实、底部略透，堆叠时两段仍能一眼分清（纯色块并排会糊成一片）。
+  // 柱体渐变：顶部实、底部极轻微降不透明度（.85）——曾用 .6，浅色主题下
+  // 底部被背景洗成两截色，看起来像"配色坏了"（用户反馈）。现在只保留一点
+  // 纵深提示，主体接近纯色（DeepSeek 柱状图即纯色块）。
   // 注意 stop-color 必须走 style 而不是 presentation 属性——Blink/WebKit 不解析
   // 属性里的 var()，写成 stop-color="var(--accent)" 会整条渐变失效（柱子全透明）。
+  // 三套语义色板:积分=紫、请求=青(与缓存三色 绿/蓝/金 互不撞色)。
   out += '<defs>' +
-    '<linearGradient id="usGradP" x1="0" y1="0" x2="0" y2="1">' +
-    '<stop offset="0" style="stop-color:var(--accent);stop-opacity:1"/>' +
-    '<stop offset="1" style="stop-color:var(--accent);stop-opacity:.6"/></linearGradient>' +
-    '<linearGradient id="usGradC" x1="0" y1="0" x2="0" y2="1">' +
-    '<stop offset="0" style="stop-color:var(--ok);stop-opacity:1"/>' +
-    '<stop offset="1" style="stop-color:var(--ok);stop-opacity:.6"/></linearGradient>' +
+    usMiniGrad('usGradCredit', '--viz-credit') +
+    usMiniGrad('usGradReq', '--viz-req') +
+    usMiniGrad('usGradHit', '--ok') +
+    usMiniGrad('usGradMiss', '--accent') +
+    usMiniGrad('usGradOut', '--hi') +
     '</defs>';
 
   // y 轴网格 + 刻度
@@ -2612,7 +3135,7 @@ function renderUsageChart(series) {
     out += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) +
            '" y2="' + y.toFixed(1) + '"/>';
     out += '<text class="tk" x="' + (PL - 6) + '" y="' + (y + 3.5).toFixed(1) +
-           '" text-anchor="end">' + fmtTok(max * i / 4) + '</text>';
+           '" text-anchor="end">' + m.axis(max * i / 4) + '</text>';
   }
 
   // 均值参考线：一眼看出"这根是不是异常高"，比只给刻度省心。
@@ -2622,45 +3145,58 @@ function renderUsageChart(series) {
     out += '<line class="avg" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) +
            '" y2="' + y.toFixed(1) + '"/>';
     out += '<text class="tk-avg" x="' + (PL + 5) + '" y="' + (y - 4).toFixed(1) +
-           '" text-anchor="start">均值 ' + fmtTok(avg) + '</text>';
+           '" text-anchor="start">均值 ' + m.axis(avg) + '</text>';
   }
 
-  // 柱子
+  // 柱子:每根包一个 g.usbarg(data-i 供委托 tooltip/点击寻址),顶端铺一层
+  // 透明命中层铺满整列高度——悬停/点击不必精确落在细柱上。
+  // 圆角只给堆叠顶端(贴轴的底边保持方角,柱子才像"立"在基线上)。
+  // 类名用 usbar 而不是 bar:账号池的积分条是 .bar{height:3px},而 SVG2 里
+  // height 是 rect 的 CSS 几何属性,同名类会把每根柱子压成 3px 高(踩过)。
   const yBase = PT + ih;
-  for (const p of pts) {
+  pts.forEach((p, i) => {
     const x = xOf(p.t) - bw / 2;
-    const hTot = ih * (p.tt / max);
-    const hP = p.tt ? hTot * (p.pt / p.tt) : 0;
-    const hC = Math.max(p.tt && p.ct ? 1 : 0, hTot - hP);
-    // 每根柱子包一个 <g>，把 <title> 放进去。
-    //
-    // 为什么必须包裹：SVG 里 <title> 描述的是它的**父元素**。此前 <title> 是
-    // <rect> 的兄弟节点（rect 自闭合，无法包含子节点），于是全部平铺在 <svg>
-    // 根下 —— 整张图只有一个 tooltip（浏览器取第一个），悬停任何柱子都显示同一
-    // 份数据（issue #128）。包进 <g> 后 tooltip 跟随该柱，且堆叠的两段
-    //（prompt + completion）共用同一个提示。
-    out += '<g><title>' + esc(p.raw) + '  ' + fmtTok(p.pt) + ' prompt / ' +
-           fmtTok(p.ct) + ' completion / ' + p.req + ' 次</title>';
-    // 圆角只给堆叠顶端（贴轴的底边保持方角，柱子才像"立"在基线上）。
-    // 类名用 usbar 而不是 bar：账号池的积分条是 .bar{height:3px}，而 SVG2 里
-    // height 是 rect 的 CSS 几何属性，同名类会把每根柱子压成 3px 高（踩过）。
-    if (hP > 0) out += '<rect class="usbar" x="' + x.toFixed(2) + '" y="' + (yBase - hP).toFixed(2) +
-      '" width="' + bw.toFixed(2) + '" height="' + hP.toFixed(2) +
-      '" fill="url(#usGradP)"' + (hC > 0 ? '' : ' rx="1.5"') + '/>';
-    if (hC > 0) out += '<rect class="usbar" x="' + x.toFixed(2) + '" y="' + (yBase - hP - hC).toFixed(2) +
-      '" width="' + bw.toFixed(2) + '" height="' + hC.toFixed(2) +
-      '" fill="url(#usGradC)" rx="1.5"/>';
+    out += '<g class="usbarg" data-i="' + i + '">';
+    if (stacked) {
+      // Tokens 三段堆叠:输入(命中缓存,绿)/输入(未命中缓存,蓝)/输出(金)——
+      // 与悬停明细、图例完全同一套语义色(此前是 prompt/completion 两段英文图例,
+      // 与 tooltip 的缓存口径对不上,用户无法把颜色和数字对应起来)。
+      const hit = Math.max(0, Math.min(p.ch, p.pt));
+      const miss = Math.max(0, p.pt - hit);
+      const segs = [
+        ['usGradHit', ih * (hit / max)],
+        ['usGradMiss', ih * (miss / max)],
+        ['usGradOut', ih * (p.ct / max)],
+      ];
+      let yCur = yBase;
+      segs.forEach(([g, h], k) => {
+        if (h < 0.4) return;
+        const isTop = segs.slice(k + 1).every(([, hh]) => hh < 0.4);
+        yCur -= h;
+        out += '<rect class="usbar" x="' + x.toFixed(2) + '" y="' + yCur.toFixed(2) +
+          '" width="' + bw.toFixed(2) + '" height="' + h.toFixed(2) +
+          '" fill="url(#' + g + ')"' + (isTop ? ' rx="1.5"' : '') + '/>';
+      });
+    } else if (val(p) > 0) {
+      const h = Math.max(1, ih * (val(p) / max));
+      const grad = usMetric === 'credits' ? 'usGradCredit' : 'usGradReq';
+      out += '<rect class="usbar" x="' + x.toFixed(2) + '" y="' + (yBase - h).toFixed(2) +
+        '" width="' + bw.toFixed(2) + '" height="' + h.toFixed(2) +
+        '" fill="url(#' + grad + ')" rx="1.5"/>';
+    }
+    out += '<rect class="usbar-hit" x="' + x.toFixed(2) + '" y="' + PT +
+      '" width="' + bw.toFixed(2) + '" height="' + ih + '"/>';
     out += '</g>';
-  }
+  });
 
   // 峰值标注：柱子够窄时文字压在柱顶，够宽时贴右侧避免和柱体重叠。
-  {
+  if (val(peak) > 0) {
     const px = xOf(peak.t);
-    const py = yOf(peak.tt);
+    const py = yOf(val(peak));
     const anchor = px > W - PR - 90 ? 'end' : 'middle';
     out += '<text class="tk-peak" x="' + Math.max(PL, Math.min(W - PR, px)).toFixed(1) +
            '" y="' + Math.max(10, py - 5).toFixed(1) + '" text-anchor="' + anchor + '">' +
-           '峰值 ' + fmtTok(peak.tt) + '</text>';
+           '峰值 ' + m.axis(val(peak)) + '</text>';
   }
 
   // x 轴基线画在柱子之后，避免压在柱底
@@ -2688,20 +3224,315 @@ function renderUsageChart(series) {
            '" y="' + (PT + ih + 15) + '" text-anchor="' + anchor + '">' + esc(fmtTokTimeLabel(p)) + '</text>';
   }
 
-  // 跨天时补一条日期分隔线，让「日界」在长窗口里可见
-  let prevDay = null;
-  for (const p of pts) {
-    const d = new Date(p.t).getDate();
-    if (prevDay !== null && d !== prevDay) {
-      const x = xOf(p.t).toFixed(1);
-      out += '<line class="gl" x1="' + x + '" y1="' + PT + '" x2="' + x + '" y2="' +
-             (PT + ih) + '" style="opacity:.45"/>';
+  // 跨天时补一条日期分隔线，让「日界」在长窗口里可见。
+  // 按天柱模式跳过:每根柱子都是一天,分隔线会画在每根柱子之间,纯噪音。
+  if (!daily) {
+    let prevDay = null;
+    for (const p of pts) {
+      const d = new Date(p.t).getDate();
+      if (prevDay !== null && d !== prevDay) {
+        const x = xOf(p.t).toFixed(1);
+        out += '<line class="gl" x1="' + x + '" y1="' + PT + '" x2="' + x + '" y2="' +
+               (PT + ih) + '" style="opacity:.45"/>';
+      }
+      prevDay = d;
     }
-    prevDay = d;
   }
 
   out += '</svg>';
   host.innerHTML = out;
+  usTipHide(); // 重渲染后旧 tooltip 的内容/坐标已过期,先隐藏,悬停会立即重新触发
+  // 悬停富 tooltip + 点击跳当天(委托在宿主 div 上,重建 SVG 不需要重绑)。
+  bindChartTips(host, pts, {
+    html: p => usMainTipHTML(p, daily),
+    click: p => jumpToUsageDay(p.raw.slice(0, 10)),
+  });
+}
+
+/* setUsLegend 主图图例随指标切换。 */
+function setUsLegend() {
+  const el = $('usLegend');
+  if (!el) return;
+  if (usMetric === 'tokens') {
+    el.innerHTML = '<i class="sw sw-hit"></i>输入(命中缓存)<i class="sw sw-miss"></i>输入(未命中缓存)' +
+      '<i class="sw sw-out"></i>输出<span class="sep"></span><i class="sw sw-t"></i>均值';
+  } else if (usMetric === 'requests') {
+    el.innerHTML = '<i class="sw sw-req"></i>请求次数(含失败)<span class="sep"></span>点击柱子查看当天';
+  } else {
+    el.innerHTML = '<i class="sw sw-credit"></i>积分消耗<span class="sep"></span>点击柱子查看当天';
+  }
+}
+
+/* ── 分组小节(DeepSeek 式):每组 = 请求折线 + Token 三段堆叠柱 ───────── */
+
+/* drawMiniLine 请求次数折线(area 形态,x 为天,DeepSeek 蓝色曲线形态)。
+ * 每个数据点带透明命中圆(r=9)供悬停;单点退化为一个圆点(线段画不成)。 */
+function drawMiniLine(host, pts, gid) {
+  if (!host) return;
+  const data = [];
+  for (const p of pts || []) {
+    const n = normUsagePoint(p);
+    if (n) data.push(n);
+  }
+  if (!data.length) {
+    host.innerHTML = '<div class="us-empty">无请求</div>';
+    return;
+  }
+  const W = 560, H = 170, PL = 44, PR = 12, PT = 14, PB = 24;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const t0 = data[0].t, t1 = data[data.length - 1].t;
+  const span = Math.max(1, t1 - t0);
+  const max = Math.max(1, ...data.map(p => p.req));
+  const xOf = t => PL + (t - t0) / span * iw;
+  const yOf = v => PT + ih - ih * (v / max);
+  let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" preserveAspectRatio="xMidYMid meet">';
+  out += '<defs>' + usMiniGrad('usGradLine' + gid, '--viz-req') + '</defs>';
+  for (let i = 0; i <= 2; i++) {
+    const y = PT + ih - ih * i / 2;
+    out += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) +
+      '" y2="' + y.toFixed(1) + '"/>';
+    out += '<text class="tk" x="' + (PL - 5) + '" y="' + (y + 3.5).toFixed(1) +
+      '" text-anchor="end">' + fmtTok(max * i / 2) + '</text>';
+  }
+  if (data.length > 1) {
+    let path = '';
+    data.forEach((p, i) => {
+      path += (i ? 'L' : 'M') + xOf(p.t).toFixed(1) + ' ' + yOf(p.req).toFixed(1);
+    });
+    out += '<path d="' + path + 'L' + (W - PR).toFixed(1) + ' ' + (PT + ih) +
+      'L' + PL + ' ' + (PT + ih) + 'Z" fill="url(#usGradLine' + gid + ')" stroke="none"/>';
+    out += '<path class="usline" d="' + path + '"/>';
+  }
+  data.forEach((p, i) => {
+    out += '<g class="usptg" data-i="' + i + '">' +
+      '<circle class="usbar-hit" cx="' + xOf(p.t).toFixed(1) + '" cy="' + yOf(p.req).toFixed(1) + '" r="9"/>' +
+      '<circle class="usdot" cx="' + xOf(p.t).toFixed(1) + '" cy="' + yOf(p.req).toFixed(1) + '" r="2.6"/></g>';
+  });
+  out += '<line class="ax" x1="' + PL + '" y1="' + (PT + ih) + '" x2="' + (W - PR) +
+    '" y2="' + (PT + ih) + '"/>';
+  out += '<text class="tk" x="' + PL + '" y="' + (H - 6) + '">' +
+    esc(String(data[0].raw).slice(5)) + '</text>';
+  if (data.length > 1) {
+    out += '<text class="tk" x="' + (W - PR) + '" y="' + (H - 6) + '" text-anchor="end">' +
+      esc(String(data[data.length - 1].raw).slice(5)) + '</text>';
+  }
+  out += '</svg>';
+  host.innerHTML = out;
+  usTipHide();
+  bindChartTips(host, data, {
+    sel: 'g.usptg',
+    html: p => usMainTipHTML(p, true),
+    click: p => jumpToUsageDay(p.raw.slice(0, 10)),
+  });
+}
+
+/* drawMiniTokens Token 三段堆叠柱:输入(命中缓存)/输入(其余输入)/输出。
+ * 命中取 cache_hit_tokens(钳到输入内);未观测缓存的样本把整段输入归入
+ * "未命中"段——堆高恒等于 prompt+completion,不因缺观测而变矮。 */
+function drawMiniTokens(host, pts, gid) {
+  if (!host) return;
+  const data = [];
+  for (const p of pts || []) {
+    const n = normUsagePoint(p);
+    if (n) data.push(n);
+  }
+  if (!data.length) {
+    host.innerHTML = '<div class="us-empty">无数据</div>';
+    return;
+  }
+  const segs = p => {
+    const hit = Math.max(0, Math.min(p.ch, p.pt));
+    const rest = Math.max(0, p.pt - hit);
+    return { hit, rest, out: p.ct, tt: p.tt || (hit + rest + p.ct) };
+  };
+  const W = 560, H = 170, PL = 44, PR = 12, PT = 14, PB = 24;
+  const iw = W - PL - PR, ih = H - PT - PB;
+  const t0 = data[0].t, t1 = data[data.length - 1].t;
+  const span = Math.max(1, t1 - t0);
+  const max = Math.max(1, ...data.map(p => segs(p).tt));
+  let minGap = Infinity;
+  for (let i = 1; i < data.length; i++) minGap = Math.min(minGap, data[i].t - data[i - 1].t);
+  if (!isFinite(minGap) || minGap <= 0) minGap = span;
+  const bw = Math.max(3, Math.min(34, iw * (minGap / span) * 0.7));
+  const xOf = t => PL + bw / 2 + (t - t0) / span * Math.max(1, iw - bw);
+  const yOf = v => PT + ih - ih * (v / max);
+  let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" preserveAspectRatio="xMidYMid meet">';
+  out += '<defs>' +
+    usMiniGrad('usGradHit' + gid, '--ok') +
+    usMiniGrad('usGradMiss' + gid, '--accent') +
+    usMiniGrad('usGradOut' + gid, '--hi') +
+    '</defs>';
+  for (let i = 0; i <= 2; i++) {
+    const y = PT + ih - ih * i / 2;
+    out += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) +
+      '" y2="' + y.toFixed(1) + '"/>';
+    out += '<text class="tk" x="' + (PL - 5) + '" y="' + (y + 3.5).toFixed(1) +
+      '" text-anchor="end">' + fmtTok(max * i / 2) + '</text>';
+  }
+  const yBase = PT + ih;
+  data.forEach((p, i) => {
+    const s = segs(p);
+    const x = xOf(p.t) - bw / 2;
+    out += '<g class="usbarg" data-i="' + i + '">';
+    const parts = [
+      ['usGradHit' + gid, s.hit],
+      ['usGradMiss' + gid, s.rest],
+      ['usGradOut' + gid, s.out],
+    ];
+    let yCur = yBase;
+    parts.forEach(([g, v], k) => {
+      const h = ih * (v / max);
+      if (h < 0.4) return;
+      // 圆角只给最顶段:上方没有可见段时它就是堆叠顶端。
+      const isTop = parts.slice(k + 1).every(([, vv]) => ih * (vv / max) < 0.4);
+      yCur -= h;
+      out += '<rect class="usbar" x="' + x.toFixed(2) + '" y="' + yCur.toFixed(2) +
+        '" width="' + bw.toFixed(2) + '" height="' + h.toFixed(2) +
+        '" fill="url(#' + g + ')"' + (isTop ? ' rx="1.5"' : '') + '/>';
+    });
+    out += '<rect class="usbar-hit" x="' + x.toFixed(2) + '" y="' + PT +
+      '" width="' + bw.toFixed(2) + '" height="' + ih + '"/>';
+    out += '</g>';
+  });
+  out += '<line class="ax" x1="' + PL + '" y1="' + yBase + '" x2="' + (W - PR) +
+    '" y2="' + yBase + '"/>';
+  out += '<text class="tk" x="' + PL + '" y="' + (H - 6) + '">' +
+    esc(String(data[0].raw).slice(5)) + '</text>';
+  if (data.length > 1) {
+    out += '<text class="tk" x="' + (W - PR) + '" y="' + (H - 6) + '" text-anchor="end">' +
+      esc(String(data[data.length - 1].raw).slice(5)) + '</text>';
+  }
+  out += '</svg>';
+  host.innerHTML = out;
+  usTipHide();
+  bindChartTips(host, data, {
+    html: p => usMainTipHTML(p, true),
+    click: p => jumpToUsageDay(p.raw.slice(0, 10)),
+  });
+}
+
+/* renderUsageGroups 分组小节:按模型 | 按账号(数据来自后端 model_series /
+ * account_series,窗口内按天)。组头汇总行 = 请求/消耗/Tokens 合计。 */
+function renderUsageGroups() {
+  const host = $('usGroups');
+  if (!host) return;
+  const d = usageData || {};
+  const isModel = usGroupDim === 'model';
+  const isKey = usGroupDim === 'key';
+  const groups = isModel ? (d.model_series || []) : isKey ? (d.key_series || []) : (d.account_series || []);
+  const tabsEl = $('usGroupTabs');
+  if (tabsEl) tabsEl.innerHTML = usTabsHtml([['model', '按模型'], ['account', '按账号'], ['key', '按密钥']], usGroupDim, {
+    model: (d.model_series || []).length,
+    account: (d.account_series || []).length,
+    key: (d.key_series || []).length,
+  });
+  const note = $('usGroupsNote');
+  if (!groups.length) {
+    host.innerHTML = '<div class="us-empty">窗口内暂无分组数据。发起一次对话后再刷新。</div>';
+    if (note) note.textContent = '—';
+    return;
+  }
+  if (note) note.textContent = groups.length + (isModel ? ' 个模型' : isKey ? ' 把密钥' : ' 个账号') + ' · 按天 · 点击小图跳到当天';
+  host.innerHTML = groups.map((g, gi) => {
+    const key = String(g.key || '');
+    const title = isModel ? (key || '—')
+      : isKey ? (key || '管理密钥')
+      : (g.nickname || key.slice(0, 8) || '—');
+    let sub = '';
+    if (isKey) sub = key ? 'agent 密钥' : '管理密钥（api_key）';
+    else if (!isModel) sub = [g.realm || '', key.slice(0, 8)].filter(Boolean).join(' · ');
+    let req = 0, cre = 0, tt = 0;
+    for (const p of (g.points || [])) {
+      req += Number(p.requests || 0);
+      cre += Number(p.credits || 0);
+      tt += Number(p.total_tokens || 0);
+    }
+    // 按密钥维度:管理密钥组带历史口径说明;每组带「隐藏」按钮(仅收起显示,
+    // 桶数据不动;已隐藏的组在底部条里可恢复)。
+    const hideBtn = isKey
+      ? '<button class="xs" data-akhide="' + esc(key) + '" title="仅收起这组显示,数据保留">隐藏</button>'
+      : '';
+    const mgmtHint = isKey && !key
+      ? '<span class="hint" title="经管理密钥(api_key)鉴权的流量:含密钥功能上线前的全部历史用量,以及仍在用 api_key 的调用">含上线前历史</span>'
+      : '';
+    return '<div class="us-group">' +
+      '<div class="us-group-hd"><span class="us-group-title">' + esc(title) + '</span>' +
+      mgmtHint +
+      (sub ? '<span class="note">' + esc(sub) + '</span>' : '') +
+      '<span class="grow"></span>' +
+      '<span class="us-group-sum">请求 ' + fmtTok(req) + ' · 消耗 ' + fmtCredit(cre) + 'c · Tokens ' + fmtTok(tt) + '</span>' +
+      hideBtn + '</div>' +
+      '<div class="us-group-grid">' +
+      '<div class="us-mini"><div class="us-mini-hd"><span class="lb">API 请求次数</span><span class="grow"></span><span class="note">' + fmtTok(req) + '</span></div><div class="us-mini-body" id="usg-req-' + gi + '"></div></div>' +
+      '<div class="us-mini"><div class="us-mini-hd"><span class="lb">Tokens</span><span class="grow"></span><span class="note">' + fmtTok(tt) + '</span></div><div class="us-mini-body" id="usg-tok-' + gi + '"></div></div>' +
+      '</div></div>';
+  }).join('');
+  groups.forEach((g, gi) => {
+    drawMiniLine($('usg-req-' + gi), g.points || [], 'l' + gi);
+    drawMiniTokens($('usg-tok-' + gi), g.points || [], 't' + gi);
+  });
+  // 已隐藏的密钥分组(服务端已从 key_series 里滤掉,这里给出恢复入口)。
+  const hiddenKeys = (isKey ? (d.hidden_keys || []) : []).filter(n => !groups.some(g => g.key === n));
+  const strip = $('usHiddenStrip');
+  if (strip) {
+    if (isKey && hiddenKeys.length) {
+      strip.hidden = false;
+      strip.innerHTML = '已隐藏 ' + hiddenKeys.length + ' 组: ' + hiddenKeys.map(n =>
+        '<span class="us-hidden-item">' + esc(n || '管理密钥') +
+        '<button class="xs" data-akshow="' + esc(n) + '">显示</button></span>').join('');
+    } else {
+      strip.hidden = true;
+      strip.innerHTML = '';
+    }
+  }
+}
+
+/* 隐藏/恢复密钥分组:POST 到 keys/hidden(纯显示偏好),完成后重拉用量。 */
+async function akToggleGroupHidden(name, hidden) {
+  try {
+    await api('keys/hidden', { method: 'POST', body: JSON.stringify({ name: name, hidden: hidden }) });
+    await loadUsage();
+  } catch (e) { toast(e.message, 'err'); }
+}
+
+/* ── 当天下钻:点击柱子 → 该天 00:00→次日 00:00;chip 提供返回与查看请求记录 ── */
+let usDrillPrev = null;
+function jumpToUsageDay(dayKey) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dayKey || '')) return;
+  const st = trangeState('usRange');
+  if (st.preset !== 'custom') usDrillPrev = { preset: st.preset, from: st.from, to: st.to };
+  const p = dayKey.split('-').map(Number);
+  const from = new Date(p[0], p[1] - 1, p[2], 0, 0, 0, 0);
+  const to = new Date(from);
+  to.setDate(to.getDate() + 1);
+  to.setSeconds(to.getSeconds() - 1); // 单日 = 00:00:00 → 23:59:59(与日历口径一致)
+  st.preset = 'custom';
+  st.from = from;
+  st.to = to;
+  trangeRender('usRange');
+  loadUsage();
+}
+
+/* usDayChipHTML 当前范围恰好是单日(某天 00:00 → 次日 00:00)时渲染下钻 chip;
+ * 其余范围返回空串(chip 隐藏)——chip 是「当天视图」的标识,不是常驻控件。 */
+function usDayChipHTML() {
+  const st = trangeState('usRange');
+  if (st.preset !== 'custom' || !st.from || !st.to) return '';
+  const spanH = (st.to - st.from) / 3600e3;
+  if (spanH < 23.9 || spanH > 24.1) return '';
+  if (st.from.getHours() || st.from.getMinutes() || st.from.getSeconds()) return '';
+  const p2 = n => String(n).padStart(2, '0');
+  const key = st.from.getFullYear() + '-' + p2(st.from.getMonth() + 1) + '-' + p2(st.from.getDate());
+  return '<span class="day">' + esc(key) + '</span>' +
+    '<button type="button" data-act="back">返回</button>' +
+    '<button type="button" data-act="logs">查看当天请求记录</button>';
+}
+function renderDayChip() {
+  const el = $('usDayChip');
+  if (!el) return;
+  const html = usDayChipHTML();
+  el.innerHTML = html;
+  el.hidden = !html;
 }
 
 function fmtTokTip(v) { return fmtTok(v); }
@@ -2717,22 +3548,51 @@ async function warmUsageModelRates() {
   usageRateWarmAt = Date.now();
 }
 
+/* loadUsageBalance 余额条:积分余额/总额度/即将到期 + 账号数,来自 overview
+ * (与账号池同源,纯内存不打包上游)。overviewData 已有(账号页先加载)则零请求复用;
+ * 失败隐藏余额条——它是增强项,不阻塞用量页。 */
+async function loadUsageBalance() {
+  const el = $('usBalance');
+  if (!el) return;
+  try {
+    if (!overviewData) overviewData = await api('overview');
+    const accs = overviewData.accounts || [];
+    const rem = accs.reduce((a, s) => a + (Number(s.credits) || 0), 0);
+    const tot = accs.reduce((a, s) => a + (Number(s.credits_total) || 0), 0);
+    const exp = accs.reduce((a, s) => a + (Number(s.credits_expiring) || 0), 0);
+    el.innerHTML =
+      '<span><span class="bk">积分余额</span><span class="bv">' + fmtCredit(rem) + '</span>' +
+      (tot > 0 ? '<span class="bv of"> / ' + fmtCredit(tot) + '</span>' : '') + '</span>' +
+      (exp > 0 ? '<span><span class="bk">即将到期</span><span class="bv">' + fmtCredit(exp) + '</span></span>' : '') +
+      '<span><span class="bk">账号</span><span class="bv">' + accs.length + '</span></span>';
+    el.hidden = false;
+  } catch (e) {
+    el.hidden = true;
+  }
+}
+
 async function loadUsage() {
   const q = trangeQuery('usRange', true);
   try {
     await warmUsageModelRates();
-    const d = await api('usage?' + q.toString());
+    const [d] = await Promise.all([api('usage?' + q.toString()), loadUsageBalance()]);
     renderUsage(d);
   } catch (e) {
     // 失败时三块都要清干净：只改图表会留下上一次窗口的数字，看起来像"刷新成功"。
     usageData = null;
+    usDrillPrev = null;
     $('usChart').innerHTML = '<div class="us-empty">读取用量失败：' + esc(e.message) + '</div>';
     $('usChartNote').textContent = '—';
     $('usStats').innerHTML = '';
+    $('usSubNote').textContent = '—';
     $('usCreditStats').innerHTML = '';
     $('usNote').textContent = '—';
     $('usCreditNote').textContent = '—';
     $('usDimNote').textContent = '—';
+    $('usGroupsNote').textContent = '—';
+    $('usGroups').innerHTML = '';
+    $('usDayChip').hidden = true;
+    $('usBalance').hidden = true;
     $('usDimHead').innerHTML = '';
     $('usCreditHead').innerHTML = '';
     $('usDimTabs').innerHTML = usTabsHtml(US_DIM_TABS, usDim, null);
@@ -2744,7 +3604,59 @@ async function loadUsage() {
 
 if ($('btnUsage')) $('btnUsage').onclick = loadUsage;
 // 时间范围控件绑定：任何改动（预设切换 / 自定义起止）都重新拉一次用量。
-if ($('usRange')) trangeBind('usRange', loadUsage);
+// 默认「近 30 天」(DeepSeek 同款):主图按天柱,与分组小节的按天序列同口径;
+// 原默认近 3 天在旧版"小时柱"下才直观,改版后首屏信息密度太低。
+if ($('usRange')) trangeBind('usRange', loadUsage, '720');
+// 主图指标切换:纯重渲染不发请求(series 已在内存),三指标共用一次拉取的数据。
+if ($('usMetricTabs')) $('usMetricTabs').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-metric]');
+  if (!b || !US_METRICS[b.dataset.metric]) return;
+  usMetric = b.dataset.metric;
+  $('usMetricTabs').querySelectorAll('button[data-metric]').forEach(x => x.classList.toggle('on', x === b));
+  if (usageData) renderUsage(usageData);
+});
+// 分组小节维度切换:同上,纯重渲染。
+if ($('usGroupTabs')) $('usGroupTabs').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-dim]');
+  if (!b) return;
+  usGroupDim = ['model', 'account', 'key'].includes(b.dataset.dim) ? b.dataset.dim : 'model';
+  renderUsageGroups();
+});
+if ($('usGroups')) $('usGroups').addEventListener('click', ev => {
+  const hide = ev.target.closest('button[data-akhide]');
+  if (hide) { akToggleGroupHidden(hide.dataset.akhide, true); return; }
+  const show = ev.target.closest('button[data-akshow]');
+  if (show) akToggleGroupHidden(show.dataset.akshow, false);
+});
+if ($('usHiddenStrip')) $('usHiddenStrip').addEventListener('click', ev => {
+  const show = ev.target.closest('button[data-akshow]');
+  if (show) akToggleGroupHidden(show.dataset.akshow, false);
+});
+// 当天下钻 chip:「返回」回到跳转前的范围(没记过则回近 30 天);
+// 「查看当天请求记录」把同一区间带到运行日志视图(reqlog 归档默认保留 7 天,
+// 更早的日期如实显示为空)。
+if ($('usDayChip')) $('usDayChip').addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-act]');
+  if (!b) return;
+  if (b.dataset.act === 'back') {
+    const prev = usDrillPrev || { preset: '720', from: trangeMidnight(), to: new Date() };
+    usDrillPrev = null;
+    const st = trangeState('usRange');
+    st.preset = prev.preset;
+    st.from = prev.from;
+    st.to = prev.to;
+    trangeRender('usRange');
+    loadUsage();
+  } else if (b.dataset.act === 'logs') {
+    const st = trangeState('usRange');
+    const rst = trangeState('reqRange');
+    rst.preset = 'custom';
+    rst.from = st.from;
+    rst.to = st.to;
+    trangeRender('reqRange');
+    go('logs');
+  }
+});
 
 /* ── 积分构成 ─────────────────────────────────────────────────────── */
 /* 一个账号的余额是若干积分包之和。包按来源命名（「国内运营裂变包」「拉新权益包」
@@ -3265,15 +4177,17 @@ function renderExpiry(d) {
   });
   const rows = keyed.map(({ a }) => {
     if (a.error) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-        '<span class="exp-main err">查询失败：' + esc(a.error) + '</span></div>';
+      return '<div class="exp-row"><div class="exp-hd"><span class="exp-dot" style="background:var(--ink-3)"></span>' +
+        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span></div>' +
+        '<div class="exp-days" style="color:var(--bad)">查询失败</div>' +
+        '<div class="exp-main err">' + esc(a.error) + '</div></div>';
     }
     const bs = expBatches(a.packages).filter(b => expDaysLeft(b.date, today) >= 0);
     if (!bs.length) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-        '<span class="exp-main">7 天内无到期积分</span></div>';
+      return '<div class="exp-row"><div class="exp-hd"><span class="exp-dot" style="background:var(--ok)"></span>' +
+        '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span></div>' +
+        '<div class="exp-days" style="color:var(--ink-3)">7 天内无到期</div>' +
+        '<div class="exp-main">积分批次健康，暂无临期消耗压力</div></div>';
     }
     const first = bs[0];
     const days = expDaysLeft(first.date, today);
@@ -3288,14 +4202,14 @@ function renderExpiry(d) {
     const more = bs.length > 4 ? '　等 ' + bs.length + ' 批' : '';
     const rest = bs.slice(1, 4).map(b =>
       '随后 ' + esc(b.date.slice(5)) + ' · ' + fmtTok(b.remain)).join('　') + more;
-    return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span>' +
-      '<span class="exp-main">最近到期 <b>' + esc(first.date) + '</b>（' + dayWord +
-      '）· 该批 <b>' + fmtTok(first.remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
-      fmtTok(daily) + '</b>' +
+    return '<div class="exp-row"><div class="exp-hd"><span class="exp-dot" style="background:' + cls + '"></span>' +
+      '<span class="exp-nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</span></div>' +
+      '<div class="exp-days" style="color:' + cls + '">' + dayWord + '</div>' +
+      '<div class="exp-main">最近到期 <b>' + esc(first.date) + '</b> · 该批 <b>' + fmtTok(first.remain) +
+      '</b> 积分 · 到期前日均需耗 ≥<b>' + fmtTok(daily) + '</b>' +
       (week > first.remain ? ' · 7 天内合计 ' + fmtTok(week) : '') +
       (rest ? '<div class="note">' + rest + '</div>' : '') +
-      '</span></div>';
+      '</div></div>';
   }).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
   // 数据新鲜度透明化：走缓存时标注年龄，免得把旧数据误当实时。
