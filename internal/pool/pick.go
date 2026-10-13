@@ -327,7 +327,13 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	if best == nil {
 		return nil
 	}
-	log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), best.expiry(now).Format(time.RFC3339), best.fallbackKind(now))
+	// 日志去重：同一账号同一冷却周期只报一次（账号持续冷却时兜底可能逐请求触发，
+	// 不去重会刷屏）。换账号或冷却截止时间推进（退避升档/自然恢复）时再报。
+	exp := best.expiry(now)
+	if best.a.UID != p.fallbackLogUID || !exp.Equal(p.fallbackLogUntil) {
+		log.Printf("WARN: [pool] fallback_earliest_expiry acct=%s until=%s kind=%s", logfmt.Label(best.a.UID, best.a.Nickname), exp.Format(time.RFC3339), best.fallbackKind(now))
+		p.fallbackLogUID, p.fallbackLogUntil = best.a.UID, exp
+	}
 	best.lastUsed = time.Now()
 	// 兜底同样是「选中」，必须与 pick() 正常路径、粘性命中路径（PickByUIDForModel）
 	// 一样推进 usedSeq/pickSeq：否则被兜底反复选中的账号 usedSeq 恒为 0，在 pick 的
