@@ -156,6 +156,9 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.chatAuth(h.chatCompletions))
+	// Anthropic Messages 出口（阶段二）：Claude Code / Anthropic SDK 直连外部渠道。
+	// 鉴权与 /v1/chat/completions 同通道（管理密钥或 agent 密钥）。
+	h.mux.HandleFunc("POST /v1/messages", h.chatAuth(h.handleExtMessages))
 	h.mux.HandleFunc("GET /v1/models", h.chatAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)

@@ -45,10 +45,11 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 
 - **接入形态**：config 的 `ext_channels` 数组填 `name` + `base_url` + `api_key` 即成一条渠道（硅基流动、阿里百炼、OpenRouter、NVIDIA NIM、火山 Ark、自建 one-api/new-api 聚合器……全部适用）。保存即热重载，无需重启。
 - **路由协议**：模型名 `ext:<渠道名>/<模型名>` 精确路由；裸名在渠道间唯一匹配时也可直达（多渠道同名 → 要求用前缀消歧，不静默选边）。`/v1/models` 合并三域名单（`cn:` / `global:` / `ext:`）。
+- **三协议出口**（阶段二）：`/v1/chat/completions` 之外新增 **`/v1/messages`**（Anthropic Messages 形态）——Claude Code / Anthropic SDK 直接把 `ANTHROPIC_BASE_URL` 指到本网关即可调用外部渠道；请求/响应双向协议转换（system / tools / tool_use / tool_result / stop_reason 映射），流式做事件级映射（`message_start` / `content_block_delta` / `message_stop`）。仅服务外部渠道；CodeBuddy 上游的 Anthropic 形态因缓存兼容性未经验证暂不开放（对齐 hub 的默认关闭策略）。
 - **独立治理**：429 短冷却指数退避（封顶 30 分钟）、5xx 固定短冷却、传输连续失败熔断（达阈 10 分钟）；成功即清零。不占 CodeBuddy 池的在途租约、不喂池熔断器，两套观测互不污染。
-- **正确性边界**：外部渠道路径**不做**提示词改写、指纹脱敏与 DSML 工具调用修复（那些是 CodeBuddy 上游特有的对抗语义，标准 OpenAI 上游透传即正确）；错误原文透传（保留上游 `error.code/type`）。
-- **密钥安全**：`api_key` 只落 config.json（0600），面板与 `/status` 一律不回显（哨兵脱敏 + 保存时按渠道名回填原值）；出站 `base_url` 经启动/保存双期 SSRF 校验，指向内网/元数据地址直接拒绝。
-- **用量归因**：外部渠道流量进入用量视图（realm=`ext`、按渠道分组），TTFB / 速率 / token 与 CodeBuddy 流量同口径统计。
+- **正确性边界**：外部渠道路径**不做**提示词改写、指纹脱敏与 DSML 工具调用修复（那是 CodeBuddy 上游特有的对抗语义，标准 OpenAI 上游透传是唯一正确语义）；流式**逐字节透传**（不走 SSE 帧白名单重建，第三方上游的私有字段——OpenRouter 归因、自定义 `usage` 键——原样保留）；错误原文透传。
+- **密钥安全**：`api_key` 只落 config.json（0600），面板与 `/status` 一律不回显（哨兵脱敏 + 保存时按渠道名回填原值）；出站 `base_url` 经启动/保存双期 SSRF 校验，指向内网/元数据地址直接拒绝（自建聚合器可显式 `allow_private: true` 放行内网，云元数据端点恒拒）。
+- **用量归因**：外部渠道流量进入用量视图（realm=`ext`、按渠道分组），TTFB / 速率 / token 与 CodeBuddy 流量同口径统计；`/v1/messages` 出口同桶记账。
 - **额度情报**：面板「外部渠道」视图内置免费额度汇总（默认拉取 [token-fbi.com](https://token-fbi.com/) 开放数据 `data.json`，每日人工复核、含观望区/下架状态）。仅供发现可注册的新平台，领取一律走各平台官方入口——网关不解析情报内容做任何路由决策，也绝不自动注册。`ext_intel.enabled=false` 或 `url=""` 关闭。
 
 ### StarPort 相对上游的自有增量
@@ -289,7 +290,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | 会话粘性 / Redis 镜像 | `internal/server` / `internal/redisstore` |
 | 中性提示词 / 降级重试 | `internal/prompt/prompt.go` · `Degraded`；`internal/server/degrade.go` |
 | Agent 密钥 | `internal/apikeys/apikeys.go`（包注释含完整设计说明） |
-| 外部渠道（多平台） | `internal/extchan/extchan.go`（Manager / 渠道状态机）、`extrelay.go`（`internal/server`，转发链路）、`intel.go`（额度情报） |
+| 外部渠道（多平台） | `internal/extchan/extchan.go`（Manager / 渠道状态机）、`extrelay.go`（`internal/server`，chat 转发链路）、`exthropic.go`（Anthropic /v1/messages 双向转换）、`intel.go`（额度情报） |
 | 更新检查 | `internal/update/update.go` |
 | SSRF 校验 | `internal/upstream/ssrf.go` |
 | 配置定义与默认值 | `cmd/server/config.go` |
