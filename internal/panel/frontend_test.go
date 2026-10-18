@@ -1548,4 +1548,21 @@ func TestAccountCenterDOM(t *testing.T) {
 			t.Errorf("app.js 缺账号中心接线片段 %q", want)
 		}
 	}
+
+	// 迁入/回退接线（T5 契约冻结）：ext.js 必须直连两个端点，且回退前有确认语义
+	// （架构 §7.3：二次确认由前端做）。managed 渠道显示「回退」、非托管显示「迁入」。
+	extJS, err := os.ReadFile("ext.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`data-ec="migrate"`, `data-ec="rollback"`,
+		"channels/' + encodeURIComponent(name) + '/migrate",
+		"channels/' + encodeURIComponent(name) + '/rollback",
+		"无需迁入", "无需回退", // 409 幂等语义的前端处理
+	} {
+		if !strings.Contains(string(extJS), want) {
+			t.Errorf("ext.js 缺迁入/回退接线片段 %q", want)
+		}
+	}
 }

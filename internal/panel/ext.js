@@ -216,14 +216,20 @@ async function migrateExtChannel(name, btn) {
     const d = await api('channels/' + encodeURIComponent(name) + '/migrate', { method: 'POST' });
     const n = d.total || (d.migrated ? d.migrated.length : 0);
     toast('已迁入账号中心：' + n + ' 条凭证转为账号，托管渠道已生效', 'ok');
-    // custom 渠道的已知形态：账号中心按"每账号一条"投影出独立的 c-<id> 托管
-    // 渠道，原渠道会短暂并存（非托管同名不接管的孤儿语义）——提示用户可删除。
-    const ch = (typeof extChannels !== 'undefined' ? extChannels : []).find(x => x && x.name === name);
-    if (ch && (ch.protocol || 'openai') === 'openai' && (ch.adapter || '') === ''
-      && name.indexOf('c-') !== 0 && /^custom|^ch-/.test(ch.name) === false) {
-      // 仅在无法确认平台归属时保守提示；原生平台原地转托管，无此现象。
-    }
     loadExt();
+    // custom 渠道的已知形态（T5）：账号中心按"每账号一条"投影出独立的
+    // c-<accID> 托管渠道，原渠道会短暂并存（非托管同名不接管的孤儿语义）。
+    // 等列表重载完成后检测：原渠道仍非托管 && 出现了 c- 托管渠道 → 提示可删除原渠道。
+    // 原生平台（loomy/autoclaw/qoder）原地转托管、渠道名不变，无此现象。
+    setTimeout(() => {
+      const chs = (typeof extChannels !== 'undefined') ? extChannels : [];
+      const src = chs.find(x => x && x.name === name);
+      const hasProjected = chs.some(x => x && x.managed && /^c-acc-/.test(x.name));
+      if (src && !src.managed && hasProjected) {
+        toast('提示：custom 平台按"每账号一条渠道"投影（c-<账号ID>）。原渠道 '
+          + name + ' 已不由账号中心管理，确认新渠道可用后可在此删除', 'mute');
+      }
+    }, 800);
   } catch (e) {
     const m = e.message || '';
     if (m.indexOf('无需迁入') >= 0) {
