@@ -135,6 +135,12 @@ type autoclawAdapter struct {
 	intl bool
 }
 
+// 编译期断言：AutoClaw 实现 StatusNormalizer——不是为了改状态码（它没有
+// "200 + 业务错误码"的形态），而是让**探测路径**（extchan.probeWith）也能
+// 拿到与 Do 相同的错误信封（token_invalid / membership_required / 406 提示），
+// 而不是只给一个 `upstream_401` 状态码。
+var _ StatusNormalizer = (*autoclawAdapter)(nil)
+
 // NewAutoClawAdapter 构造国内版适配器。
 func NewAutoClawAdapter() NativeAdapter { return &autoclawAdapter{intl: false} }
 
@@ -209,6 +215,19 @@ func (a *autoclawAdapter) ConvertResponse(t *Target, status int, body []byte) []
 		}
 	}
 	return body
+}
+
+// NormalizeStatus 实现 StatusNormalizer。
+//
+// 状态码**不改**（AutoClaw 的错误都走真实 HTTP 状态码，没有"200 + 业务码"
+// 形态）；这里只把错误体归一成 OpenAI 信封，供探测路径透出语义化的
+// error.code（token_invalid / membership_required / upstream_406）。
+// Do 的错误路径随后再走 ConvertResponse：已是信封就原样保留（不二次包装）。
+func (a *autoclawAdapter) NormalizeStatus(status int, body []byte) (int, []byte) {
+	if status < 400 {
+		return status, body // 正常响应不动（非流式的 model 回写在 ConvertResponse）
+	}
+	return status, autoclawErrorEnvelope(nil, status, body)
 }
 
 // ConvertStream 实现 Adapter：SSE 逐帧回写 model（**本适配器允许重建帧**，

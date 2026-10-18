@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/RisingInsight/startport/internal/provider"
 )
@@ -48,6 +49,21 @@ func newDoManager(t *testing.T, baseURL string) (*Manager, *Channel) {
 		t.Fatal("渠道未注册")
 	}
 	return m, ch
+}
+
+// serveAccounting 模拟 server 侧的最终记账（recordExtAttempt → NoteUsage）。
+//
+// 单测里没有 server 层；生产口径是「Do 记被换证淘汰的尝试（NoteAttempt）、
+// server 记最终服务/透传的那次（NoteUsage）」。这里用同一调用补齐生产口径，
+// 让断言与真实链路一致而不是与"缺了半截记账的单测"一致。
+func serveAccounting(t *testing.T, ch *Channel, res *DoResult) {
+	t.Helper()
+	if ch == nil || res == nil {
+		return
+	}
+	if cred := ch.CredentialByLabel(res.CredentialLabel); cred != nil {
+		cred.NoteUsage(0, 0)
+	}
 }
 
 // assertNoInFlightLeak 断言渠道与其下所有凭证的在途计数都已归零。
@@ -221,6 +237,15 @@ func TestDoSwitchesOn429(t *testing.T) {
 		t.Errorf("backup in_flight = %d, want 0", got)
 	}
 	assertNoInFlightLeak(t, ch)
+	// v1.4.0 口径：primary 被 429 淘汰 → Do 记 1 次尝试；backup 最终服务 →
+	// server 侧记 1 次。总上游往返 2 次，两边各 1、无双计。
+	serveAccounting(t, ch, res)
+	if got := ch.CredentialByLabel("primary").Snapshot(time.Now()).Requests; got != 1 {
+		t.Errorf("primary requests = %d, want 1（被换证淘汰的尝试也计）", got)
+	}
+	if got := ch.CredentialByLabel("backup").Snapshot(time.Now()).Requests; got != 1 {
+		t.Errorf("backup requests = %d, want 1（最终服务）", got)
+	}
 }
 
 // 401 标记 invalid 并换证；后续请求不再尝试失效凭证。
@@ -259,6 +284,14 @@ func TestDoMarksInvalidOn401(t *testing.T) {
 		}
 	}
 	assertNoInFlightLeak(t, ch)
+	// v1.4.0 口径：401 淘汰的 primary 记 1 次尝试；backup 服务 1 次。
+	serveAccounting(t, ch, res)
+	if got := ch.CredentialByLabel("primary").Snapshot(time.Now()).Requests; got != 1 {
+		t.Errorf("primary requests = %d, want 1（401 淘汰也计）", got)
+	}
+	if got := ch.CredentialByLabel("backup").Snapshot(time.Now()).Requests; got != 1 {
+		t.Errorf("backup requests = %d, want 1（最终服务）", got)
+	}
 }
 
 // 两条凭证都 429：首次返回上游 429，随后无可用凭证 → 503 all_credentials_unavailable。
@@ -286,6 +319,19 @@ func TestDoAllCredentialsUnavailable(t *testing.T) {
 		t.Errorf("错误语义异常: %+v", he)
 	}
 	assertNoInFlightLeak(t, ch)
+	// v1.4.0 口径：两条凭证各被打了一次 429——primary 换证淘汰（Do 记）、
+	// backup 是最终透传结果（server 记）。总尝试 2 次、两凭证各 1、无双计。
+	serveAccounting(t, ch, res)
+	total := 0
+	for _, snap := range ch.Snapshot().Credentials {
+		total += int(snap.Requests)
+		if snap.Requests != 1 {
+			t.Errorf("凭证 %q requests = %d, want 1", snap.Label, snap.Requests)
+		}
+	}
+	if total != 2 {
+		t.Errorf("requests 总和 = %d, want 2（等于上游往返数）", total)
+	}
 }
 
 // 5xx：渠道短冷却、**不换证**；冷却期但凭证健康 → channel_cooling。
@@ -318,6 +364,18 @@ func TestDoServerErrorDoesNotSwitch(t *testing.T) {
 		t.Errorf("冷却期应返回 channel_cooling, got %v", err)
 	}
 	assertNoInFlightLeak(t, ch)
+	// v1.4.0 口径（无双计锚点）：5xx 不换证 → 该尝试就是最终结果，只由 server
+	// 计 1 次；Do 的 NoteAttempt 不应再给它 +1。
+	serveAccounting(t, ch, res)
+	for _, snap := range ch.Snapshot().Credentials {
+		want := int64(0)
+		if snap.Label == res.CredentialLabel {
+			want = 1
+		}
+		if snap.Requests != want {
+			t.Errorf("凭证 %q requests = %d, want %d（5xx 不换证无双计）", snap.Label, snap.Requests, want)
+		}
+	}
 }
 
 // Gemini 上游在流式请求下返回 JSON（非 SSE）：502 gemini_stream_unsupported。

@@ -15,6 +15,7 @@ package extchan
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -218,10 +219,26 @@ func (m *Manager) probeWith(ctx context.Context, ch *Channel, creds []*Credentia
 		result.ErrorCode = "read_error"
 		return result
 	}
-	result.Status = resp.StatusCode
-	if resp.StatusCode != http.StatusOK {
+	// 与 Do 同口径的状态归一（v1.4.0）：原生适配器可以用 `HTTP 200 + 业务码`
+	// 或"裸 401/403"表达错误（Loomy 的 session 过期就是这两种形态）。不归一的话，
+	// 探测结果只给 `upstream_401` 这类状态码错误码，用户看不出"该去换 session"。
+	// 归一后的错误体里若带 error.code（如 session_expired），优先透出它。
+	// 三协议基准适配器不实现 StatusNormalizer，探测行为逐字节不变（零回归）。
+	status := resp.StatusCode
+	isNormalizer := false
+	if sn, ok := adapter.(provider.StatusNormalizer); ok {
+		isNormalizer = true
+		status, body = sn.NormalizeStatus(status, body)
+	}
+	result.Status = status
+	if status != http.StatusOK {
 		result.Error = provider.ScrubSecrets(truncateForLog(string(body), 300), target.Secret)
-		result.ErrorCode = fmt.Sprintf("upstream_%d", resp.StatusCode)
+		result.ErrorCode = fmt.Sprintf("upstream_%d", status)
+		if isNormalizer {
+			if code := envelopeErrorCode(body); code != "" {
+				result.ErrorCode = code
+			}
+		}
 		return result
 	}
 	models, derr := adapter.DecodeModels(target, resp.StatusCode, body)
@@ -238,4 +255,19 @@ func (m *Manager) probeWith(ctx context.Context, ch *Channel, creds []*Credentia
 		result.ModelsSample = append([]string(nil), models...)
 	}
 	return result
+}
+
+// envelopeErrorCode 从归一后的错误体里取 OpenAI 信封的 error.code
+// （session_expired / token_invalid 这类语义码）；没有则返回空串，
+// 调用方回落 `upstream_<status>`。
+func envelopeErrorCode(body []byte) string {
+	var probe struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(probe.Error.Code)
 }

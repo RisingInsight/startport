@@ -273,6 +273,27 @@ func (c *Credential) NoteUsage(promptTokens, completionTokens int64) {
 	c.lastUsed = time.Now()
 }
 
+// NoteAttempt 记一次"被换证淘汰"的上游尝试（v1.4.0 口径）。
+//
+// 只累计 `requests` 与 `lastUsed`，**不动 token 与状态**——状态由
+// NoteRateLimited / NoteInvalid / NoteFailure 负责。调用时机在 Do 的
+// 429 / 401 / 403 分支：本次尝试已真实发出上游请求、且马上要换下一条凭证，
+// 若不记它，面板上的"尝试数"就看不到这条凭证出过力（v1.3 前的口径只计
+// 最终服务那次，被淘汰的凭证请求恒为 0）。
+//
+// 最终**服务成功/把结果透传给客户端**的那次仍由 server 侧 recordExtAttempt
+// → NoteUsage 计（含 tokens），两套记账互不重复：任一凭证的 `requests` +
+// 最终服务的 1 次之和 == 该请求的上游往返总数。
+func (c *Credential) NoteAttempt() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.requests++
+	c.lastUsed = time.Now()
+}
+
 // begin 在途计数 +1（观测）。
 func (c *Credential) begin() {
 	if c == nil {
