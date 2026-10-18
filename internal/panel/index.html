@@ -1520,6 +1520,9 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       <li><a href="#keys" data-view="keys" title="API 密钥">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="5" cy="8" r="2.8"/><path d="M7.8 8h6M11 8v2.4M13.4 8v1.6"/></svg>
         <span class="lbl">API 密钥</span></a></li>
+      <li><a href="#extchan" data-view="extchan" title="外部渠道">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4.5h5.5M2 8h5.5M2 11.5h5.5"/><path d="M10 3.5l3 2-3 2M10 8.5l3 2-3 2"/><path d="M13 5.5h1.5M13 10.5h1.5"/></svg>
+        <span class="lbl">外部渠道</span></a></li>
     </ul>
     <div class="sig">
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
@@ -1946,6 +1949,62 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       </div>
     </section>
 
+    <!-- 外部渠道（多平台阶段一）：只读观测。渠道增删改走「配置」视图 ext_channels。 -->
+    <section class="view" id="view-extchan" hidden>
+      <div class="box">
+        <header>
+          <h3>外部渠道</h3>
+          <span class="grow"></span>
+          <span class="note" id="ecNote">—</span>
+        </header>
+        <div class="hint" style="padding:12px 20px 0">
+          任意 OpenAI 兼容上游（硅基流动 / 百炼 / OpenRouter / NIM / 自建聚合器…）与 CodeBuddy
+          账号池并存。在「配置」视图的 <code>ext_channels</code> 里添加渠道（base_url + api_key），
+          保存后即时生效；客户端用模型名 <code>ext:渠道名/模型名</code> 调用。api_key 只落
+          config.json，任何接口不回显。429 自动短冷却指数退避、5xx 短冷却、连续失败熔断。
+        </div>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead>
+              <tr>
+                <th class="mark" aria-hidden="true"></th>
+                <th>渠道</th><th>状态</th><th>模型</th><th class="num">在途</th><th>最近成功</th><th>调用形态</th>
+              </tr>
+            </thead>
+            <tbody id="ecBody">
+              <tr><td colspan="6" class="empty">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="box">
+        <header>
+          <h3>额度情报<span class="hint" title="数据源：token-fbi.com 开放数据，每日人工复核">免费额度汇总 · 仅供发现新平台，领取一律走各平台官方入口</span></h3>
+          <span class="grow"></span>
+          <div class="seg" id="eiFilters" role="group" aria-label="情报分类">
+            <button type="button" data-eif="all" class="on">全部</button>
+            <button type="button" data-eif="model">大模型</button>
+            <button type="button" data-eif="tool">工具/Agent</button>
+          </div>
+          <span class="note" id="eiMeta">—</span>
+        </header>
+        <div class="tbl-wrap">
+          <table class="acc zebra">
+            <thead>
+              <tr>
+                <th class="mark" aria-hidden="true"></th>
+                <th>平台</th><th>类型</th><th>额度</th><th>可用模型</th><th>门槛</th><th>核实</th><th>入口</th>
+              </tr>
+            </thead>
+            <tbody id="eiBody">
+              <tr><td colspan="7" class="empty">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>
       <form id="cfgForm">
@@ -2357,5 +2416,6 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 <script src="core.js"></script>
 <script src="app.js"></script>
 <script src="keys.js"></script>
+<script src="ext.js"></script>
 </body>
 </html>

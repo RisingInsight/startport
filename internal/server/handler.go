@@ -18,6 +18,7 @@ import (
 
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/httpauth"
 	"github.com/RisingInsight/startport/internal/livecfg"
 	"github.com/RisingInsight/startport/internal/logfmt"
@@ -75,6 +76,11 @@ type Config struct {
 	// 仅 /v1/*（聊天 + 模型列表）接受这类密钥；面板与 /status 不接受——
 	// agent 密钥泄露时面板/凭证/配置保持隔离（鉴权边界见 chatAuth）。
 	APIKeys *apikeys.APIKeys
+
+	// Ext 外部渠道管理器（可选；nil = 无外部渠道，纯 CodeBuddy 部署零行为变化）。
+	// 请求 model 带 "ext:<channel>/<model>" 前缀（或裸名在渠道间唯一匹配）时
+	// 短路轮转，直接转发到该渠道——不占账号池在途名额、不喂池熔断器。
+	Ext *extchan.Manager
 
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
@@ -316,9 +322,12 @@ const (
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   h.modelListFor(r),
 	})
 }
+
+// modelListWithReq 带请求上下文的模型列表（外部渠道自动发现需要 ctx）。
+// 实际组装在下方 modelListFor（本文件更下方，含完整函数体）。
 
 // fmtCreditsPrefix 从上游 credits 原文提取倍率并格式化为 "[x0.05 credit]"。
 // 上游格式不统一："x0.05 credits" / "x0.29" / "x0.00 credits" 等，
@@ -394,8 +403,22 @@ func applyModelInfoFields(entry map[string]any, mi upstream.ModelInfo) map[strin
 // modelList 模型列表：CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel
 // 对称）；global.enabled=true 时追加 global: 前缀的国际版名单。
 // 纯动态：动态拉取失败/无号 → 该域空列表，无静态兜底。
+// （保留为无请求形态：面板等无 ctx 场景调用；自动发现类路径走 modelListFor。）
 func (h *Handler) modelList() []map[string]any {
+	return h.modelListFor(nil)
+}
+
+func (h *Handler) modelListFor(r *http.Request) []map[string]any {
 	out := make([]map[string]any, 0)
+	// 外部渠道模型（ext:<channel>/<model>）：目录自动发现失败不阻塞 CodeBuddy
+	// 名单——两类上游互为独立可用域。r 为 nil 时跳过自动发现（只列显式配置）。
+	if h.cfg.Ext != nil {
+		var ctx context.Context = context.Background()
+		if r != nil && r.Context() != nil {
+			ctx = r.Context()
+		}
+		out = append(out, h.cfg.Ext.ModelList(ctx)...)
+	}
 	for _, mi := range h.fetchDynamicModels() {
 		entry := map[string]any{
 			"id":       "cn:" + mi.ID,
@@ -574,6 +597,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(body, &peek)
 
+	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
+	// agent 密钥名由 chatAuth 放进上下文(管理密钥/未启用鉴权时为空),用量记录
+	// 据此按密钥归因(usage 桶的密钥维度)。
+	apiKeyName, _ := r.Context().Value(apiKeyNameKey{}).(string)
+	st := newChatStat(time.Now(), body, peek.Stream)
+	if tr := requestTraceFrom(r); tr != nil {
+		tr.stat = st
+		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
+		// 让 stdout 流水行与归档事件共用同一份来源值，两处不会漂移。
+		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
+	}
+	defer st.done()
+
+	// 外部渠道短路（多平台阶段一）：model 带 "ext:<channel>/<model>" 前缀（或裸名
+	// 在渠道间唯一匹配）时走独立转发链路——不进 CodeBuddy 轮转、不占在途租约、
+	// 不喂池熔断器。Ext 为 nil（未配置任何外部渠道）时零开销跳过。
+	// 注意：前缀形态在此短路；裸名命中外部渠道的情况不在这里拦（resolveModel 之后的
+	// 选号路径处理不了它）——裸名消歧放在 modelList/文档层约定，前缀是权威路由协议。
+	if h.cfg.Ext != nil {
+		if _, _, isExt := h.cfg.Ext.HasPrefix(peek.Model); isExt {
+			h.handleExtChat(w, r, st, body, peek.Model, apiKeyName)
+			return
+		}
+	}
+
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」
 	// 与「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
@@ -589,19 +637,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
 	}
-
-	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	// agent 密钥名由 chatAuth 放进上下文(管理密钥/未启用鉴权时为空),用量记录
-	// 据此按密钥归因(usage 桶的密钥维度)。
-	apiKeyName, _ := r.Context().Value(apiKeyNameKey{}).(string)
-	st := newChatStat(time.Now(), body, peek.Stream)
-	if tr := requestTraceFrom(r); tr != nil {
-		tr.stat = st
-		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
-		// 让 stdout 流水行与归档事件共用同一份来源值，两处不会漂移。
-		st.clientIP, st.userAgent = tr.clientIP, tr.userAgent
-	}
-	defer st.done()
 
 	tried := map[string]bool{}
 	var lastErr error

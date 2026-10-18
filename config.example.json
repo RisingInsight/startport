@@ -22,12 +22,26 @@
     "soft_rate_max": "2h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "growth_hours": [1],
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
-    "blackcat_hours": [23],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "growth_hours": [
+      1
+    ],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
+    "blackcat_hours": [
+      23
+    ],
     "checkin_enabled": true,
     "growth_enabled": true,
     "travel_enabled": true,
@@ -90,5 +104,21 @@
   "update": {
     "check_enabled": true,
     "check_interval_hours": 6
+  },
+  "ext_channels": [
+    {
+      "name": "siliconflow",
+      "base_url": "https://api.siliconflow.cn",
+      "api_key": "",
+      "models": [],
+      "disabled": true,
+      "timeout_seconds": 0,
+      "allow_private": false
+    }
+  ],
+  "ext_intel": {
+    "enabled": true,
+    "url": "https://token-fbi.com/data.json",
+    "interval_hours": 12
   }
 }

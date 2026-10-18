@@ -17,7 +17,8 @@ import (
 // 2026-10-13 拆分（core.js / app.js / keys.js）后，node harness 必须按此顺序
 // 拼接后再以单文件形态执行——经典脚本共享全局作用域，拼接顺序错误会引入
 // TDZ / 引用错误（如 app.js 顶层用 $ 而 $ 定义在 core.js）。
-var panelJSFiles = []string{"core.js", "app.js", "keys.js"}
+// 2026-10-18 增补 ext.js（外部渠道视图，自包含模块，依赖 core.js 的 $/esc/ago/api/dur）。
+var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js"}
 
 // mergedAppJSPath 拼接全部面板 JS 为临时文件并返回路径（供 node harness 读取）。
 // 这样所有按函数名切片 app.js 的既有测试在拆分后无需改动切法。

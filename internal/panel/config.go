@@ -49,6 +49,15 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 	if us, ok := m["upstash"].(map[string]any); ok {
 		maskSecret(us, "token")
 	}
+	// 外部渠道 api_key 同一套脱敏（F-004）：非空 → 哨兵；保存时哨兵被
+	// scrubExtChannelSentinels 删除、深合并保留原值（避免掩码写回）。
+	if ecs, ok := m["ext_channels"].([]any); ok {
+		for _, e := range ecs {
+			if ec, ok := e.(map[string]any); ok {
+				maskSecret(ec, "api_key")
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"path":   p.cfg.ConfigPath,

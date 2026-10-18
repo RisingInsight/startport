@@ -23,6 +23,14 @@ import (
 
 // ValidateOutboundBase 校验用户可配的出站 base URL。空串 = 使用内置默认（合法）。
 func ValidateOutboundBase(raw, field string) error {
+	return ValidateOutboundBaseAllowPrivate(raw, field, false)
+}
+
+// ValidateOutboundBaseAllowPrivate 是 ValidateOutboundBase 的外部渠道变体：
+// allowPrivate=true 时放行内网/回环目标（自建聚合器 one-api/LiteLLM 的合法场景），
+// 但云元数据端点（169.254.169.254 等）**始终拒绝**——它没有任何合法用途，且是
+// 凭证外发攻击的第一跳板。
+func ValidateOutboundBaseAllowPrivate(raw, field string, allowPrivate bool) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
@@ -41,10 +49,36 @@ func ValidateOutboundBase(raw, field string) error {
 	if host == "" {
 		return fmt.Errorf("%s: 缺少 host", field)
 	}
+	if isMetadataHost(host) || isMetadataIP(net.ParseIP(host)) {
+		return fmt.Errorf("%s: 拒绝指向云元数据端点 %q（凭证外发风险，无合法用途，allow_private 也不放行）", field, host)
+	}
+	if allowPrivate {
+		return nil
+	}
 	if IsForbiddenOutboundHost(host) {
-		return fmt.Errorf("%s: 拒绝指向本机/内网/元数据的地址 %q（该请求带账号 Bearer，SSRF 风险）", field, host)
+		return fmt.Errorf("%s: 拒绝指向本机/内网/元数据的地址 %q（该请求带账号 Bearer，SSRF 风险）；自建聚合器可显式配置 allow_private: true", field, host)
 	}
 	return nil
+}
+
+// isMetadataHost 云元数据主机名（全平台常见命名）。
+func isMetadataHost(host string) bool {
+	lower := strings.ToLower(strings.TrimSuffix(host, "."))
+	return lower == "metadata" || strings.HasPrefix(lower, "metadata.") ||
+		lower == "metadata.google.internal"
+}
+
+// isMetadataIP 云元数据端点的字面 IP（AWS/GCP/Azure/阿里云等）。
+func isMetadataIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		// 169.254.169.254 / 169.254.170.2（ECS task metadata）/ fd00:ec2::254
+		return v4[0] == 169 && v4[1] == 254 && v4[2] == 254 ||
+			v4[0] == 169 && v4[1] == 254 && v4[2] == 170 && v4[3] == 2
+	}
+	return ip.Equal(net.ParseIP("fd00:ec2::254"))
 }
 
 // IsForbiddenOutboundHost 报告 host 是否属于禁止出站的 SSRF 目标。

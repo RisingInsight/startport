@@ -23,6 +23,7 @@ import (
 
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/livecfg"
 	"github.com/RisingInsight/startport/internal/panel"
 	"github.com/RisingInsight/startport/internal/pool"
@@ -260,6 +261,28 @@ func main() {
 	// 回落仓库内嵌种子；models.dev 按需拉取成功后原子写回。
 	upstream.SetModelCatalogPath(stateSibling(cfg.StateFile, "model.json"))
 
+	// 外部渠道（多平台阶段一）：openai-compatible 上游与 CodeBuddy 池并存。
+	// 出站 base 的 SSRF 校验在这里做（config 包不依赖 upstream；校验失败拒启，
+	// 绝不 fail-open——与 global.chat_base 同一安全红线）。
+	extMgr := extchan.New(extchan.Config{
+		TimeoutSeconds: cfg.Upstream.TimeoutSeconds,
+	})
+	for i, ec := range cfg.ExtChannels {
+		if err := upstream.ValidateOutboundBaseAllowPrivate(ec.BaseURL, fmt.Sprintf("ext_channels[%d].base_url", i), ec.AllowPrivate); err != nil {
+			log.Fatalf("config: %v", err)
+		}
+	}
+	extMgr.ReplaceAll(extChannelDefs(cfg.ExtChannels))
+	extIntelStop := extMgr.StartIntel(cfg.ExtIntel.URL,
+		time.Duration(cfg.ExtIntel.Hours)*time.Hour, cfg.ExtIntel.Enabled)
+	defer extIntelStop()
+	if len(cfg.ExtChannels) > 0 {
+		log.Printf("[extchan] 已启用 %d 个外部渠道（ext:<name>/<model> 路由）", len(cfg.ExtChannels))
+	}
+	if cfg.ExtIntel.Enabled && cfg.ExtIntel.URL != "" {
+		log.Printf("[extchan] 额度情报：%s 每 %d 小时拉取一次（仅面板展示）", cfg.ExtIntel.URL, cfg.ExtIntel.Hours)
+	}
+
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
 		Upstream:       up,
@@ -391,6 +414,8 @@ func main() {
 		Live:        live,
 		Update:      upd,
 		APIKeys:     keyStore,
+		// 外部渠道只读观测（多平台阶段一）：渠道快照 + 额度情报端点。
+		ExtChan:     extMgr,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -399,7 +424,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, extMgr)
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -429,6 +454,8 @@ func main() {
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 外部渠道（多平台阶段一）：nil 形态（extMgr 内部无渠道）对外等效关闭。
+		Ext: extMgr,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -666,7 +693,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -679,13 +706,21 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	if err := json.Unmarshal(raw, &incoming); err != nil {
 		return nil, fmt.Errorf("parse submitted config: %w", err)
 	}
-	scrubSecretSentinels(incoming)
+	scrubSecretSentinels(incoming, cur)
 	merged := mergeConfigMaps(cur, incoming)
 
 	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
 		return nil, err
+	}
+	// 外部渠道出站 SSRF 校验（与启动期同红线）：面板改 base_url 指向内网/
+	// 元数据地址时保存失败并回显原因。allow_private 渠道放行内网（自建聚合器），
+	// 元数据端点恒拒。
+	for i, ec := range newCfg.ExtChannels {
+		if err := upstream.ValidateOutboundBaseAllowPrivate(ec.BaseURL, fmt.Sprintf("ext_channels[%d].base_url", i), ec.AllowPrivate); err != nil {
+			return nil, err
+		}
 	}
 
 	// 3) 落盘（原子替换）。
@@ -754,7 +789,28 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	sch.SetBalanceInterval(newCfg.BalanceRefreshInterval)
 	sch.SetIncludeDisabledInTasks(newCfg.Schedule.IncludeDisabledInTasks)
 
+	// 外部渠道热重载（多平台阶段一）：按名复用运行态（冷却/目录缓存），改 base_url
+	// 丢缓存。新增/删除渠道即时生效，无需重启。
+	extMgr.ReplaceAll(extChannelDefs(newCfg.ExtChannels))
+
 	return restartRequiredFields(newCfg), nil
+}
+
+// extChannelDefs Config.ExtChannels → extchan.ChannelDef 映射（装配/热重载共用）。
+func extChannelDefs(src []ExtChannel) []extchan.ChannelDef {
+	out := make([]extchan.ChannelDef, 0, len(src))
+	for _, ec := range src {
+		out = append(out, extchan.ChannelDef{
+			Name:           ec.Name,
+			BaseURL:        ec.BaseURL,
+			APIKey:         ec.APIKey,
+			Models:         ec.Models,
+			Disabled:       ec.Disabled,
+			TimeoutSeconds: ec.TimeoutSeconds,
+			AllowPrivate:   ec.AllowPrivate,
+		})
+	}
+	return out
 }
 
 // restartRequiredFields 返回本次改动中无法热生效、需要重启进程的字段名。
@@ -788,7 +844,7 @@ func restartRequiredFields(c *Config) []string {
 
 // scrubSecretSentinels 删除面板提交里值为脱敏哨兵（panel.SecretSentinel）的敏感键，
 // 使随后的深合并保留磁盘上的原值——防止「GET 回显的掩码被当成新密钥写回」。
-func scrubSecretSentinels(incoming map[string]any) {
+func scrubSecretSentinels(incoming, cur map[string]any) {
 	if v, ok := incoming["api_key"].(string); ok && v == panel.SecretSentinel {
 		delete(incoming, "api_key")
 	}
@@ -802,6 +858,44 @@ func scrubSecretSentinels(incoming map[string]any) {
 			delete(us, "token")
 		}
 	}
+	// 外部渠道 api_key 哨兵（F-004 同源）：整条渠道数组逐项检查——数组是整体
+	// 替换不是深合并，哨兵留在项里会把"已设置"写成字面哨兵串。
+	if ecs, ok := incoming["ext_channels"].([]any); ok {
+		for _, e := range ecs {
+			if ec, ok := e.(map[string]any); ok {
+				if v, ok := ec["api_key"].(string); ok && v == panel.SecretSentinel {
+					// 用磁盘上的原渠道值回填（按 name 匹配）。
+					if orig := extChannelKeyByName(cur, ec); orig != "" {
+						ec["api_key"] = orig
+					} else {
+						delete(ec, "api_key")
+					}
+				}
+			}
+		}
+	}
+}
+
+// extChannelKeyByName 从磁盘配置（cur）里找同名渠道的 api_key 原值。
+// 哨兵回填专用；找不到（新渠道误带哨兵）返回空串。
+func extChannelKeyByName(cur map[string]any, ec map[string]any) string {
+	name, _ := ec["name"].(string)
+	if name == "" {
+		return ""
+	}
+	oldList, ok := cur["ext_channels"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, e := range oldList {
+		if old, ok := e.(map[string]any); ok {
+			if n, _ := old["name"].(string); n == name {
+				k, _ := old["api_key"].(string)
+				return k
+			}
+		}
+	}
+	return ""
 }
 
 // mergeConfigMaps 把 incoming 深合并进 cur（原地），返回 cur。
