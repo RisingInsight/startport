@@ -1,6 +1,6 @@
 {
-  "version": "1.6.1",
-  "tag": "v1.6.1",
-  "published_at": "2026-10-18T15:35:00Z",
+  "version": "1.6.2",
+  "tag": "v1.6.2",
+  "published_at": "2026-10-18T15:55:00Z",
   "note": "更新检查兜底源（jsDelivr 可达性优于 GitHub API）。每次发版需同步更新 version 与 tag。"
 }

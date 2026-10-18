@@ -124,8 +124,14 @@ func (p *Panel) channelMigrate(w http.ResponseWriter, r *http.Request) {
 		for _, a := range added {
 			_ = p.cfg.Accounts.Delete(a.ID)
 		}
+		// 逐条失败原因拼进顶层 error：core.js 的 api() 只透传 error 字符串
+		// （不透传 failed[] 明细），把原因带到 toast 里就无需动前端白名单。
+		errMsg := "部分凭证无法迁移，已回滚全部账号（未产生半迁移态）"
+		for _, f := range report.Failed {
+			errMsg += fmt.Sprintf("；%s：%s", f["label"], f["error"])
+		}
 		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error":    "部分凭证无法迁移，已回滚全部账号（未产生半迁移态）",
+			"error":    errMsg,
 			"migrated": report.Migrated,
 			"failed":   report.Failed,
 			"total":    report.Total,

@@ -164,6 +164,10 @@ func TestMigratePartialFailureRollsBack(t *testing.T) {
 	if !strings.Contains(out.Error, "回滚") {
 		t.Errorf("应明确说明已回滚: %s", out.Error)
 	}
+	// 逐条原因拼进 error 原文（core.js 只透传 error 字符串——用户无需 failed[] 也能看到原因）。
+	if !strings.Contains(out.Error, "user_id") {
+		t.Errorf("error 原文应带逐条失败原因: %s", out.Error)
+	}
 	if len(out.Failed) != 1 || !strings.Contains(out.Failed[0]["error"].(string), "user_id") {
 		t.Errorf("失败明细应带原因: %+v", out.Failed)
 	}
