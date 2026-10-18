@@ -60,6 +60,7 @@ type Credential struct {
 	// ---- 运行态（不落盘）----
 	mu         sync.Mutex
 	state      CredState
+	invalidWhy InvalidReason // invalid 细分（auth=待重登 / quota=耗尽；账号中心 v1.6.0）
 	coolUntil  time.Time
 	coolStreak int
 	lastOK     time.Time
@@ -73,6 +74,17 @@ type Credential struct {
 
 	stateKey string // label + "\x00" + sha256(secret)[:16]
 }
+
+// InvalidReason invalid 的细分原因（账号中心 v1.6.0 · 架构 §4.3）：
+// 引擎行为两种相同（都退出轮换），账号中心的五态展示据此区分「待重登 / 耗尽」。
+type InvalidReason string
+
+const (
+	// InvalidAuth 401/403：凭证被拒 → 账号态「待重登」。
+	InvalidAuth InvalidReason = "auth"
+	// InvalidQuota 配额类业务错误 → 账号态「耗尽」（可被签到/充值复活）。
+	InvalidQuota InvalidReason = "quota"
+)
 
 // CredentialDef 凭证的配置形态（config JSON 与面板探测共用）。
 // ExpiresAt 用字符串表达：支持 YYYY-MM-DD 与 RFC3339（解析见 ParseExpiresAt）。
@@ -231,16 +243,58 @@ func (c *Credential) NoteRateLimited(base, max time.Duration, reason string) {
 }
 
 // NoteInvalid 401/403：退出轮换（无冷却时长；改 secret 或删重建才恢复）。
+// 细分为 auth（默认——既有调用点行为不变；账号中心 v1.6.0 的配额细分走
+// NoteInvalidReason）。
 func (c *Credential) NoteInvalid(reason string) {
+	c.NoteInvalidReason(reason, InvalidAuth)
+}
+
+// NoteInvalidReason 401/403 失败的细分记账（架构 §4.3）：
+//   - InvalidAuth（401/403 凭证被拒）→ 账号态「待重登」；
+//   - InvalidQuota（配额类业务错误）→ 账号态「耗尽」，同样退出轮换，但可被
+//     签到/充值复活（Revive）。
+func (c *Credential) NoteInvalidReason(reason string, why InvalidReason) {
+	if c == nil {
+		return
+	}
+	if why == "" {
+		why = InvalidAuth
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.state = CredInvalid
+	c.invalidWhy = why
+	c.coolUntil = time.Time{}
+	c.lastErr = reason
+	c.lastUsed = time.Now()
+}
+
+// Revive 复活 invalid 凭证（账号中心 v1.6.0：签到成功/余额恢复后调用）。
+// 只清 invalid 与错误摘要；停用（配置面 Disabled）不受影响。
+func (c *Credential) Revive() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.state = CredInvalid
-	c.coolUntil = time.Time{}
-	c.lastErr = reason
+	if c.Disabled {
+		return
+	}
+	c.state = CredHealthy
+	c.invalidWhy = ""
+	c.lastErr = ""
 	c.lastUsed = time.Now()
+}
+
+// InvalidWhy 当前 invalid 的细分原因（仅在 state == invalid 时有意义；
+// 面板账号五态的「耗尽/待重登」判据，架构 §4.6）。
+func (c *Credential) InvalidWhy() InvalidReason {
+	if c == nil {
+		return ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.invalidWhy
 }
 
 // NoteFailure 只记录最近错误，不影响可用性（400/404/422 是请求/配置问题，
@@ -356,8 +410,11 @@ type CredSnapshot struct {
 	LastOK       time.Time `json:"last_ok,omitempty"`
 	LastUsed     time.Time `json:"last_used,omitempty"`
 	LastError    string    `json:"last_error,omitempty"`
-	AuthMode     string    `json:"auth_mode,omitempty"`
-	InFlight     int       `json:"in_flight"`
+	// InvalidReason invalid 细分（auth=待重登 / quota=耗尽；账号中心五态判据）。
+	// 仅 state==invalid 时非空。
+	InvalidReason string `json:"invalid_reason,omitempty"`
+	AuthMode      string `json:"auth_mode,omitempty"`
+	InFlight      int    `json:"in_flight"`
 	// 进程内累计（重启清零；面板明确标注该口径）。
 	Requests         int64 `json:"requests"`
 	PromptTokens     int64 `json:"prompt_tokens"`
@@ -389,6 +446,9 @@ func (c *Credential) Snapshot(now time.Time) CredSnapshot {
 		CompletionTokens: c.completionTokens,
 		TotalTokens:      c.promptTokens + c.completionTokens,
 		Masked:           true,
+	}
+	if state == CredInvalid && c.invalidWhy != "" {
+		out.InvalidReason = string(c.invalidWhy)
 	}
 	if state == CredCooling && now.Before(c.coolUntil) {
 		out.Cooling = true

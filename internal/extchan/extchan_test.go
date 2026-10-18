@@ -191,10 +191,10 @@ func (m *Manager) noteFailureForTest(c *Channel, status int) {
 // endpoint URL 规范化。
 func TestEndpoint(t *testing.T) {
 	cases := map[string]string{
-		"https://api.x.cn":         "https://api.x.cn/v1/chat/completions",
-		"https://api.x.cn/":        "https://api.x.cn/v1/chat/completions",
-		"https://api.x.cn/v1":      "https://api.x.cn/v1/chat/completions",
-		"https://api.x.cn/v1/":     "https://api.x.cn/v1/chat/completions",
+		"https://api.x.cn":           "https://api.x.cn/v1/chat/completions",
+		"https://api.x.cn/":          "https://api.x.cn/v1/chat/completions",
+		"https://api.x.cn/v1":        "https://api.x.cn/v1/chat/completions",
+		"https://api.x.cn/v1/":       "https://api.x.cn/v1/chat/completions",
 		"https://api.x.cn/openai/v1": "https://api.x.cn/openai/v1/chat/completions",
 	}
 	for in, want := range cases {

@@ -17,19 +17,19 @@ import (
 
 // IntelItem 单条情报。
 type IntelItem struct {
-	Name      string   `json:"name"`
-	Vendor    string   `json:"vendor,omitempty"`
-	Category  string   `json:"category,omitempty"`  // tool / model / event
-	FreeType  string   `json:"free_type,omitempty"` // 长期免费 / 免费层 / 注册赠送 / 每日赠送 / 限时活动
-	Quota     string   `json:"quota,omitempty"`     // 额度说明
-	Validity  string   `json:"validity,omitempty"`  // 有效期
-	Region    string   `json:"region,omitempty"`
-	Gates     []string `json:"gates,omitempty"` // 门槛（需客户端/实名等）
-	Note      string   `json:"note,omitempty"`
-	EntryURL  string   `json:"entry_url,omitempty"`
-	DetailURL string   `json:"detail_url,omitempty"`
-	Modality  string   `json:"modality,omitempty"` // 可用模型
-	LastVerified string `json:"last_verified,omitempty"`
+	Name         string   `json:"name"`
+	Vendor       string   `json:"vendor,omitempty"`
+	Category     string   `json:"category,omitempty"`  // tool / model / event
+	FreeType     string   `json:"free_type,omitempty"` // 长期免费 / 免费层 / 注册赠送 / 每日赠送 / 限时活动
+	Quota        string   `json:"quota,omitempty"`     // 额度说明
+	Validity     string   `json:"validity,omitempty"`  // 有效期
+	Region       string   `json:"region,omitempty"`
+	Gates        []string `json:"gates,omitempty"` // 门槛（需客户端/实名等）
+	Note         string   `json:"note,omitempty"`
+	EntryURL     string   `json:"entry_url,omitempty"`
+	DetailURL    string   `json:"detail_url,omitempty"`
+	Modality     string   `json:"modality,omitempty"` // 可用模型
+	LastVerified string   `json:"last_verified,omitempty"`
 }
 
 // IntelData data.json 的展示投影。
@@ -60,19 +60,19 @@ func fetchIntel(ctx context.Context, url string) (*IntelData, error) {
 	}
 	var parsed struct {
 		Items []struct {
-			Name      *string   `json:"name"`
-			Vendor    *string   `json:"vendor"`
-			Category  *string   `json:"category"`
-			FreeType  *string   `json:"free_type"`
-			Quota     *string   `json:"quota"`
-			Validity  *string   `json:"validity"`
-			Region    *string   `json:"region"`
-			Gates     []any     `json:"gates"`
-			Note      *string   `json:"note"`
-			EntryURL  *string   `json:"entry_url"`
-			DetailSlug *string  `json:"detail_slug"`
-			Modality  json.RawMessage `json:"modality"` // string 或 array 都可能
-			LastVerified *string `json:"last_verified"`
+			Name         *string         `json:"name"`
+			Vendor       *string         `json:"vendor"`
+			Category     *string         `json:"category"`
+			FreeType     *string         `json:"free_type"`
+			Quota        *string         `json:"quota"`
+			Validity     *string         `json:"validity"`
+			Region       *string         `json:"region"`
+			Gates        []any           `json:"gates"`
+			Note         *string         `json:"note"`
+			EntryURL     *string         `json:"entry_url"`
+			DetailSlug   *string         `json:"detail_slug"`
+			Modality     json.RawMessage `json:"modality"` // string 或 array 都可能
+			LastVerified *string         `json:"last_verified"`
 		} `json:"items"`
 		UpdatedAt *string `json:"updated_at"`
 	}
@@ -88,14 +88,14 @@ func fetchIntel(ctx context.Context, url string) (*IntelData, error) {
 			continue
 		}
 		item := IntelItem{
-			Name:     *it.Name,
-			Category: deref(it.Category),
-			FreeType: deref(it.FreeType),
-			Quota:    deref(it.Quota),
-			Validity: deref(it.Validity),
-			Region:   deref(it.Region),
-			Note:     deref(it.Note),
-			EntryURL: deref(it.EntryURL),
+			Name:         *it.Name,
+			Category:     deref(it.Category),
+			FreeType:     deref(it.FreeType),
+			Quota:        deref(it.Quota),
+			Validity:     deref(it.Validity),
+			Region:       deref(it.Region),
+			Note:         deref(it.Note),
+			EntryURL:     deref(it.EntryURL),
 			LastVerified: deref(it.LastVerified),
 		}
 		if it.Vendor != nil {

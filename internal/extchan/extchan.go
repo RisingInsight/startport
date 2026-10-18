@@ -64,6 +64,8 @@ type Channel struct {
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 	// AllowPrivate 显式放行内网/回环 base_url（SSRF 校验在 cmd/server 层做）。
 	AllowPrivate bool `json:"allow_private,omitempty"`
+	// Managed 账号中心托管标记（v1.6.0；观测透出，转发语义不读它）。
+	Managed bool `json:"-"`
 
 	// ---- 运行态（不落盘；进程内状态机）----
 
@@ -164,6 +166,7 @@ type Status struct {
 	BaseURL    string            `json:"base_url"`
 	Protocol   string            `json:"protocol"`
 	Adapter    string            `json:"adapter,omitempty"`
+	Managed    bool              `json:"managed,omitempty"`
 	Disabled   bool              `json:"disabled"`
 	State      string            `json:"state"`
 	Models     []string          `json:"models"`
@@ -219,6 +222,7 @@ func (c *Channel) Snapshot() Status {
 		BaseURL:                 c.BaseURL,
 		Protocol:                string(c.Protocol),
 		Adapter:                 c.Adapter,
+		Managed:                 c.Managed,
 		Disabled:                c.Disabled,
 		Models:                  append([]string(nil), c.Models...),
 		Aliases:                 copyStringMap(c.Aliases),
@@ -402,6 +406,7 @@ func (m *Manager) ReplaceAll(defs []ChannelDef) {
 		ch.Disabled = d.Disabled
 		ch.TimeoutSeconds = d.TimeoutSeconds
 		ch.AllowPrivate = d.AllowPrivate
+		ch.Managed = d.Managed
 		// 凭证池：按 stateKey 复用运行态，配置面就地更新。
 		defsForCreds := NormalizeCredentialDefs(d)
 		creds := make([]*Credential, 0, len(defsForCreds))
@@ -454,6 +459,17 @@ type ChannelDef struct {
 	Disabled       bool              `json:"disabled,omitempty"`
 	TimeoutSeconds int               `json:"timeout_seconds,omitempty"`
 	AllowPrivate   bool              `json:"allow_private,omitempty"` // SSRF 校验放行内网（自建聚合器）；校验在 cmd/server 层做
+
+	// ---- 账号中心托管标记（v1.6.0；全部 omitempty——老配置零修改兼容）----
+	// Managed true = 该渠道由账号中心托管：credentials 由 internal/acctchan 从
+	// accounts.json 单向投影，用户经 POST config 改 credentials 会被拒绝
+	// （渠道级字段 base_url/models/aliases 等仍以 config 为准）。
+	Managed bool `json:"managed,omitempty"`
+	// Origin 渠道来源标记（"account-center"）。
+	Origin string `json:"origin,omitempty"`
+	// Accounts 账号 ID → 凭证 label 的映射（当前 label == account.ID，
+	// 保留映射结构以便未来 label 语义变化时不改 schema）。
+	Accounts map[string]string `json:"accounts,omitempty"`
 }
 
 // NormalizeCredentialDefs 把渠道定义归一成凭证清单：

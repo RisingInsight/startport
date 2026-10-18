@@ -319,6 +319,17 @@ type ExtChannel struct {
 	// 自建场景用户显式打开后自行承担「把渠道 key 发往自己指定内网地址」的责任。
 	// 云元数据端点（169.254.169.254 等）即使打开本开关也一律拒绝（无合法用途）。
 	AllowPrivate bool `json:"allow_private"`
+
+	// ---- 账号中心托管标记（v1.6.0；全部 omitempty——老配置零修改兼容）----
+	// Managed true = 渠道由账号中心托管：credentials 由 internal/acctchan 从
+	// accounts.json 单向投影，面板经 POST config 改 credentials 会被拒绝
+	// （managedCredentialDiff）；渠道级字段（base_url/models/aliases/…）仍以
+	// config 为准，账号中心永不改写它们。
+	Managed bool `json:"managed,omitempty"`
+	// Origin 渠道来源标记（"account-center"）。
+	Origin string `json:"origin,omitempty"`
+	// Accounts 账号 ID → 凭证 label 的映射（当前 label == account.ID）。
+	Accounts map[string]string `json:"accounts,omitempty"`
 }
 
 // ExtAuth 鉴权规格（mode: bearer / x-api-key / query / custom）。
@@ -824,6 +835,60 @@ func (c *Config) validateExtChannels() error {
 		}
 	}
 	return nil
+}
+
+// managedCredentialDiff 托管渠道的凭证保护（架构 §4.5 规则 2）：
+// 用户经 POST config 改动 managed 渠道的 credentials → 拒绝并指名
+// "由账号中心托管"（两处事实来源打架的防线；换凭证请走账号中心）。
+//
+// 对比口径：同渠道名下 credentials 的 (label, secret, expires_at, disabled) 序列
+// 逐项相等才算"没动"——哨兵回填发生在本检查之前，所以"表单留空 = 不改"的
+// 既有交互在这里表现为与盘上原值相同（放行）。渠道不存在（新建 managed 渠道，
+// 仅账号中心投影路径会出现）放行；删除 managed 渠道放行（Reconcile 会重建）。
+//
+// 返回 nil = 无托管渠道差异（或根本没有 managed 渠道）。
+func managedCredentialDiff(old, next *Config) error {
+	if old == nil || next == nil {
+		return nil
+	}
+	oldByName := map[string]*ExtChannel{}
+	for i := range old.ExtChannels {
+		oldByName[old.ExtChannels[i].Name] = &old.ExtChannels[i]
+	}
+	for i := range next.ExtChannels {
+		ch := &next.ExtChannels[i]
+		if !ch.Managed {
+			continue
+		}
+		prev, exists := oldByName[ch.Name]
+		if !exists {
+			continue // 新建：投影路径合法；用户手建 managed 渠道允许（账号中心接管与否由 Sync 决定）
+		}
+		if credSig(prev.Credentials) != credSig(ch.Credentials) {
+			return fmt.Errorf(
+				"ext_channels[%d] (%s): 该渠道由账号中心托管，credentials 不能在此修改；请到账号中心添加/编辑/删除账号",
+				i, ch.Name)
+		}
+	}
+	return nil
+}
+
+// credSig 凭证数组的对比签名（顺序敏感——投影顺序 = 账号添加顺序）。
+func credSig(creds []ExtCredential) string {
+	var b strings.Builder
+	for _, c := range creds {
+		b.WriteString(c.Label)
+		b.WriteByte(0)
+		b.WriteString(c.Secret)
+		b.WriteByte(0)
+		b.WriteString(c.ExpiresAt)
+		b.WriteByte(0)
+		if c.Disabled {
+			b.WriteByte('d')
+		}
+		b.WriteByte(1)
+	}
+	return b.String()
 }
 
 // validateExtAdapter 校验原生适配器声明（顺带把名字归一成小写）。
