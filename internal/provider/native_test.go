@@ -14,14 +14,21 @@ func TestNativeRegistryHasLoomy(t *testing.T) {
 	if na.Name() != LoomyAdapterName {
 		t.Errorf("Name = %q", na.Name())
 	}
+	// 目录里既有 loomy 也有 AutoClaw 两地区，且整体有序（错误文案/面板下拉用）。
 	names := NativeNames()
-	if len(names) == 0 || names[0] != LoomyAdapterName {
-		t.Errorf("NativeNames = %v（应含并排序在前）", names)
+	if len(names) < 2 {
+		t.Fatalf("NativeNames = %v, want ≥2", names)
 	}
 	for i := 1; i < len(names); i++ {
 		if names[i-1] > names[i] {
 			t.Errorf("NativeNames 未排序: %v", names)
 		}
+	}
+	if _, ok := Native(AutoClawAdapterName); !ok {
+		t.Errorf("%q 未注册", AutoClawAdapterName)
+	}
+	if _, ok := Native(AutoClawIntlAdapterName); !ok {
+		t.Errorf("%q 未注册", AutoClawIntlAdapterName)
 	}
 }
 

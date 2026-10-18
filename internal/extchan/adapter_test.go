@@ -3,7 +3,9 @@ package extchan
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -341,6 +343,186 @@ func TestDoPlainOpenAIKeepsUpstreamErrorBody(t *testing.T) {
 	}
 	if string(res.Body) != raw {
 		t.Errorf("普通 openai 渠道错误体应逐字节透传:\n got %s\nwant %s", res.Body, raw)
+	}
+}
+
+// AutoClaw 端到端：X-Authorization 认证头、X-Request-Model 路由 ID、
+// body.model 剥前缀、system 前缀注入、品牌头、不发 X-Harness-Type。
+func TestDoAutoClawAdapterEndToEnd(t *testing.T) {
+	var sawAuth, sawRoute, sawHarness, sawVersion, sawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("X-Authorization")
+		sawRoute = r.Header.Get("X-Request-Model")
+		sawHarness = r.Header.Get("X-Harness-Type")
+		sawVersion = r.Header.Get("X-Version")
+		raw, _ := io.ReadAll(r.Body)
+		sawBody = string(raw)
+		_, _ = w.Write([]byte(`{"model":"zaicoding_glm-5.3","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "autoclaw", BaseURL: srv.URL, Protocol: "openai", Adapter: "autoclaw",
+		Models:      []string{"glm-5.3", "glm-5.3-flash"},
+		Credentials: []CredentialDef{{Label: "p", Secret: "ac-token-xyz"}},
+	}})
+	res, err := m.Do(context.Background(), m.Get("autoclaw"), &OutRequest{
+		Body:         []byte(`{"model":"glm-5.3","messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"hi"}]}`),
+		DisplayModel: "ext:autoclaw/glm-5.3",
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != http.StatusOK {
+		t.Errorf("status = %d: %s", res.Status, res.Body)
+	}
+	if got, want := sawAuth, "Bearer ac-token-xyz"; got != want {
+		t.Errorf("X-Authorization = %q, want %q", got, want)
+	}
+	if sawRoute != "zaicoding_glm-5.3" {
+		t.Errorf("X-Request-Model = %q, want zaicoding_glm-5.3", sawRoute)
+	}
+	if sawHarness != "" {
+		t.Errorf("不应发 X-Harness-Type, got %q", sawHarness)
+	}
+	if sawVersion != "1.17.8" {
+		t.Errorf("X-Version = %q", sawVersion)
+	}
+	var body struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(sawBody), &body); err != nil {
+		t.Fatalf("出站 body 不是 JSON: %s", sawBody)
+	}
+	if body.Model != "glm-5.3" {
+		t.Errorf("body.model = %q, want glm-5.3（剥前缀）", body.Model)
+	}
+	if !strings.HasPrefix(body.Messages[0].Content, "You are a personal assistant running inside OpenClaw.") {
+		t.Errorf("system 未包身份前缀: %q", body.Messages[0].Content)
+	}
+	if !strings.Contains(string(res.Body), `"model":"ext:autoclaw/glm-5.3"`) {
+		t.Errorf("响应 model 未回写: %s", res.Body)
+	}
+}
+
+// AutoClaw 401 → 客户端 401 + token_invalid（token 失效，提示重新粘贴）。
+func TestDoAutoClawAdapter401TokenInvalid(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"message":"unauthorized"}`))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "autoclaw", BaseURL: srv.URL, Adapter: "autoclaw",
+		Models:      []string{"glm-5.3"},
+		Credentials: []CredentialDef{{Label: "p", Secret: "ac-token-xyz"}},
+	}})
+	res, err := m.Do(context.Background(), m.Get("autoclaw"), &OutRequest{
+		Body:         []byte(`{"model":"glm-5.3","messages":[]}`),
+		DisplayModel: "ext:autoclaw/glm-5.3",
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", res.Status)
+	}
+	s := string(res.Body)
+	if !strings.Contains(s, `"authentication_error"`) || !strings.Contains(s, `"token_invalid"`) {
+		t.Errorf("应为 token 失效信封: %s", s)
+	}
+	if strings.Contains(s, "ac-token-xyz") {
+		t.Errorf("错误体泄露 secret: %s", s)
+	}
+	// 401 走 Do 的失效分支：凭证进 invalid（退出轮换）。
+	if ch2 := m.Get("autoclaw"); ch2.CredentialByLabel("p").State() != CredInvalid {
+		t.Error("401 应把凭证标为 invalid")
+	}
+}
+
+// AutoClaw 403 pay-view → 会员/额度提示（不是 token 失效文案）。
+func TestDoAutoClawAdapter403PayView(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"code":810001,"message":"请升级为连续包月会员"}`))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "autoclaw", BaseURL: srv.URL, Adapter: "autoclaw",
+		Models:      []string{"glm-5.3"},
+		Credentials: []CredentialDef{{Label: "p", Secret: "ac-token-xyz"}},
+	}})
+	res, err := m.Do(context.Background(), m.Get("autoclaw"), &OutRequest{
+		Body: []byte(`{"model":"glm-5.3","messages":[]}`), DisplayModel: "ext:autoclaw/glm-5.3",
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", res.Status)
+	}
+	if !strings.Contains(string(res.Body), `"membership_required"`) {
+		t.Errorf("应为会员提示信封: %s", res.Body)
+	}
+}
+
+// 静态目录：FetchModels 直接返回适配器清单，**不发任何 HTTP**。
+func TestFetchModelsStaticAdapterNoHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("静态目录适配器不应发起 HTTP 请求")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "autoclaw", BaseURL: srv.URL, Adapter: "autoclaw",
+		Credentials: []CredentialDef{{Label: "p", Secret: "ac-token-xyz"}},
+	}})
+	ids, err := m.FetchModels(context.Background(), m.Get("autoclaw"))
+	if err != nil {
+		t.Fatalf("FetchModels: %v", err)
+	}
+	if len(ids) != 2 || ids[0] != "glm-5.3" || ids[1] != "glm-5.3-flash" {
+		t.Errorf("静态目录 = %v", ids)
+	}
+	// EnsureModels 语义不变：结果进运行时缓存。
+	got := m.EnsureModels(context.Background(), m.Get("autoclaw"))
+	if len(got) != 2 {
+		t.Errorf("EnsureModels = %v", got)
+	}
+}
+
+// 探测：静态目录适配器不打上游，返回静态清单即成功。
+func TestProbeDraftStaticAdapter(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("静态目录适配器探测不应发起 HTTP 请求")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	res := m.ProbeDraft(context.Background(), ChannelDef{
+		Name: "autoclaw", BaseURL: srv.URL, Adapter: "autoclaw",
+		Credentials: []CredentialDef{{Label: "p", Secret: "ac-token-xyz"}},
+	}, "")
+	if !res.OK {
+		t.Fatalf("探测失败: %+v", res)
+	}
+	if res.ModelsCount != 2 || len(res.ModelsSample) != 2 {
+		t.Errorf("探测结果异常: %+v", res)
+	}
+	if res.Adapter != "autoclaw" {
+		t.Errorf("ProbeResult.Adapter = %q", res.Adapter)
 	}
 }
 

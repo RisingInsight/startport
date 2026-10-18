@@ -576,12 +576,30 @@ func (h *headerTimeoutCloser) Close() error {
 
 // FetchModels 拉取上游模型目录（自动发现；显式 Models 配置时不调用）。
 //
-// 走协议适配器的 BuildModels/DecodeModels：OpenAI 是 GET {root}/v1/models、
-// Anthropic 是 GET {root}/v1/models、Gemini 是 GET {root}/v1beta/models。
+// 两条路径：
+//   - 适配器实现 StaticModels（AutoClaw 这类"模型是静态路由表"的平台）→
+//     直接返回，不走 HTTP、不写负缓存；
+//   - 否则走协议适配器的 BuildModels/DecodeModels：OpenAI 是 GET {root}/v1/models、
+//     Anthropic 是 GET {root}/v1/models、Gemini 是 GET {root}/v1beta/models。
+//
 // 凭证选择用第一条 usable；无可用时退回第一条（目录拉取失败不该罚凭证状态）。
 func (m *Manager) FetchModels(ctx context.Context, ch *Channel) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background() // 防御：ModelList(nil) 等无请求上下文场景
+	}
+	adapter, aerr := adapterFor(ch)
+	if aerr != nil {
+		return nil, aerr
+	}
+	// 静态目录：适配器自带清单，没有"拉取失败"这回事，也不需要凭证。
+	if sm, ok := adapter.(provider.StaticModels); ok {
+		out := make([]string, 0, 8)
+		for _, id := range sm.StaticModels() {
+			if id = strings.TrimSpace(id); id != "" {
+				out = append(out, id)
+			}
+		}
+		return out, nil
 	}
 	cred := ch.pickCredential(nil)
 	if cred == nil {
@@ -591,10 +609,6 @@ func (m *Manager) FetchModels(ctx context.Context, ch *Channel) ([]string, error
 		}
 	}
 	target := m.BuildTarget(ch, cred, "")
-	adapter, aerr := adapterFor(ch)
-	if aerr != nil {
-		return nil, aerr
-	}
 	req, err := adapter.BuildModels(ctx, target)
 	if err != nil {
 		// 安全红线（P0-4）：query 鉴权下请求 URL 里带秘密值，错误文本必须脱敏

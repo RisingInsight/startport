@@ -136,7 +136,21 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 
 > 已知边界：Loomy 若在**流式**请求上返回 `200` + `{code,desc}`（而不是 SSE），适配器按"原样透传"处理，客户端会表现为流式解析失败——用非流式或先探测一次即可确认凭证是否有效。
 
-后续规划：`autoclaw` / `qoder` / `trae` 这类需要客户端签名或有状态转发的平台，将按同一套 `RegisterNative` 接口逐个补齐（签名类还需要设备指纹与登录态，工作量大得多）。
+**`autoclaw` / `autoclaw-intl`（智谱 AutoClaw，国内版 / 国际版）**
+
+- **两个地区 = 两个适配器**：同一套客户端代码的两个构建，站点不同、账号与目录互不相通——`autoclaw`（国内，`https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw`）与 `autoclaw-intl`（国际，`https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw`）。`base_url` 仍由你确认后填写（以官方为准）。
+- **认证头是 `X-Authorization`**（`Bearer <token>`），**不是** `Authorization`——发错会稳定 401。token 从桌面端 `openclaw.json` 的 `models.providers.zai.models[].headers['X-Authorization']` 取，手工粘贴；401 即失效（服务端会轮换），重新取一次更新 secret 即可。`headers` 里写认证头覆盖不掉（适配器独占）。
+- **双模型标识**：`X-Request-Model` 发完整路由 ID（决定计费通道：`zai_` 会员/按量、`zaicoding_` Coding Plan、`zai_auto` 自动选型），`body.model` 发剥前缀的模型 ID。静态路由表：`glm-5.3 → zaicoding_glm-5.3`、`glm-5.3-flash → zai_glm-5.3-flash`（展示名大小写不敏感也命中）；`zaicoding_*` / `zai_*` 显式前缀与 `x_yyy` 形态原样透传；未知名字回落 `zai_auto`。模型清单是**静态表**（`StaticModels`），不走 HTTP 发现、探测也不打上游。
+- **system 规范化**（上游白名单闸门）：首条 system/developer 消息前置 OpenClaw 身份前缀（身份句 + `## Tooling` 段，逐字照抄官方客户端），你的提示词逐字保留在后；已以身份句开头则不重复（幂等）；外来 harness 身份句（ZCode / Claude Code / Codex / DeepSeek Harness）按大小写不敏感整串改写成中性说法。user/assistant/tool 消息一字不动。
+- **`max_tokens` 归一**：上游对 30..8192 的小正整数一律 406 空响应体（预校验），出站前自动抬到 10000；缺省不注入、非正整数不碰；`max_completion_tokens` 不参与。
+- **model 回写**：上游会回自己的路由名（`zai_auto` 等）——非流式回写客户端请求名；**流式逐帧改写 `model`**（本适配器是"逐字节透传"声明的例外，帧会被重建）。
+- **错误分类**：401 → `authentication_error`/`token_invalid`（提示重新粘贴）；403 + `pay-view`/`810001` → 明确提示"需要会员或额度不足"；406 且上游没给原因 → 附可执行提示（max_tokens 已归一 / system 指纹 / 请求形态风控三个方向）；其余照通用信封。所有文案过脱敏。
+- **平台头**：`X-Product`/`X-Client-Type`/`X-Tm`/`X-Version`(1.17.8)/`X-Lang`/`X-Channel`/`x_trace_id` 照官方客户端形态；**不发 `X-Harness-Type`**（带上会稳定 403 pay-view）；`X-Tm` 恒 `win`（mac 构建除外）——发 `linux` 会被部分账号 403。
+- **不做登录 / 签到 / 积分 / token 刷新**：上游的 refresh 接口需要客户端签名（X-Auth-Sign），本期不做；token 失效只能重新获取。
+
+> 已知边界（AutoClaw）：① 远程模型目录（`/proxy/autoclaw-model-config`）与 token 刷新都需要客户端签名，本期用静态路由表与手工粘贴替代——上游新增模型时，可在渠道 `models` 里显式登记，`X-Request-Model` 走显式前缀透传；② 上游闸门（头集合 / system 白名单 / max_tokens）是**实测行为**，可能随上游版本变化，`406` 文案里列了排查方向。
+
+后续规划：`qoder` / `trae` 这类需要客户端签名或有状态转发的平台，将按同一套 `RegisterNative` 接口逐个补齐（签名类还需要设备指纹与登录态，工作量大得多）。
 
 ### StarPort 相对上游的自有增量
 

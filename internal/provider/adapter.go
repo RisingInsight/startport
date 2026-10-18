@@ -77,6 +77,15 @@ type StatusNormalizer interface {
 	NormalizeStatus(status int, body []byte) (int, []byte)
 }
 
+// StaticModels 可选能力：适配器自带模型目录（不走 HTTP 发现）。
+//
+// 适用场景：上游没有可拉取的目录接口（或接口需要客户端签名），模型清单是
+// 一份静态路由表（AutoClaw）。实现它的适配器会被 extchan.FetchModels 与
+// 只读探测短路——不发 HTTP、不写负缓存、也不占用目录刷新的负缓存窗口。
+type StaticModels interface {
+	StaticModels() []string
+}
+
 // ErrStreamUnsupported 上游不接受/不返回 SSE 流式（Gemini 未按 alt=sse 返回）。
 // 调用方应把它翻译成 502 gemini_stream_unsupported 并提示改用非流式。
 var ErrStreamUnsupported = errors.New("upstream does not support SSE streaming")

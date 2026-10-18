@@ -132,6 +132,52 @@ func TestExtChannelAdapterRejectsCredentialAuth(t *testing.T) {
 	}
 }
 
+// AutoClaw 两地区：合法配置 + 与 loomy 同一套校验规则（协议 openai、禁 auth）。
+func TestExtChannelAdapterAutoClaw(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{
+	  "ext_channels": [{
+	    "name": "autoclaw",
+	    "base_url": "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+	    "protocol": "openai",
+	    "adapter": "autoclaw",
+	    "models": ["glm-5.3", "glm-5.3-flash"],
+	    "credentials": [{"label": "primary", "secret": "ac-token"}]
+	  }]
+	}`))
+	if err != nil {
+		t.Fatalf("autoclaw 配置应合法: %v", err)
+	}
+	defs := extChannelDefs(cfg.ExtChannels)
+	if len(defs) != 1 || defs[0].Adapter != provider.AutoClawAdapterName {
+		t.Fatalf("ChannelDef.Adapter 未映射: %+v", defs)
+	}
+	// 国际版。
+	cfg, err = ParseConfig([]byte(`{
+	  "ext_channels": [{
+	    "name": "autoclaw-intl",
+	    "base_url": "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
+	    "adapter": "autoclaw-intl",
+	    "credentials": [{"label": "primary", "secret": "ac-token"}]
+	  }]
+	}`))
+	if err != nil {
+		t.Fatalf("autoclaw-intl 配置应合法: %v", err)
+	}
+	if got := cfg.ExtChannels[0].Adapter; got != provider.AutoClawIntlAdapterName {
+		t.Errorf("Adapter = %q", got)
+	}
+	// 与 loomy 同规则：adapter + auth 硬错误。
+	if _, err := ParseConfig([]byte(`{
+	  "ext_channels": [{
+	    "name": "x", "base_url": "https://example.com", "adapter": "autoclaw",
+	    "auth": {"mode": "custom", "header": "X-Authorization"},
+	    "credentials": [{"label": "p", "secret": "ac-token"}]
+	  }]
+	}`)); err == nil {
+		t.Fatal("autoclaw + auth 应报错（认证头由适配器独占）")
+	}
+}
+
 // 未声明 adapter 的普通渠道不受影响（零回归）。
 func TestExtChannelNoAdapterStillValid(t *testing.T) {
 	cfg, err := ParseConfig([]byte(`{
