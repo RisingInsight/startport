@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/RisingInsight/startport/internal/provider"
@@ -172,6 +173,25 @@ func (m *Manager) probeWith(ctx context.Context, ch *Channel, creds []*Credentia
 	if aerr != nil {
 		result.Error = aerr.Error()
 		result.ErrorCode = "invalid_adapter"
+		return result
+	}
+	// 静态目录适配器（AutoClaw 这类）：没有可探测的目录接口——探测只校验
+	// 配置形态（适配器名/协议/base_url），返回静态清单即视为连通形态正确。
+	// 刻意不发 chat（会消耗额度），也不对静态清单走 HTTP（上游没有该接口）。
+	if sm, ok := adapter.(provider.StaticModels); ok {
+		models := make([]string, 0, 8)
+		for _, id := range sm.StaticModels() {
+			if id = strings.TrimSpace(id); id != "" {
+				models = append(models, id)
+			}
+		}
+		result.OK = true
+		result.ModelsCount = len(models)
+		if n := len(models); n > probeModelsSample {
+			result.ModelsSample = append([]string(nil), models[:probeModelsSample]...)
+		} else {
+			result.ModelsSample = append([]string(nil), models...)
+		}
 		return result
 	}
 	req, err := adapter.BuildModels(ctx, target)

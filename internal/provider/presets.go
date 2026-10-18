@@ -76,12 +76,32 @@ var presetList = []Preset{
 		DocsURL:        "https://www.trae.ai/",
 	},
 	{
-		Key: "autoclaw", Name: "AutoClaw（智谱）", Vendor: "智谱 AI",
-		Aliases:  []string{"autoclaw", "auto claw"},
-		Protocol: ProtocolAnthropic, Auth: AuthSpec{Mode: AuthXAPIKey},
-		NativeRequired: true,
-		Note:           "平台客户端凭证不是标准 API key；若你持有智谱开放平台的 Anthropic 兼容 key，请直接用 anthropic-official 预设按官方 base 接入。",
-		DocsURL:        "https://open.bigmodel.cn/",
+		Key: "autoclaw", Name: "AutoClaw（智谱 · 国内版）", Vendor: "智谱 AI",
+		Aliases: []string{"autoclaw", "auto claw", "autoglm"},
+		// 原生适配器（国内版）：认证头是 X-Authorization（不是 Authorization）、
+		// X-Request-Model 带路由前缀、system 要包 OpenClaw 身份前缀——四种 auth
+		// 与三协议基准都表达不了，用 adapter 覆盖。
+		Protocol: ProtocolOpenAI, Adapter: AutoClawAdapterName,
+		Models: []string{"glm-5.3", "glm-5.3-flash"},
+		// Auth 留空：adapter 非空时配置层明确禁止再配 auth。
+		NativeRequired: false,
+		Note: "原生适配器（adapter=autoclaw，国内版）：base 建议 " +
+			"https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw（以官方为准）；" +
+			"凭证填桌面端 openclaw.json 里 X-Authorization 的 token（手工粘贴，401 即失效需重取）；" +
+			"glm-5.3 → zaicoding_glm-5.3、glm-5.3-flash → zai_glm-5.3-flash，未知名回落 zai_auto；" +
+			"system 会被包进 OpenClaw 身份前缀、max_tokens 小值归一到 10000（上游预校验）。",
+	},
+	{
+		Key: "autoclaw-intl", Name: "AutoClaw（智谱 · 国际版）", Vendor: "智谱 AI",
+		Aliases: []string{"autoclaw intl", "autoclaw-intl", "autoglm intl"},
+		// 国际版：同一套客户端代码的另一个构建（站点不同，目录/账号互不相通）。
+		Protocol: ProtocolOpenAI, Adapter: AutoClawIntlAdapterName,
+		Models:         []string{"glm-5.3", "glm-5.3-flash"},
+		NativeRequired: false,
+		Note: "原生适配器（adapter=autoclaw-intl，国际版）：base 建议 " +
+			"https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw（以官方为准）；" +
+			"头集合 / 模型路由 / system 规范化与国内版同一套，但站点、token 与目录互不相通；" +
+			"被绑为 Windows 的账号对 X-Tm: linux 会 403——适配器恒发 win。",
 	},
 	{
 		Key: "zcode", Name: "ZCode", Vendor: "ZCode",

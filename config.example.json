@@ -150,6 +150,23 @@
       "disabled": true,
       "timeout_seconds": 0,
       "allow_private": false
+    },
+    {
+      "name": "autoclaw",
+      "base_url": "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+      "protocol": "openai",
+      "adapter": "autoclaw",
+      "path": "",
+      "models": ["glm-5.3", "glm-5.3-flash"],
+      "aliases": {},
+      "note": "示例：原生适配器（adapter=autoclaw，国内版）。凭证填桌面端 openclaw.json 里 X-Authorization 的 token（401 即失效需重取）；system 会包进 OpenClaw 身份前缀、max_tokens 小值归一到 10000。国际版把 adapter 换成 autoclaw-intl 并换 base。默认停用。",
+      "credentials": [
+        { "label": "primary", "secret": "REPLACE_WITH_AUTOCLAW_TOKEN", "expires_at": "" }
+      ],
+      "api_key": "",
+      "disabled": true,
+      "timeout_seconds": 0,
+      "allow_private": false
     }
   ],
   "ext_intel": {
