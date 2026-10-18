@@ -239,6 +239,23 @@ type Config struct {
 		CheckIntervalHours int `json:"check_interval_hours"`
 	} `json:"update"`
 
+	// ExtChannels 外部 OpenAI 兼容渠道（多平台阶段一）：与 CodeBuddy 账号池并存的
+	// 「已持有 key」类上游。每条渠道以 "ext:<name>/<model>" 前缀参与路由；
+	// 裸名模型在各渠道间唯一匹配时也可直达。api_key 只落 config.json（0600），
+	// 面板接口不回显（哨兵脱敏，与 device_token 同一套）。
+	ExtChannels []ExtChannel `json:"ext_channels"`
+
+	// ExtIntel 额度情报拉取（token-fbi data.json 定时快照，仅面板展示）。
+	ExtIntel struct {
+		// Enabled 缺省 true；false 时不发起任何情报请求（离线/隐私场景）。
+		Enabled bool `json:"enabled"`
+		// URL 情报数据源；空 = 不拉取。默认指向 token-fbi.com/data.json
+		//（Default() 置值；显式 "" 同样视为不拉取——escape hatch）。
+		URL string `json:"url"`
+		// Hours 拉取间隔（小时），缺省 12；<=0 回落 12。
+		Hours int `json:"interval_hours"`
+	} `json:"ext_intel"`
+
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
@@ -258,6 +275,21 @@ type Config struct {
 	ServerMaxBodyBytes int64 `json:"-"`
 	// UpdateCheckInterval 解析后的版本检查间隔。
 	UpdateCheckInterval time.Duration `json:"-"`
+}
+
+// ExtChannel 外部渠道定义（config.ext_channels[]）。字段语义见 internal/extchan。
+type ExtChannel struct {
+	Name           string   `json:"name"`           // 渠道名（路由 "ext:<name>/"）
+	BaseURL        string   `json:"base_url"`       // OpenAI 兼容根地址
+	APIKey         string   `json:"api_key"`        // 上游 Bearer（仅落盘，不回显）
+	Models         []string `json:"models"`         // 显式模型名单；空 = 自动发现
+	Disabled       bool     `json:"disabled"`       // 停用开关
+	TimeoutSeconds int      `json:"timeout_seconds"` // 请求超时；<=0 回落 120
+	// AllowPrivate 显式放行内网/回环 base_url（默认 false）。给本机/局域网自建
+	// 聚合器（one-api / LiteLLM 等）的出口：默认拒绝与 global.chat_base 同红线，
+	// 自建场景用户显式打开后自行承担「把渠道 key 发往自己指定内网地址」的责任。
+	// 云元数据端点（169.254.169.254 等）即使打开本开关也一律拒绝（无合法用途）。
+	AllowPrivate bool `json:"allow_private"`
 }
 
 // Default 默认配置。
@@ -330,6 +362,11 @@ func Default() *Config {
 	// 版本检查缺省开启（只提示、不自动下载）；6h 一次，失败静默降级。
 	c.Update.CheckEnabled = true
 	c.Update.CheckIntervalHours = 6
+	// 外部渠道默认无（纯 CodeBuddy 部署零行为变化）；情报默认开、指向 token-fbi。
+	c.ExtChannels = []ExtChannel{}
+	c.ExtIntel.Enabled = true
+	c.ExtIntel.URL = "https://token-fbi.com/data.json"
+	c.ExtIntel.Hours = 12
 	return c
 }
 
@@ -641,7 +678,40 @@ func (c *Config) normalize() error {
 	if err := c.validateScheduleHours(); err != nil {
 		return err
 	}
+	if err := c.validateExtChannels(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// validateExtChannels 外部渠道静态校验（fail fast：配置错了启动期即报，不带病路由）。
+// 出站 base 的 SSRF 校验（复用 upstream.IsForbiddenOutboundHost 字面判定）在 main
+// 装配期做（那里才依赖 upstream 包；config 包保持零内部依赖）。
+func (c *Config) validateExtChannels() error {
+	seen := map[string]bool{}
+	for i, ch := range c.ExtChannels {
+		field := fmt.Sprintf("ext_channels[%d]", i)
+		if ch.Name == "" {
+			return fmt.Errorf("%s.name: 不能为空（路由前缀 ext:<name>/ 依赖它）", field)
+		}
+		if len(ch.Name) > 64 {
+			return fmt.Errorf("%s.name: 过长（>64）", field)
+		}
+		for _, r := range ch.Name {
+			ok := r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_'
+			if !ok {
+				return fmt.Errorf("%s.name: %q 含非法字符（只允许小写字母/数字/连字符/下划线）", field, ch.Name)
+			}
+		}
+		if seen[ch.Name] {
+			return fmt.Errorf("%s.name: 渠道名重复 %q", field, ch.Name)
+		}
+		seen[ch.Name] = true
+		if strings.TrimSpace(ch.BaseURL) == "" {
+			return fmt.Errorf("%s.base_url: 不能为空", field)
+		}
+	}
+	return nil
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。

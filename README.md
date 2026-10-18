@@ -39,14 +39,27 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 
 签到（09/21 点）、活跃上报（10 点）、猫猫旅行（09/21 点）、token 保活（22 点）、夜猫子补足（23 点）、连登档位兑换与抽奖（挂在签到排程末尾）——六类动作独立开关，幂等可重复执行。成长计划 18 个任务中 17 个可在面板一键纯 API 完成并自动领奖（唯一例外是需要真实捐款的任务）。
 
+### 外部渠道（多平台阶段一）
+
+把任意 **OpenAI 兼容上游**接入同一个 `/v1` 出口，与 CodeBuddy 账号池并存：
+
+- **接入形态**：config 的 `ext_channels` 数组填 `name` + `base_url` + `api_key` 即成一条渠道（硅基流动、阿里百炼、OpenRouter、NVIDIA NIM、火山 Ark、自建 one-api/new-api 聚合器……全部适用）。保存即热重载，无需重启。
+- **路由协议**：模型名 `ext:<渠道名>/<模型名>` 精确路由；裸名在渠道间唯一匹配时也可直达（多渠道同名 → 要求用前缀消歧，不静默选边）。`/v1/models` 合并三域名单（`cn:` / `global:` / `ext:`）。
+- **独立治理**：429 短冷却指数退避（封顶 30 分钟）、5xx 固定短冷却、传输连续失败熔断（达阈 10 分钟）；成功即清零。不占 CodeBuddy 池的在途租约、不喂池熔断器，两套观测互不污染。
+- **正确性边界**：外部渠道路径**不做**提示词改写、指纹脱敏与 DSML 工具调用修复（那些是 CodeBuddy 上游特有的对抗语义，标准 OpenAI 上游透传即正确）；错误原文透传（保留上游 `error.code/type`）。
+- **密钥安全**：`api_key` 只落 config.json（0600），面板与 `/status` 一律不回显（哨兵脱敏 + 保存时按渠道名回填原值）；出站 `base_url` 经启动/保存双期 SSRF 校验，指向内网/元数据地址直接拒绝。
+- **用量归因**：外部渠道流量进入用量视图（realm=`ext`、按渠道分组），TTFB / 速率 / token 与 CodeBuddy 流量同口径统计。
+- **额度情报**：面板「外部渠道」视图内置免费额度汇总（默认拉取 [token-fbi.com](https://token-fbi.com/) 开放数据 `data.json`，每日人工复核、含观望区/下架状态）。仅供发现可注册的新平台，领取一律走各平台官方入口——网关不解析情报内容做任何路由决策，也绝不自动注册。`ext_intel.enabled=false` 或 `url=""` 关闭。
+
 ### StarPort 相对上游的自有增量
 
 本仓库在继承上游全部能力之外，重点补强了以下方向（均为上游 `workbuddy2api-panel` 所没有的）：
 
 | 能力 | 说明 |
 |---|---|
-| **Agent 接入密钥** | 面板「API 密钥」视图创建 / 吊销多把接入密钥：仅开放 `/v1/*` 聊天与模型列表，不开放面板与账号凭证；存储侧只留 SHA-256 摘要，全钥仅创建时可见一次。把网关分享给自己的多台设备 / 工具时不必交出管理密钥。这是面板第 8 个视图（上游为 7 个） |
-| **出站 SSRF 防护** | 可配置的上游地址在启动时校验：拒绝非 http(s) scheme、内网 / 链路本地 / CGNAT / 云元数据字面 IP 与内部主机名，校验失败直接拒启（`internal/upstream/ssrf.go`） |
+| **外部渠道（多平台）** | 任意 OpenAI 兼容上游与 CodeBuddy 池并存：`ext:` 路由、渠道级冷却/熔断、SSRF 校验、密钥脱敏、用量分组；面板「外部渠道」视图 + token-fbi 额度情报（详见上节） |
+| **Agent 接入密钥** | 面板「API 密钥」视图创建 / 吊销多把接入密钥：仅开放 `/v1/*` 聊天与模型列表，不开放面板与账号凭证；存储侧只留 SHA-256 摘要，全钥仅创建时可见一次。把网关分享给自己的多台设备 / 工具时不必交出管理密钥。这是面板第 9 个视图（上游为 7 个） |
+| **出站 SSRF 防护** | 可配置的上游地址在启动时校验：拒绝非 http(s) scheme、内网 / 链路本地 / CGNAT / 云元数据字面 IP 与内部主机名，校验失败直接拒启（`internal/upstream/ssrf.go`；外部渠道 `base_url` 复用同一红线） |
 | **XFF 信任边界** | 默认从不采信 `X-Forwarded-For` / `X-Real-IP`（客户端可伪造）；仅当直连地址落在 `server.trusted_proxies` 白名单内才读取转发头，防伪造审计来源与污染上游风控判据 |
 | **版本检查提醒** | 后台定期从固定可信源（GitHub API + jsDelivr `version.json` 兜底）检查新版本，面板顶部横幅提示；只提示不下载、强制 HTTPS、禁跨主机重定向、版本单调防回放 |
 
@@ -155,12 +168,14 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` / `header_timeout_seconds` / `idle_timeout_seconds` | `120` / 回落 / `300` | 三段超时分别管：短 RPC 总时长 / 聊天首字节前 / 流中空闲。聊天无总时长上限，长思考不掐断 |
 | `upstream.user_agent` | 空 | 出站 UA 覆盖；空保持现状（可配 `WorkBuddy/<ver>` 让官网「使用端」正确归因） |
 | `upstash.url` / `token` | 空 | Redis 镜像（可选），粘性绑定与池状态防重启丢失 |
+| `ext_channels[]` | `[]` | 外部 OpenAI 兼容渠道（多平台阶段一）：`name` / `base_url` / `api_key` / `models`（显式名单，空 = 自动发现）/ `disabled` / `timeout_seconds`。模型名 `ext:<name>/<model>` 路由；api_key 不回显；base_url 经 SSRF 校验 |
+| `ext_intel.enabled` / `url` / `interval_hours` | `true` / token-fbi / `12` | 面板额度情报拉取（仅展示，不参与路由）；`enabled=false` 或 `url=""` 关闭外联 |
 | `update.check_enabled` / `check_interval_hours` | `true` / `6` | 版本检查开关与间隔；只提示不自动下载，离线场景可关 |
 | `logging.request_archive_enabled` / `retention_days` / `max_mb` | `true` / `7` / `100` | 请求元数据 JSONL 归档（不含提示词、响应正文与凭证）与保留策略 |
 
 环境变量覆盖：JSON 之后加载 `STARPORT_*` 变量（非空才覆盖），覆盖监听 / 密钥 / 目录 / 上游超时 / 提示词 / 脱敏 / 池参数 / 调试（`STARPORT_DEBUG_CHAT` 打印出站请求头，敏感头掩码）等，完整清单见 `cmd/server/config.go`。
 
-面板在线改配置**热生效**的字段：`api_key`、`cooldown.*`、`features.*`、`logging.*`、`pool.*`、`schedule.*`；装配期字段（`listen`、`auth_dir`、`upstream.*`、`upstash.*` 等）保存后提示需重启。写入采用深合并 + 原子替换，手写的未知键原样保留。
+面板在线改配置**热生效**的字段：`api_key`、`cooldown.*`、`features.*`、`logging.*`、`pool.*`、`schedule.*`、`ext_channels`（按名复用运行态：冷却与目录缓存保留，改 `base_url` 丢目录缓存）；装配期字段（`listen`、`auth_dir`、`upstream.*`、`upstash.*` 等）保存后提示需重启。写入采用深合并 + 原子替换，手写的未知键原样保留。
 
 ## 运行行为要点
 
@@ -274,6 +289,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | 会话粘性 / Redis 镜像 | `internal/server` / `internal/redisstore` |
 | 中性提示词 / 降级重试 | `internal/prompt/prompt.go` · `Degraded`；`internal/server/degrade.go` |
 | Agent 密钥 | `internal/apikeys/apikeys.go`（包注释含完整设计说明） |
+| 外部渠道（多平台） | `internal/extchan/extchan.go`（Manager / 渠道状态机）、`extrelay.go`（`internal/server`，转发链路）、`intel.go`（额度情报） |
 | 更新检查 | `internal/update/update.go` |
 | SSRF 校验 | `internal/upstream/ssrf.go` |
 | 配置定义与默认值 | `cmd/server/config.go` |

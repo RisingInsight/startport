@@ -76,6 +76,10 @@ type Config struct {
 	// APIKeys 「agent 接入密钥」存储（nil = 密钥管理端点返回 501）。
 	// 端点只对管理密钥(api_key)开放;agent 密钥仅在 /v1/* 生效（见 server.chatAuth）。
 	APIKeys *apikeys.APIKeys
+
+	// ExtChan 外部渠道管理器（多平台阶段一；nil = 未启用，端点返回空集）。
+	// 只读观测：渠道快照 + 额度情报。管理面走配置接口（ext_channels 数组提交）。
+	ExtChan ExtChanManager
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/startport/", panel)，
@@ -164,6 +168,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/app.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/core.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/keys.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/ext.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /startport/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /startport/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -208,6 +213,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/api/update", p.withAuth(p.updateInfo))
 	p.mux.HandleFunc("GET /startport/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /startport/api/config", p.withAuth(p.saveConfig))
+	p.mux.HandleFunc("GET /startport/api/ext_channels", p.withAuth(p.extchanStatus))
+	p.mux.HandleFunc("GET /startport/api/ext_intel", p.withAuth(p.extchanIntel))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API
