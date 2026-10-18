@@ -21,6 +21,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/account"
+	"github.com/RisingInsight/startport/internal/acctchan"
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
 	"github.com/RisingInsight/startport/internal/extchan"
@@ -42,7 +44,7 @@ import (
 // 用 var 而非 const：const 无法被 `go build -ldflags -X` 注入，CI 也就无法把
 // git tag 打成二进制版本号（自动更新的「版本源」必须可注入）。默认值保留源码
 // 版本，本地裸构建（不带 -X）行为与改动前完全一致。
-var appVersion = "1.5.1"
+var appVersion = "1.6.0"
 
 // appCommit / appBuildTime 构建期元信息，由 CI 经 -ldflags -X 注入（本地构建为空）。
 // 仅用于启动日志与 /startport/api/overview 观测，不参与任何路由或出站决策。
@@ -283,6 +285,18 @@ func main() {
 		log.Printf("[extchan] 额度情报：%s 每 %d 小时拉取一次（仅面板展示）", cfg.ExtIntel.URL, cfg.ExtIntel.Hours)
 	}
 
+	// ── 账号中心（v1.6.0 · T1）──────────────────────────────────
+	// accounts.json 与 state.json 同目录（Docker volume 持久化一致）。
+	acctStore, err := account.Load(stateSibling(cfg.StateFile, "accounts.json"))
+	if err != nil {
+		log.Fatalf("config: 加载账号存储失败: %v", err)
+	}
+	defer acctStore.Close()
+	// 启动期 Reconcile 延后到 live/sch 装配完成之后（见 scheduler.New 之后的
+	// acctReconcile 调用）——Sync 经 saveChannels 闭包走 applyConfig 全链，
+	// 需要全部运行时对象就位。
+	var saveChannels func(defs []extchan.ChannelDef) error
+
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
 		Upstream:       up,
@@ -389,11 +403,33 @@ func main() {
 		log.Printf("[update] 版本检查已关闭（update.check_enabled=false）")
 	}
 
+	// ── 账号中心启动期 Reconcile（v1.6.0 · T1）──────────────────
+	// SaveChannels 闭包 = saveConfig 同一条链（架构 §4.2）：ChannelDef →
+	// ExtChannel → 整体替换 ext_channels 键 → applyConfig（校验/SSRF/原子写/
+	// 热重载各只有一份实现）。以 accounts.json 为准修齐 managed 渠道（用户误删
+	// 渠道 / 崩溃漂移都在这里修回；无账号 = 无操作，老配置零变化）。
+	saveChannels = func(defs []extchan.ChannelDef) error {
+		return saveChannelsAccounts(defs, *cfgPath, live, p, up, sch, extMgr)
+	}
+	acctLoader := func() []extchan.ChannelDef {
+		cur, cerr := Load(*cfgPath)
+		if cerr != nil {
+			log.Printf("[acctchan] 读取当前配置失败: %v", cerr)
+			return nil
+		}
+		return extChannelDefs(cur.ExtChannels)
+	}
+	if summary, serr := acctchan.Sync(acctStore, acctLoader, saveChannels, log.Printf); serr != nil {
+		log.Printf("[acctchan] 启动同步失败（账号未投影，转发不受影响）: %v", serr)
+	} else if summary != "no changes" {
+		log.Printf("[acctchan] 启动同步完成: %s", summary)
+	}
+
 	// 可信代理白名单（安全官 F-008）：解析失败直接启动失败——安全配置不能
 	// fail-open（静默退回"无条件采信转发头"正是本项要修的缺陷）。
-	trustedProxies, err := server.ParseTrustedProxies(cfg.Server.TrustedProxies)
-	if err != nil {
-		log.Fatalf("config: %v", err)
+	trustedProxies, tpErr := server.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	if tpErr != nil {
+		log.Fatalf("config: %v", tpErr)
 	}
 	server.SetTrustedProxies(trustedProxies)
 	if len(trustedProxies) > 0 {
@@ -425,6 +461,16 @@ func main() {
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
 			return saveConfig(raw, *cfgPath, live, p, up, sch, extMgr)
+		},
+		// 账号中心（v1.6.0 · T2）：账号存储 + 投影落盘闭包（saveConfig 同一条链）。
+		Accounts:     acctStore,
+		SaveChannels: saveChannels,
+		LoadChannelDefs: func() []extchan.ChannelDef {
+			cur, err := Load(*cfgPath)
+			if err != nil {
+				return nil
+			}
+			return extChannelDefs(cur.ExtChannels)
 		},
 	})
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
@@ -709,7 +755,32 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	scrubSecretSentinels(incoming, cur)
 	merged := mergeConfigMaps(cur, incoming)
 
-	// 2) 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
+	// 1.5) 托管渠道的凭证保护（账号中心 v1.6.0 · 架构 §4.5 规则 2）：
+	// 用户经表单改 managed 渠道的 credentials → 拒绝并指名。对比在解析后的
+	// 结构层做（哨兵已回填，"留空不改"表现为与盘上原值相同 → 放行）。
+	var oldCfg, newCfgPre *Config
+	if err := json.Unmarshal(oldRaw, &oldCfg); err == nil {
+		newCfgPre = &Config{}
+		if err := json.Unmarshal(mergedJSON(merged), newCfgPre); err != nil {
+			newCfgPre = nil
+		}
+	}
+	if oldCfg != nil && newCfgPre != nil {
+		if err := managedCredentialDiff(oldCfg, newCfgPre); err != nil {
+			return nil, err
+		}
+	}
+
+	// 2) 校验 + 落盘 + 热应用（与账号中心投影共用同一条内部链——applyConfig）。
+	return applyConfig(merged, path, live, p, up, sch, extMgr)
+}
+
+// applyConfig 校验 + 原子写 + 热应用（saveConfig 的内部函数化，架构 §4.2）：
+// 输入是"已合并/已脱敏"的完整配置 map。账号中心的写操作
+// （saveChannelsAccounts）与面板表单（saveConfig）共用这一份实现——
+// 校验/SSRF/原子写/热重载各只有一份代码。
+func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager) ([]string, error) {
+	// 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
 		return nil, err
@@ -723,7 +794,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 		}
 	}
 
-	// 3) 落盘（原子替换）。
+	// 落盘（原子替换）。
 	out, err := json.MarshalIndent(merged, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
@@ -796,6 +867,135 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	return restartRequiredFields(newCfg), nil
 }
 
+// saveChannelsAccounts 账号中心投影的落盘入口（架构 §4.2）：把 acctchan 投影出的
+// 渠道数组整体替换进 config 的 ext_channels 键，然后走 applyConfig（与 saveConfig
+// 共用校验/SSRF/原子写/热重载——不新增第二套落盘代码）。
+//
+// 与 saveConfig 的两点差异（都是账号中心语义所要求的）：
+//   - 不做哨兵回填：投影带的是 accounts.json 里的**真实凭证**（0600 文件，从未
+//     出过接口），没有"回填"一说；
+//   - 不做托管凭证差异检查：本次变更本身就是账号中心的合法写入（托管保护只
+//     拦"用户经表单改 managed 渠道凭证"这一条路径，见 saveConfig 的 1.5 步）。
+func saveChannelsAccounts(defs []extchan.ChannelDef, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager) error {
+	oldRaw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read current config: %w", err)
+	}
+	var cur map[string]any
+	if err := json.Unmarshal(oldRaw, &cur); err != nil {
+		cur = map[string]any{}
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	// 整体替换 ext_channels 键（深合并语义同 saveConfig：其它键不动）。
+	// 投影落盘用**稀疏 map**（只写非零字段）——与面板表单提交的稀疏形态一致，
+	// 两条写路径对同一份内容的落盘字节才可能一致（ExtChannel 结构体上有若干
+	// 非 omitempty 的老字段，直接结构体序列化会多出空键）。
+	channels := make([]map[string]any, 0, len(defs))
+	for _, def := range defs {
+		channels = append(channels, channelDefToMap(def))
+	}
+	cur["ext_channels"] = channels
+	_, err = applyConfig(cur, path, live, p, up, sch, extMgr)
+	return err
+}
+
+// channelDefToMap extchan.ChannelDef → 稀疏 JSON map（saveChannelsAccounts 专用；
+// 与面板表单的提交形态同构——只写有值的键）。
+func channelDefToMap(def extchan.ChannelDef) map[string]any {
+	m := map[string]any{"name": def.Name}
+	if def.BaseURL != "" {
+		m["base_url"] = def.BaseURL
+	}
+	if def.APIKey != "" {
+		m["api_key"] = def.APIKey
+	}
+	if def.Protocol != "" {
+		m["protocol"] = def.Protocol
+	}
+	if def.Adapter != "" {
+		m["adapter"] = def.Adapter
+	}
+	if def.Path != "" {
+		m["path"] = def.Path
+	}
+	if len(def.Headers) > 0 {
+		m["headers"] = def.Headers
+	}
+	if !def.Auth.IsZero() {
+		auth := map[string]any{}
+		if def.Auth.Mode != "" {
+			auth["mode"] = def.Auth.Mode
+		}
+		if def.Auth.Param != "" {
+			auth["param"] = def.Auth.Param
+		}
+		if def.Auth.Header != "" {
+			auth["header"] = def.Auth.Header
+		}
+		m["auth"] = auth
+	}
+	if len(def.Models) > 0 {
+		m["models"] = def.Models
+	}
+	if len(def.Aliases) > 0 {
+		m["aliases"] = def.Aliases
+	}
+	if def.Note != "" {
+		m["note"] = def.Note
+	}
+	if len(def.Credentials) > 0 {
+		creds := make([]map[string]any, 0, len(def.Credentials))
+		for _, c := range def.Credentials {
+			cm := map[string]any{"label": c.Label}
+			if c.Secret != "" {
+				cm["secret"] = c.Secret
+			}
+			if c.ExpiresAt != "" {
+				cm["expires_at"] = c.ExpiresAt
+			}
+			if c.Disabled {
+				cm["disabled"] = true
+			}
+			if !c.Auth.IsZero() {
+				ca := map[string]any{}
+				if c.Auth.Mode != "" {
+					ca["mode"] = c.Auth.Mode
+				}
+				if c.Auth.Param != "" {
+					ca["param"] = c.Auth.Param
+				}
+				if c.Auth.Header != "" {
+					ca["header"] = c.Auth.Header
+				}
+				cm["auth"] = ca
+			}
+			creds = append(creds, cm)
+		}
+		m["credentials"] = creds
+	}
+	if def.Disabled {
+		m["disabled"] = true
+	}
+	if def.TimeoutSeconds > 0 {
+		m["timeout_seconds"] = def.TimeoutSeconds
+	}
+	if def.AllowPrivate {
+		m["allow_private"] = true
+	}
+	if def.Managed {
+		m["managed"] = true
+	}
+	if def.Origin != "" {
+		m["origin"] = def.Origin
+	}
+	if len(def.Accounts) > 0 {
+		m["accounts"] = def.Accounts
+	}
+	return m
+}
+
 // extChannelDefs Config.ExtChannels → extchan.ChannelDef 映射（装配/热重载共用）。
 func extChannelDefs(src []ExtChannel) []extchan.ChannelDef {
 	out := make([]extchan.ChannelDef, 0, len(src))
@@ -815,6 +1015,9 @@ func extChannelDefs(src []ExtChannel) []extchan.ChannelDef {
 			Disabled:       ec.Disabled,
 			TimeoutSeconds: ec.TimeoutSeconds,
 			AllowPrivate:   ec.AllowPrivate,
+			Managed:        ec.Managed,
+			Origin:         ec.Origin,
+			Accounts:       ec.Accounts,
 		}
 		for _, cred := range ec.Credentials {
 			def.Credentials = append(def.Credentials, extchan.CredentialDef{

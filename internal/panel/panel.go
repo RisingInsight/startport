@@ -22,8 +22,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/httpauth"
 	"github.com/RisingInsight/startport/internal/livecfg"
 	"github.com/RisingInsight/startport/internal/pool"
@@ -80,6 +82,17 @@ type Config struct {
 	// ExtChan 外部渠道管理器（多平台阶段一；nil = 未启用，端点返回空集）。
 	// 只读观测：渠道快照 + 额度情报。管理面走配置接口（ext_channels 数组提交）。
 	ExtChan ExtChanManager
+
+	// ---- 账号中心（v1.6.0 · T2；nil = 未启用，账号端点返回 501）----
+
+	// Accounts 平台账号存储（事实来源；秘密值只在 0600 文件里，接口零回显）。
+	Accounts *account.Store
+	// SaveChannels 账号投影落盘闭包（main 注入 = saveConfig 同一条链：
+	// 校验/SSRF/原子写/热重载各只有一份实现）。账号 CRUD 后由 acct.go 调
+	// acctchan.Sync 完成 accounts.json → config.json 的投影。
+	SaveChannels func(defs []extchan.ChannelDef) error
+	// LoadChannelDefs 读当前盘上的渠道定义（一致性查询用；nil 时该端点降级）。
+	LoadChannelDefs func() []extchan.ChannelDef
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/startport/", panel)，
@@ -218,6 +231,17 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/api/ext_intel", p.withAuth(p.extchanIntel))
 	p.mux.HandleFunc("POST /startport/api/ext_channels/probe", p.withAuth(p.extchanProbe))
 	p.mux.HandleFunc("GET /startport/api/ext_presets", p.withAuth(p.extPresets))
+
+	// 账号中心（v1.6.0 · T2）：平台账号 CRUD / 探测 / 一致性。
+	// 路由前缀与 CodeBuddy 的 /api/accounts/{uid}/* 并存（Go 1.22 mux 字面段
+	// 优先于通配段，两边互不干扰）；Accounts 为 nil 时全部 501。
+	p.mux.HandleFunc("GET /startport/api/accounts", p.withAuth(p.platformAccountsList))
+	p.mux.HandleFunc("POST /startport/api/accounts", p.withAuth(p.platformAccountsCreate))
+	p.mux.HandleFunc("GET /startport/api/accounts/consistency", p.withAuth(p.platformAccountsConsistency))
+	p.mux.HandleFunc("GET /startport/api/accounts/{id}", p.withAuth(p.platformAccountDetail))
+	p.mux.HandleFunc("DELETE /startport/api/accounts/{id}", p.withAuth(p.platformAccountDelete))
+	p.mux.HandleFunc("POST /startport/api/accounts/{id}/state", p.withAuth(p.platformAccountState))
+	p.mux.HandleFunc("POST /startport/api/accounts/{id}/probe", p.withAuth(p.platformAccountProbe))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

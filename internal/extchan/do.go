@@ -24,6 +24,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/RisingInsight/startport/internal/provider"
@@ -343,7 +344,7 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 								ch.NoteRateLimited(m.base, m.max, "stream: "+he.Code)
 							}
 						case he.Status == http.StatusUnauthorized:
-							cred.NoteInvalid("stream: " + he.Code)
+							cred.NoteInvalidReason("stream: "+he.Code, invalidReasonFor(he.Status, []byte(he.Message)))
 						default:
 							cred.NoteFailure("stream convert: " + provider.ScrubSecrets(he.Message, target.Secret))
 						}
@@ -391,7 +392,10 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 			recordAttemptLog(ch, cred, status, attempts, started, "429 rate limited")
 
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
-			cred.NoteInvalid(fmt.Sprintf("%d authentication failed", status))
+			// invalid 细分（账号中心 v1.6.0 · 架构 §4.3）：402/配额业务码/
+			// 额度关键词 → quota（账号态"耗尽"，可签到复活）；其余 → auth
+			//（"待重登"）。引擎行为两种相同：都退出轮换。
+			cred.NoteInvalidReason(fmt.Sprintf("%d authentication failed", status), invalidReasonFor(status, body))
 			// 同 429：只在确实会换证时计（见上方注释）。
 			if attempts < maxCredAttempts && ch.pickCredential(tried) != nil {
 				cred.NoteAttempt()
@@ -427,6 +431,31 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 		return last, nil
 	}
 	return nil, ErrNoCredential
+}
+
+// invalidReasonFor 401/403 失败的细分判据（账号中心 v1.6.0 · 架构 §4.3）：
+//   - HTTP 402（Payment Required）→ quota；
+//   - 归一信封的 error.code 命中适配器的额度码（qoder_quota_exceeded 等）→ quota；
+//   - body 含额度关键词（quota / pricingurl / insufficient / 额度不足 / 配额）→
+//     quota（与 provider/errors.rs 的额度关键词链同源）；
+//   - 其余 → auth（待重登）。
+//
+// 判定是**保守的**：拿不准就归 auth（提示重贴凭证），不会把"待重登"误报成
+// "耗尽"——误报的代价是用户去签到一个需要重新登录的账号。
+func invalidReasonFor(status int, body []byte) InvalidReason {
+	if status == http.StatusPaymentRequired {
+		return InvalidQuota
+	}
+	if code := envelopeErrorCode(body); code == "qoder_quota_exceeded" || code == "quota_exceeded" {
+		return InvalidQuota
+	}
+	low := strings.ToLower(string(body))
+	for _, kw := range []string{"quota", "pricingurl", "insufficient", "额度不足", "配额不足"} {
+		if strings.Contains(low, kw) {
+			return InvalidQuota
+		}
+	}
+	return InvalidAuth
 }
 
 // exec 执行 HTTP 往返（流式/非流式的超时语义见下方注释）。
