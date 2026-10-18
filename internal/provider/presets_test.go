@@ -52,9 +52,9 @@ func TestPresetsCatalog(t *testing.T) {
 			t.Errorf("缺关键预设 %q", k)
 		}
 	}
-	// native_required 至少覆盖 Qoder/TRAE/CatPaw/华为云码道。
-	// Loomy 已由原生适配器（adapter=loomy）覆盖，故不再标注（见 v1.2.0）。
-	for _, k := range []string{"qoder-cn", "trae", "catpaw", "huawei-codearts"} {
+	// native_required 至少覆盖 TRAE/CatPaw/华为云码道。
+	// Qoder 已由原生适配器（adapter=qoder / qoder-intl）覆盖，故不再标注。
+	for _, k := range []string{"trae", "catpaw", "huawei-codearts"} {
 		found := false
 		for _, p := range list {
 			if p.Key == k {
@@ -66,6 +66,31 @@ func TestPresetsCatalog(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("缺预设 %q", k)
+		}
+	}
+	// Qoder 两条（国内/国际）同样挂各自的适配器（模型清单用静态表条目）。
+	qoderAdapters := map[string]string{
+		"qoder": QoderAdapterName, "qoder-intl": QoderIntlAdapterName,
+	}
+	for key, adapter := range qoderAdapters {
+		var found bool
+		for _, p := range list {
+			if p.Key != key {
+				continue
+			}
+			found = true
+			if p.Adapter != adapter {
+				t.Errorf("%s 预设应挂 adapter=%q, got %q", key, adapter, p.Adapter)
+			}
+			if p.NativeRequired {
+				t.Errorf("%s 已有原生适配器，不应再标 native_required", key)
+			}
+			if len(p.Models) == 0 {
+				t.Errorf("%s 预设应带静态模型清单", key)
+			}
+		}
+		if !found {
+			t.Errorf("缺预设 %q", key)
 		}
 	}
 	// loomy 反过来：必须挂原生适配器且不再 native_required（可由用户直接接入）。

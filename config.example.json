@@ -167,6 +167,23 @@
       "disabled": true,
       "timeout_seconds": 0,
       "allow_private": false
+    },
+    {
+      "name": "qoder",
+      "base_url": "https://gateway.qoder.com.cn",
+      "protocol": "openai",
+      "adapter": "qoder",
+      "path": "",
+      "models": ["Qwen3.8-Flash", "Qwen3.8-Max", "Auto", "GLM-5.3"],
+      "aliases": {},
+      "note": "示例：原生适配器（adapter=qoder，中国版）。凭证存整个账号 JSON（accessToken/userId/machineId/nickname/email）——COSY 签名需要用户与设备标识，裸 token 不够。模型未知名硬失败；排队返回 503 qoder_model_busy；401 需重新粘贴。国际版换 adapter=qoder-intl 与 base（api2.qoder.sh，jt- 作业令牌）。默认停用。",
+      "credentials": [
+        { "label": "primary", "secret": "REPLACE_WITH_QODER_ACCOUNT_JSON", "expires_at": "" }
+      ],
+      "api_key": "",
+      "disabled": true,
+      "timeout_seconds": 0,
+      "allow_private": false
     }
   ],
   "ext_intel": {

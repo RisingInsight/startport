@@ -178,6 +178,35 @@ func TestExtChannelAdapterAutoClaw(t *testing.T) {
 	}
 }
 
+// Qoder 两地区：合法配置 + 静态模型清单。
+func TestExtChannelAdapterQoder(t *testing.T) {
+	cfg, err := ParseConfig([]byte(`{
+	  "ext_channels": [{
+	    "name": "qoder",
+	    "base_url": "https://gateway.qoder.com.cn",
+	    "protocol": "openai",
+	    "adapter": "qoder",
+	    "models": ["Qwen3.8-Flash"],
+	    "credentials": [{"label": "primary", "secret": "{}"}]
+	  }]
+	}`))
+	if err != nil {
+		t.Fatalf("qoder 配置应合法: %v", err)
+	}
+	if got := cfg.ExtChannels[0].Adapter; got != provider.QoderAdapterName {
+		t.Errorf("Adapter = %q", got)
+	}
+	if _, err = ParseConfig([]byte(`{
+	  "ext_channels": [{
+	    "name": "qoder-intl", "base_url": "https://api2.qoder.sh",
+	    "adapter": "qoder-intl",
+	    "credentials": [{"label": "primary", "secret": "{}"}]
+	  }]
+	}`)); err != nil {
+		t.Fatalf("qoder-intl 配置应合法: %v", err)
+	}
+}
+
 // 未声明 adapter 的普通渠道不受影响（零回归）。
 func TestExtChannelNoAdapterStillValid(t *testing.T) {
 	cfg, err := ParseConfig([]byte(`{

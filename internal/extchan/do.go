@@ -242,6 +242,12 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 		httpReq, err := adapter.BuildRequest(ctx, target, req.Body, req.Stream)
 		if err != nil {
 			cred.NoteFailure("build request: " + provider.ScrubSecrets(err.Error(), target.Secret))
+			// 适配器的构造期错误（Qoder 的 model_not_found / 凭证地区不匹配等）
+			// 是带语义的 HTTPError：折回 typed error，别让 server 侧收敛成 502。
+			var he *provider.HTTPError
+			if errors.As(err, &he) {
+				return nil, &Error{Status: he.Status, Code: he.Code, Message: he.Message}
+			}
 			return nil, err
 		}
 		cred.begin()
@@ -321,6 +327,29 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 								"retry with \"stream\": false (non-streaming is fully supported)",
 						}
 					}
+					// 适配器的流内业务错误（Qoder 的信封错误：HTTP 200 但
+					// statusCodeValue != 200，首帧预读时转成 typed error）：
+					// 折回 typed error 并按语义罚凭证——额度 429 进冷却、
+					// 鉴权 401 标 invalid、排队（qoder_model_busy）不罚
+					// （既不是凭证问题也不是账号问题，换证/冷却都解决不了）。
+					var he *provider.HTTPError
+					if errors.As(cerr, &he) {
+						switch {
+						case he.Code == "qoder_model_busy":
+							// 排队：不罚凭证也不罚渠道（上游建议稍后再来）。
+						case he.Status == http.StatusTooManyRequests:
+							cred.NoteRateLimited(m.base, m.max, "stream: "+he.Code)
+							if !ch.hasUsableCredential() {
+								ch.NoteRateLimited(m.base, m.max, "stream: "+he.Code)
+							}
+						case he.Status == http.StatusUnauthorized:
+							cred.NoteInvalid("stream: " + he.Code)
+						default:
+							cred.NoteFailure("stream convert: " + provider.ScrubSecrets(he.Message, target.Secret))
+						}
+						recordAttemptLog(ch, cred, he.Status, attempts, started, "stream: "+he.Code)
+						return nil, &Error{Status: he.Status, Code: he.Code, Message: he.Message}
+					}
 					cred.NoteFailure("stream convert: " + provider.ScrubSecrets(cerr.Error(), target.Secret))
 					return nil, cerr
 				}
@@ -370,6 +399,16 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 			recordAttemptLog(ch, cred, status, attempts, started, "invalid credential")
 
 		case status >= 500:
+			// 排队态特判（Qoder 免费模型的 10605）：既不是凭证问题也不是账号
+			// 问题，30s 渠道冷却只会把"稍后重试"变成"立即失败"——不罚任何状态，
+			// 只把上游原文记进 lastErr 后原样透传（chat.rs:108-123 的落定口径）。
+			if envelopeErrorCode(body) == "qoder_model_busy" {
+				ch.mu.Lock()
+				ch.lastErr = "上游模型排队中（qoder_model_busy）"
+				ch.mu.Unlock()
+				recordAttemptLog(ch, cred, status, attempts, started, "queued")
+				return last, nil
+			}
 			cred.NoteFailure(fmt.Sprintf("%d upstream error", status))
 			ch.NoteServerUpstream(extServerCooldown, fmt.Sprintf("%d upstream error", status))
 			recordAttemptLog(ch, cred, status, attempts, started, "5xx upstream")
