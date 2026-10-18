@@ -230,8 +230,19 @@ func loomyModelsURL(t *Target) string {
 	return strings.TrimRight(strings.TrimSpace(t.BaseURL), "/") + loomyModelsPath
 }
 
-// applyLoomyHeaders 写入 Loomy 的请求头。
+// LoomySessionHeaders 返回 Loomy 的双头会话头（`token` + `Authorization: Bearer`，
+// 同一个 session）。
 //
+// 账号中心的签到/积分域（internal/checkin）与转发域共用同一契约——双头只允许
+// 一份实现（ref refresh.rs:236-241 的"签名保持一份实现"原则的直接移植）。
+func LoomySessionHeaders(session string) [][2]string {
+	return [][2]string{
+		{loomyTokenHeader, session},
+		{"Authorization", "Bearer " + session},
+	}
+}
+
+// applyLoomyHeaders 写入 Loomy 的请求头。
 // 顺序刻意如此：协议默认头 → 静态头（禁传输层头、禁 token/Authorization）→
 // **最后由适配器写死双头**。这样即使用户在 headers 里写了 token/Authorization，
 // 也覆盖不掉平台契约（双头必须携带同一个 session），与 `auth` 字段一并忽略。

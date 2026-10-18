@@ -8,17 +8,33 @@ let lastPackagesAt = 0;
 let expFetching = false;                       // 到期卡片在途标记（防重复打上游）
 const EXP_FRESH_MS = 2 * 60 * 1000;            // 缓存新鲜窗口：2 分钟内复用
 
-const TITLES = { accounts: '账号池', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志', keys: 'API 密钥', extchan: '外部渠道' };
+const TITLES = { 'accounts-center': '账号中心', usage: '用量', packages: '积分构成', taskscenter: '任务中心', models: '模型与档位', config: '配置', logs: '运行日志', keys: 'API 密钥' };
+/* 账号中心是「双 section 组合视图」：CodeBuddy 页签 = 原 view-accounts（DOM 原样），
+   平台页签与渠道设置抽屉 = view-acctcenter。go() 对它做组级显隐（acct.js 管页签内切换）。 */
+const ACCT_CENTER_SECTIONS = ['view-accounts', 'view-acctcenter'];
 function go(v) {
+  /* 老锚点重定向（架构 §7.1，hash 同步到 #accounts-center）：
+     #accounts → 账号中心 CodeBuddy 页签；#extchan → 账号中心 + 渠道设置抽屉展开。 */
+  if (v === 'accounts' || v === 'extchan') {
+    const redirectTab = v === 'accounts' ? 'codebuddy' : null;
+    v = 'accounts-center';
+    view = v; // 先落位：selectAcctTab/openAcctDrawer 里的 inCenter 判定依赖它
+    if (typeof selectAcctTab === 'function') {
+      if (redirectTab) selectAcctTab(redirectTab);
+      else if (typeof openAcctDrawer === 'function') openAcctDrawer(true);
+    }
+    history.replaceState(null, '', '#accounts-center');
+  }
   view = v;
-  document.querySelectorAll('.view').forEach(s => s.hidden = s.id !== 'view-' + v);
+  document.querySelectorAll('.view').forEach(s => s.hidden = v === 'accounts-center'
+    ? !ACCT_CENTER_SECTIONS.includes(s.id) : s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
-  $('ttl').textContent = TITLES[v];
+  $('ttl').textContent = TITLES[v] || v;
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
   if (v === 'keys') loadKeys();
-  if (v === 'extchan') loadExt();
+  if (v === 'accounts-center' && typeof loadAcctCenter === 'function') loadAcctCenter();
   if (v === 'usage') loadUsage();
   if (v === 'packages') loadPackages();
   // 到期提醒卡片：默认可见，进页面即用 overview 快照渲染（零上游请求，随首页统计
@@ -1268,8 +1284,9 @@ $('btnAdd').onclick = openAdd;
    复用导航同一套视图切换（go() + hash），先关弹窗（closeAdd 会停掉登录轮询）。 */
 if ($('addGoExtchan')) $('addGoExtchan').onclick = () => {
   closeAdd();
-  go('extchan');
-  history.replaceState(null, '', '#extchan');
+  go('accounts-center');
+  if (typeof selectAcctTab === 'function') selectAcctTab('custom');
+  history.replaceState(null, '', '#accounts-center');
 };
 $('btnRefresh').onclick = async () => {
   const b = $('btnRefresh');
@@ -1285,7 +1302,7 @@ $('btnRefresh').onclick = async () => {
 
 /* ── 轮询 ─────────────────────────────────────────────────────────── */
 function refreshVisible() {
-  if (view === 'accounts') loadOverview(true);
+  if (view === 'accounts-center') loadOverview(true);
   else if (view === 'logs') loadLogs();
   else if (view === 'taskscenter') reattachQueueView();
 }

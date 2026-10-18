@@ -250,6 +250,21 @@ func (s *Store) SetBalance(id string, snap *BalanceSnapshot) error {
 	return nil
 }
 
+// UpdateCred 更新账号凭证 blob（账号中心 v1.6.0 · T3：autoclaw token 刷新
+// 回写——架构 §4.7：网关自管存储的刷新结果**回写是安全且必要的**，否则重启
+// 即丢，账号必死）。
+func (s *Store) UpdateCred(id string, cred json.RawMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a := s.byIDLocked(id)
+	if a == nil {
+		return fmt.Errorf("账号 %q 不存在", id)
+	}
+	a.Cred = append(json.RawMessage(nil), cred...)
+	s.markDirty()
+	return nil
+}
+
 // Save 强制落盘（停机 / 需要立即持久化的场景）。
 func (s *Store) Save() {
 	s.mu.Lock()

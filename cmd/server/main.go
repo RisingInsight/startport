@@ -25,6 +25,7 @@ import (
 	"github.com/RisingInsight/startport/internal/acctchan"
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/checkin"
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/livecfg"
 	"github.com/RisingInsight/startport/internal/panel"
@@ -292,6 +293,25 @@ func main() {
 		log.Fatalf("config: 加载账号存储失败: %v", err)
 	}
 	defer acctStore.Close()
+
+	// ── 平台签到调度器（v1.6.0 · T3）────────────────────────────
+	// 与 CodeBuddy 的 internal/scheduler 完全独立（两套语义命名强区分）：
+	// 默认每日 09:00 对表 + 失败 30m×2 重试；手动触发走面板端点绕过窗口。
+	chkSched := checkin.NewScheduler(checkin.SchedulerConfig{
+		Store: acctStore,
+		// 签到成功/已签过 → 复活被额度或 auth 判死的引擎凭证（架构 §4.3 的
+		// Revive 钩子；平台渠道名 = 平台 key，凭证 label = account.ID）。
+		OnSuccess: func(platform, credLabel string) {
+			if ch := extMgr.Get(platform); ch != nil {
+				if c := ch.CredentialByLabel(credLabel); c != nil {
+					c.Revive()
+				}
+			}
+		},
+		Logf: log.Printf,
+	})
+	defer chkSched.Close()
+
 	// 启动期 Reconcile 延后到 live/sch 装配完成之后（见 scheduler.New 之后的
 	// acctReconcile 调用）——Sync 经 saveChannels 闭包走 applyConfig 全链，
 	// 需要全部运行时对象就位。
@@ -465,6 +485,7 @@ func main() {
 		// 账号中心（v1.6.0 · T2）：账号存储 + 投影落盘闭包（saveConfig 同一条链）。
 		Accounts:     acctStore,
 		SaveChannels: saveChannels,
+		Checkin:      chkSched,
 		LoadChannelDefs: func() []extchan.ChannelDef {
 			cur, err := Load(*cfgPath)
 			if err != nil {

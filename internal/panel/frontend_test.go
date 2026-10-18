@@ -20,7 +20,9 @@ import (
 // 2026-10-18 增补 ext.js（外部渠道视图，自包含模块，依赖 core.js 的 $/esc/ago/api/dur）。
 // 2026-10-18 增补 extwiz.js（外部渠道新建/编辑弹层 + 情报草稿；ext.js 在运行时调用
 // 它导出的 openExtWizard，故必须排在 ext.js 之后加载）。
-var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js", "extwiz.js"}
+// 2026-10-18 增补 acct.js（账号中心视图 v1.6.0；依赖 core.js 的 $/esc/ago/api/toast，
+// 并在运行时调用 app.js 的 go / ext.js 的 loadExt——排在两者之后加载）。
+var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js", "extwiz.js", "acct.js"}
 
 // mergedAppJSPath 拼接全部面板 JS 为临时文件并返回路径（供 node harness 读取）。
 // 这样所有按函数名切片 app.js 的既有测试在拆分后无需改动切法。
@@ -1349,7 +1351,7 @@ func TestExtChannelWizardDOM(t *testing.T) {
 	}
 	html := string(htmlBytes)
 	for _, id := range []string{
-		"view-extchan", "ecCards", "ecSummary", "btnEcNew",
+		"extDrawer", "ecCards", "ecSummary", "btnEcNew",
 		"extWizVeil", "ewName", "ewProtocol", "ewAdapter", "ewBase", "ewPath",
 		"ewAuthMode", "ewAuthParam", "ewAuthHeader", "ewAuthHint", "ewHeaders",
 		"ewModels", "ewAliases", "ewCreds", "ewAddCred", "ewNote",
@@ -1415,30 +1417,135 @@ func TestExtChannelWizardDOM(t *testing.T) {
 // 「添加账号」只服务 CodeBuddy 账号池，多平台入口在「外部渠道」——这条引导防止
 // 用户在错误入口找 Loomy / AutoClaw / Qoder 等平台的接入方式。
 func TestAddAccountModalExtchanGuide(t *testing.T) {
+	// v1.6.0：外部渠道降级为账号中心的「渠道设置」抽屉（PRD §6），引导文案与
+	// 跳转目标同步改为「账号中心」→ 通用平台页签（按钮 id=addGoExtchan 保留，
+	// 避免无谓的 DOM churn；语义由本测试钉住）。
 	htmlBytes, err := os.ReadFile("index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	html := string(htmlBytes)
-	// 弹窗内：hint 文案 + 内联按钮。
 	if !strings.Contains(html, `id="addGoExtchan"`) {
-		t.Error("添加账号弹窗缺「前往外部渠道」按钮（id=addGoExtchan）")
+		t.Error("添加账号弹窗缺「前往账号中心」按钮（id=addGoExtchan）")
 	}
 	if !strings.Contains(html, "添加账号仅用于 CodeBuddy（WorkBuddy）账号池") {
 		t.Error("添加账号弹窗缺多平台引导文案")
 	}
-	if !strings.Contains(html, "外部渠道」→「新建渠道」") {
-		t.Error("引导文案应指到「外部渠道」→「新建渠道」")
+	if !strings.Contains(html, "请到左侧「账号中心」") {
+		t.Error("引导文案应指到「账号中心」对应平台页签")
 	}
-	// app.js：按钮点击 = 关弹窗 + 切 extchan 视图（复用 go()，与导航同机制）。
+	if strings.Contains(html, "外部渠道」→「新建渠道」") {
+		t.Error("引导文案仍指向外部渠道（v1.6.0 已迁移）")
+	}
+	// app.js：按钮点击 = 关弹窗 + 进账号中心 + 落到通用平台页签。
 	appJS, err := os.ReadFile("app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(appJS)
-	for _, want := range []string{`$('addGoExtchan')`, "closeAdd()", "go('extchan')", "'#extchan'"} {
+	for _, want := range []string{`$('addGoExtchan')`, "closeAdd()", "go('accounts-center')", "selectAcctTab('custom')"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("app.js 缺引导接线 %q", want)
+		}
+	}
+}
+
+// TestAccountCenterDOM 账号中心（v1.6.0 T4）的 DOM 与接线断言。
+//
+// 为什么钉这些：
+//   - 导航迁移是行为变更：主导航必须有「账号中心」且不再有「账号池 / 外部渠道」
+//     直达项（外部渠道降级为渠道设置抽屉，PRD §6）；
+//   - 老锚点重定向（#accounts / #extchan）是书签兼容承诺，漏了就断链；
+//   - 4 处同步纪律（embed / 路由 / script 标签 / panelJSFiles）缺一即 404 或测试漏检。
+func TestAccountCenterDOM(t *testing.T) {
+	htmlBytes, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+
+	// 导航：账号中心在，账号池 / 外部渠道直达项已移除。
+	if !strings.Contains(html, `data-view="accounts-center"`) {
+		t.Error("主导航缺「账号中心」入口")
+	}
+	if strings.Contains(html, `data-view="accounts"`) || strings.Contains(html, `data-view="extchan"`) {
+		t.Error("主导航不应再有 账号池 / 外部渠道 直达项（已迁移/降级）")
+	}
+
+	// 视图骨架：双 section 组合 + 分页签 + 平台面板 + 抽屉。
+	for _, id := range []string{"view-accounts", "view-acctcenter", "acctTabs", "acctPanels",
+		"btnAcctAdd", "btnCheckinAll", "btnExtDrawer", "btnExtDrawerClose", "btnAcctConsistency",
+		"acctNote", "extDrawer"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("index.html 缺账号中心元素 id=%q", id)
+		}
+	}
+	// 7 个页签（CodeBuddy + 6 平台）与对应面板/表体。
+	for _, k := range []string{"codebuddy", "loomy", "autoclaw", "autoclaw-intl", "qoder", "qoder-intl", "custom"} {
+		if !strings.Contains(html, `data-acct="`+k+`"`) {
+			t.Errorf("缺平台页签 data-acct=%q", k)
+		}
+		if k != "codebuddy" {
+			if !strings.Contains(html, `id="acctPanel-`+k+`"`) || !strings.Contains(html, `id="acBody-`+k+`"`) {
+				t.Errorf("缺平台 %q 的面板/表体", k)
+			}
+		}
+	}
+
+	// 添加账号向导 DOM。
+	for _, id := range []string{"accAddVeil", "accAddPlatform", "accAddCred", "accAddSchema",
+		"accAddLabel", "accAddNote", "accAddErr", "accAddSave", "accAddCancel"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("index.html 缺添加账号向导元素 id=%q", id)
+		}
+	}
+
+	// 老渠道视图的内部 id 必须原样保留（ext.js/extwiz.js 零改动的前提）。
+	for _, id := range []string{"ecCards", "ecSummary", "ecNote", "eiFilters", "eiBody", "eiMeta"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("渠道设置抽屉缺原外部渠道 id=%q（ext.js 依赖）", id)
+		}
+	}
+
+	// v1.5.1 引导文案指向账号中心（按钮 id 保留，跳转目标改为通用平台页签）。
+	if strings.Contains(html, "请到左侧「外部渠道」") {
+		t.Error("添加账号弹窗引导仍指向「外部渠道」")
+	}
+	if !strings.Contains(html, "请到左侧「账号中心」") || !strings.Contains(html, `id="addGoExtchan"`) {
+		t.Error("添加账号弹窗缺「前往账号中心」引导")
+	}
+
+	// 脚本加载顺序：acct.js 必须在 extwiz.js 之后（运行时调用其同域函数）。
+	acctIdx := strings.Index(html, `<script src="acct.js"></script>`)
+	wizIdx := strings.Index(html, `<script src="extwiz.js"></script>`)
+	if acctIdx < 0 || wizIdx < 0 || acctIdx < wizIdx {
+		t.Error("index.html 必须按 … extwiz.js → acct.js 顺序引入脚本")
+	}
+
+	// 4 处同步纪律：embed 与静态路由（index.go / panel.go）。
+	indexGo, err := os.ReadFile("index.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(indexGo), "acct.js") {
+		t.Error("index.go 的 go:embed 缺 acct.js（二进制里没有该文件 = 浏览器 404）")
+	}
+	panelGo, err := os.ReadFile("panel.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(panelGo), `GET /startport/acct.js`) {
+		t.Error("panel.go 缺 GET /startport/acct.js 静态路由")
+	}
+
+	// app.js 接线：老锚点重定向 + 组级显隐 + 标题表。
+	appJS, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ACCT_CENTER_SECTIONS", `v === 'accounts' || v === 'extchan'`, "'accounts-center': '账号中心'"} {
+		if !strings.Contains(string(appJS), want) {
+			t.Errorf("app.js 缺账号中心接线片段 %q", want)
 		}
 	}
 }

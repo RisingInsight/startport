@@ -25,6 +25,7 @@ import (
 	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
+	"github.com/RisingInsight/startport/internal/checkin"
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/httpauth"
 	"github.com/RisingInsight/startport/internal/livecfg"
@@ -87,6 +88,8 @@ type Config struct {
 
 	// Accounts 平台账号存储（事实来源；秘密值只在 0600 文件里，接口零回显）。
 	Accounts *account.Store
+	// Checkin 平台签到调度器（nil = 平台签到端点返回 501）。
+	Checkin *checkin.Scheduler
 	// SaveChannels 账号投影落盘闭包（main 注入 = saveConfig 同一条链：
 	// 校验/SSRF/原子写/热重载各只有一份实现）。账号 CRUD 后由 acct.go 调
 	// acctchan.Sync 完成 accounts.json → config.json 的投影。
@@ -183,6 +186,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/keys.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/ext.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/extwiz.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/acct.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /startport/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /startport/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -242,6 +246,9 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("DELETE /startport/api/accounts/{id}", p.withAuth(p.platformAccountDelete))
 	p.mux.HandleFunc("POST /startport/api/accounts/{id}/state", p.withAuth(p.platformAccountState))
 	p.mux.HandleFunc("POST /startport/api/accounts/{id}/probe", p.withAuth(p.platformAccountProbe))
+	p.registerCheckinRoutes() // 平台签到（v1.6.0 T3；路由实现在 checkin.go）
+	p.mux.HandleFunc("POST /startport/api/channels/{name}/migrate", p.withAuth(p.channelMigrate))
+	p.mux.HandleFunc("POST /startport/api/channels/{name}/rollback", p.withAuth(p.channelRollback))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

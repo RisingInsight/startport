@@ -102,8 +102,12 @@ function renderChannelCard(c) {
     + '<span class="tag mute">' + esc(c.protocol || 'openai') + '</span>'
     // 原生适配器徽标：只在显式配置时出现（空 = 按协议，不缺省刷一个标签）。
     + (c.adapter ? ' <span class="tag" title="原生适配器">' + esc(c.adapter) + '</span>' : '')
+    + (c.managed ? '<span class="tag mute" title="credentials 由账号中心投影，在此修改会被拒绝">账号中心托管</span>' : '')
     + '<span class="tag ' + st[1] + '">' + esc(st[0]) + '</span>' + cool
     + '<span class="grow" style="flex:1"></span>'
+    + (!c.managed
+      ? '<button type="button" class="xs" data-ec="migrate" data-name="' + esc(c.name) + '" title="把静态凭证转为账号条目挂入账号中心对应平台页签">迁入账号中心</button>'
+      : '<button type="button" class="xs" data-ec="rollback" data-name="' + esc(c.name) + '" title="清除托管标记：账号从账号中心删除，凭证原样保留在渠道（可重新迁入）">回退</button>')
     + '<button type="button" class="xs" data-ec="probe" data-name="' + esc(c.name) + '">测试</button>'
     + '<button type="button" class="xs" data-ec="edit" data-name="' + esc(c.name) + '">编辑</button>'
     + '<button type="button" class="xs" data-ec="del" data-name="' + esc(c.name) + '">删除</button>'
@@ -158,6 +162,10 @@ if ($('ecCards')) {
       else toast('读取渠道配置失败', 'bad');
     } else if (b.dataset.ec === 'del') {
       await deleteExtChannel(name);
+    } else if (b.dataset.ec === 'migrate') {
+      await migrateExtChannel(name, b);
+    } else if (b.dataset.ec === 'rollback') {
+      await rollbackExtChannel(name, b);
     }
   };
 }
@@ -183,6 +191,74 @@ async function probeExtChannel(name, credentialLabel, btn) {
     }
   } catch (e) {
     toast('探测失败：' + e.message, 'bad');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+/* 迁入/回退（账号中心 v1.6.0 · T5，契约冻结）。
+   migrate：200 {ok,migrated[],total}；400 两态（部分失败 {error,failed[]} /
+   D1 平台冲突 {error}——均为预期业务拒绝，error 原文已含指路，不重试）；
+   409 已托管；404 渠道不存在；501 账号中心未启用。
+   rollback：200 {ok,removed_accounts,message}（账号从账号中心删除、凭证原样
+   保留在渠道）；409 非托管；404/501 同上。
+   二次确认语义由前端做（架构 §7.3）。 */
+function extEndpointUnavailable(m) {
+  return m.indexOf('404') >= 0 || m.indexOf('501') >= 0
+    || m.indexOf('账号中心未启用') >= 0 || m.indexOf('渠道不存在') >= 0;
+}
+
+async function migrateExtChannel(name, btn) {
+  if (!confirm('把渠道 ' + name + ' 的每条凭证迁入账号中心？\n迁入后凭证由账号中心托管（可一键回退）。')) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '迁入中…'; }
+  try {
+    const d = await api('channels/' + encodeURIComponent(name) + '/migrate', { method: 'POST' });
+    const n = d.total || (d.migrated ? d.migrated.length : 0);
+    toast('已迁入账号中心：' + n + ' 条凭证转为账号，托管渠道已生效', 'ok');
+    // custom 渠道的已知形态：账号中心按"每账号一条"投影出独立的 c-<id> 托管
+    // 渠道，原渠道会短暂并存（非托管同名不接管的孤儿语义）——提示用户可删除。
+    const ch = (typeof extChannels !== 'undefined' ? extChannels : []).find(x => x && x.name === name);
+    if (ch && (ch.protocol || 'openai') === 'openai' && (ch.adapter || '') === ''
+      && name.indexOf('c-') !== 0 && /^custom|^ch-/.test(ch.name) === false) {
+      // 仅在无法确认平台归属时保守提示；原生平台原地转托管，无此现象。
+    }
+    loadExt();
+  } catch (e) {
+    const m = e.message || '';
+    if (m.indexOf('无需迁入') >= 0) {
+      toast(m, 'mute');
+      loadExt();
+    } else if (extEndpointUnavailable(m)) {
+      toast('迁入功能不可用：' + m, 'mute');
+    } else {
+      // 400（部分失败 / D1 平台冲突）：error 原文已含字段级原因与指路，直接展示。
+      toast(m, 'bad');
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old; }
+  }
+}
+
+/* rollbackExtChannel 回退：托管三键清除、账号从账号中心删除、凭证零数据损失。 */
+async function rollbackExtChannel(name, btn) {
+  if (!confirm('回退渠道 ' + name + '？\n· 对应账号将从账号中心删除\n· 凭证原样保留在渠道里（零数据损失）\n· 之后可重新迁入')) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '回退中…'; }
+  try {
+    const d = await api('channels/' + encodeURIComponent(name) + '/rollback', { method: 'POST' });
+    toast(d.message || ('已回退为普通渠道（' + (d.removed_accounts || 0) + ' 个账号已从账号中心移除）'), 'ok');
+    loadExt();
+  } catch (e) {
+    const m = e.message || '';
+    if (m.indexOf('无需回退') >= 0) {
+      toast(m, 'mute');
+      loadExt();
+    } else if (extEndpointUnavailable(m)) {
+      toast('回退功能不可用：' + m, 'mute');
+    } else {
+      toast(m, 'bad');
+    }
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = old; }
   }

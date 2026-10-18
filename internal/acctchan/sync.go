@@ -171,6 +171,12 @@ func newManagedChannel(platform string, accts []*account.Account) (extchan.Chann
 		Origin:   OriginAccountCenter,
 		Accounts: map[string]string{},
 	}
+	for _, a := range accts {
+		if account.AllowPrivateOf(platform, a.Cred) {
+			def.AllowPrivate = true
+			break
+		}
+	}
 	rebuildCredentials(&def, platform, accts)
 	return def, nil
 }
