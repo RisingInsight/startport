@@ -169,6 +169,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/core.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/keys.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/ext.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/extwiz.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /startport/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /startport/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -215,6 +216,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /startport/api/config", p.withAuth(p.saveConfig))
 	p.mux.HandleFunc("GET /startport/api/ext_channels", p.withAuth(p.extchanStatus))
 	p.mux.HandleFunc("GET /startport/api/ext_intel", p.withAuth(p.extchanIntel))
+	p.mux.HandleFunc("POST /startport/api/ext_channels/probe", p.withAuth(p.extchanProbe))
+	p.mux.HandleFunc("GET /startport/api/ext_presets", p.withAuth(p.extPresets))
 }
 
 // ServeHTTP 统一入口：先写安全响应头再分发，保证页面、静态资源、API

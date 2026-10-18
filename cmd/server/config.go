@@ -9,11 +9,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/prompt"
+	"github.com/RisingInsight/startport/internal/provider"
 )
 
 // Config 顶层配置。
@@ -278,18 +281,64 @@ type Config struct {
 }
 
 // ExtChannel 外部渠道定义（config.ext_channels[]）。字段语义见 internal/extchan。
+//
+// 协议四要素（阶段三）：protocol（3 种）× auth（4 种）× path/headers（静态
+// 配置）。新增平台 = 改配置，代码改动为 0（原生签名类平台除外，见 presets 的
+// native_required）。
 type ExtChannel struct {
-	Name           string   `json:"name"`           // 渠道名（路由 "ext:<name>/"）
-	BaseURL        string   `json:"base_url"`       // OpenAI 兼容根地址
-	APIKey         string   `json:"api_key"`        // 上游 Bearer（仅落盘，不回显）
-	Models         []string `json:"models"`         // 显式模型名单；空 = 自动发现
-	Disabled       bool     `json:"disabled"`       // 停用开关
-	TimeoutSeconds int      `json:"timeout_seconds"` // 请求超时；<=0 回落 120
+	Name    string `json:"name"`     // 渠道名（路由 "ext:<name>/"）
+	BaseURL string `json:"base_url"` // 上游根地址（openai/anthropic/gemini 共用）
+	// APIKey 兼容字段（老配置）：与 credentials 互斥；非空时合成为一条
+	// label="default" 的凭证。仅落盘，接口不回显。
+	APIKey string `json:"api_key"`
+	// Protocol 出站协议：openai（缺省）/ anthropic / gemini。
+	Protocol string `json:"protocol,omitempty"`
+	// Path 自定义路径覆盖（空 = 协议默认模板；支持 {model} 占位）。
+	// 火山 Ark 这类非 /v1 形态必须用它（base 含 /api/v3，历史 endpoint 会补 /v1）。
+	Path string `json:"path,omitempty"`
+	// Auth 渠道级鉴权（凭证级非零时整体覆盖）。
+	Auth *ExtAuth `json:"auth,omitempty"`
+	// Headers 渠道级静态头（禁传输层头；Authorization 请用 auth.mode=custom）。
+	Headers map[string]string `json:"headers,omitempty"`
+	// Models 显式模型名单（优先）。空 = 启动后从模型目录自动发现。
+	Models []string `json:"models"`
+	// Aliases 模型别名表（别名 → 上游模型名）；/v1/models 会暴露别名。
+	Aliases map[string]string `json:"aliases,omitempty"`
+	// Note 渠道备注（情报草稿来源链接等；仅展示，不参与路由）。
+	Note string `json:"note,omitempty"`
+	// Credentials 凭证池（≤20 条；label 渠道内唯一）。
+	Credentials    []ExtCredential `json:"credentials,omitempty"`
+	Disabled       bool            `json:"disabled"`        // 停用开关
+	TimeoutSeconds int             `json:"timeout_seconds"` // 请求超时；<=0 回落 120
 	// AllowPrivate 显式放行内网/回环 base_url（默认 false）。给本机/局域网自建
 	// 聚合器（one-api / LiteLLM 等）的出口：默认拒绝与 global.chat_base 同红线，
 	// 自建场景用户显式打开后自行承担「把渠道 key 发往自己指定内网地址」的责任。
 	// 云元数据端点（169.254.169.254 等）即使打开本开关也一律拒绝（无合法用途）。
 	AllowPrivate bool `json:"allow_private"`
+}
+
+// ExtAuth 鉴权规格（mode: bearer / x-api-key / query / custom）。
+type ExtAuth struct {
+	Mode   string `json:"mode,omitempty"`
+	Param  string `json:"param,omitempty"`  // query 方式参数名，缺省 "key"
+	Header string `json:"header,omitempty"` // custom 方式头名
+}
+
+// Spec 转成 provider.AuthSpec（零值 = 协议默认）。
+func (a *ExtAuth) Spec() provider.AuthSpec {
+	if a == nil {
+		return provider.AuthSpec{}
+	}
+	return provider.AuthSpec{Mode: a.Mode, Param: a.Param, Header: a.Header}
+}
+
+// ExtCredential 渠道下的一条凭证（label 渠道内唯一）。
+type ExtCredential struct {
+	Label     string   `json:"label"`
+	Secret    string   `json:"secret"`               // 仅落盘，接口不回显
+	ExpiresAt string   `json:"expires_at,omitempty"` // YYYY-MM-DD 或 RFC3339
+	Disabled  bool     `json:"disabled,omitempty"`
+	Auth      *ExtAuth `json:"auth,omitempty"` // 整体覆盖渠道级
 }
 
 // Default 默认配置。
@@ -687,21 +736,21 @@ func (c *Config) normalize() error {
 // validateExtChannels 外部渠道静态校验（fail fast：配置错了启动期即报，不带病路由）。
 // 出站 base 的 SSRF 校验（复用 upstream.IsForbiddenOutboundHost 字面判定）在 main
 // 装配期做（那里才依赖 upstream 包；config 包保持零内部依赖）。
+//
+// 校验顺序刻意按「字段在 JSON 里的阅读顺序」：错误信息带 ext_channels[i].xxx
+// 完整路径，用户照抄即可定位。
 func (c *Config) validateExtChannels() error {
+	if len(c.ExtChannels) > 50 {
+		return fmt.Errorf("ext_channels: 渠道数过多（%d > 50）", len(c.ExtChannels))
+	}
 	seen := map[string]bool{}
 	for i, ch := range c.ExtChannels {
 		field := fmt.Sprintf("ext_channels[%d]", i)
 		if ch.Name == "" {
 			return fmt.Errorf("%s.name: 不能为空（路由前缀 ext:<name>/ 依赖它）", field)
 		}
-		if len(ch.Name) > 64 {
-			return fmt.Errorf("%s.name: 过长（>64）", field)
-		}
-		for _, r := range ch.Name {
-			ok := r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_'
-			if !ok {
-				return fmt.Errorf("%s.name: %q 含非法字符（只允许小写字母/数字/连字符/下划线）", field, ch.Name)
-			}
+		if !extChannelNameRe.MatchString(ch.Name) {
+			return fmt.Errorf("%s.name: %q 非法（只允许小写字母/数字/连字符/下划线，须以字母或数字开头，≤64）", field, ch.Name)
 		}
 		if seen[ch.Name] {
 			return fmt.Errorf("%s.name: 渠道名重复 %q", field, ch.Name)
@@ -710,9 +759,164 @@ func (c *Config) validateExtChannels() error {
 		if strings.TrimSpace(ch.BaseURL) == "" {
 			return fmt.Errorf("%s.base_url: 不能为空", field)
 		}
+		if _, err := provider.ParseProtocol(ch.Protocol); err != nil {
+			return fmt.Errorf("%s.protocol: %v", field, err)
+		}
+		if err := validateExtPath(ch.Path); err != nil {
+			return fmt.Errorf("%s.path: %v", field, err)
+		}
+		if err := ch.authSpec().Validate(field + ".auth"); err != nil {
+			return err
+		}
+		if err := validateExtHeaders(field+".headers", ch.Headers, ch.Auth != nil); err != nil {
+			return err
+		}
+		if len(ch.Models) > 200 {
+			return fmt.Errorf("%s.models: 条目过多（%d > 200）", field, len(ch.Models))
+		}
+		for _, m := range ch.Models {
+			if strings.TrimSpace(m) == "" || len(m) > 200 {
+				return fmt.Errorf("%s.models: 模型名必须非空且 ≤200 字符（%q）", field, m)
+			}
+		}
+		if err := validateExtAliases(field+".aliases", ch.Aliases, ch.Models); err != nil {
+			return err
+		}
+		if len(ch.Note) > 500 {
+			return fmt.Errorf("%s.note: 备注过长（>500）", field)
+		}
+		if len(ch.Credentials) > 0 && ch.APIKey != "" {
+			return fmt.Errorf("%s: api_key 与 credentials 互斥（同时配置时不知道用哪条；"+
+				"老配置请保留 api_key，多凭证请改用 credentials 并清空 api_key）", field)
+		}
+		if len(ch.Credentials) > 20 {
+			return fmt.Errorf("%s.credentials: 凭证过多（%d > 20）", field, len(ch.Credentials))
+		}
+		labels := map[string]bool{}
+		for j, cred := range ch.Credentials {
+			cfield := fmt.Sprintf("%s.credentials[%d]", field, j)
+			if !extCredLabelRe.MatchString(cred.Label) {
+				return fmt.Errorf("%s.label: %q 非法（允许字母/数字/点/下划线/连字符，≤64；必须非空）", cfield, cred.Label)
+			}
+			if labels[cred.Label] {
+				return fmt.Errorf("%s.label: 渠道内重复 %q（凭证 label 必须唯一）", cfield, cred.Label)
+			}
+			labels[cred.Label] = true
+			if cred.Secret == "" {
+				return fmt.Errorf("%s.secret: 不能为空", cfield)
+			}
+			if len(cred.Secret) > 8192 {
+				return fmt.Errorf("%s.secret: 过长（>8192）", cfield)
+			}
+			if _, err := extchan.ParseExpiresAt(cred.ExpiresAt); err != nil {
+				return fmt.Errorf("%s.expires_at: %q 无法解析（支持 YYYY-MM-DD 或 RFC3339）", cfield, cred.ExpiresAt)
+			}
+			if err := cred.authSpec().Validate(cfield + ".auth"); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
+
+// authSpec 渠道级鉴权规格（nil → 零值 = 协议默认）。
+func (ch *ExtChannel) authSpec() provider.AuthSpec { return ch.Auth.Spec() }
+
+// credAuthSpec 凭证级鉴权规格（nil → 零值 = 继承渠道级）。
+func (cred *ExtCredential) authSpec() provider.AuthSpec { return cred.Auth.Spec() }
+
+var (
+	// extChannelNameRe 渠道名：小写字母/数字开头，后接小写字母/数字/-/_。
+	extChannelNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
+	// extCredLabelRe 凭证 label：字母/数字/点/下划线/连字符。
+	extCredLabelRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	// extAliasKeyRe 别名键：不含 "/"（"/" 是渠道与模型的分隔符，会破坏路由解析）。
+	extAliasKeyRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+)
+
+// validateExtPath 自定义路径校验：以 / 开头、不含 "://"、不含 ".."、≤512。
+// 允许 {model} 占位（Gemini 式路径需要它）。
+func validateExtPath(path string) error {
+	if path == "" {
+		return nil
+	}
+	if len(path) > 512 {
+		return fmt.Errorf("过长（>512）")
+	}
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("%q 必须以 / 开头（它是相对 base_url 的路径，不是完整 URL）", path)
+	}
+	if strings.Contains(path, "://") {
+		return fmt.Errorf("%q 不能是完整 URL（协议由 protocol 字段决定）", path)
+	}
+	if strings.Contains(path, "..") {
+		return fmt.Errorf("%q 不能含 ..（避免路径穿越）", path)
+	}
+	return nil
+}
+
+// validateExtHeaders 静态头校验：≤20 项、头名合法且不在传输层黑名单、值无换行、
+// 总长 ≤4096、不得出现 Authorization（鉴权统一走 auth 字段，避免两个秘密值
+// 争夺同一个头）。
+func validateExtHeaders(field string, headers map[string]string, authDeclared bool) error {
+	if len(headers) == 0 {
+		return nil
+	}
+	if len(headers) > 20 {
+		return fmt.Errorf("%s: 条目过多（%d > 20）", field, len(headers))
+	}
+	total := 0
+	for k, v := range headers {
+		if provider.HeaderForbidden(k) {
+			return fmt.Errorf("%s.%s: 传输层头禁止覆盖（Host 由 base_url 决定）", field, k)
+		}
+		if !providerHeaderNameRe.MatchString(k) {
+			return fmt.Errorf("%s: 头名 %q 非法（允许字母/数字/连字符，≤64）", field, k)
+		}
+		if strings.ContainsAny(v, "\r\n") {
+			return fmt.Errorf("%s.%s: 值不能含换行", field, k)
+		}
+		if strings.EqualFold(k, "Authorization") {
+			return fmt.Errorf("%s.Authorization: 请改用 auth.mode=custom + header=Authorization（静态头与鉴权字段不能同时声明同一个头）", field)
+		}
+		total += len(k) + len(v)
+	}
+	if total > 4096 {
+		return fmt.Errorf("%s: 总长过大（%d > 4096）", field, total)
+	}
+	_ = authDeclared
+	return nil
+}
+
+// validateExtAliases 别名表校验：≤200、key 合法且不含 "/"、不与 models 重名、
+// value 非空。
+func validateExtAliases(field string, aliases map[string]string, models []string) error {
+	if len(aliases) == 0 {
+		return nil
+	}
+	if len(aliases) > 200 {
+		return fmt.Errorf("%s: 条目过多（%d > 200）", field, len(aliases))
+	}
+	modelSet := make(map[string]bool, len(models))
+	for _, m := range models {
+		modelSet[m] = true
+	}
+	for k, v := range aliases {
+		if !extAliasKeyRe.MatchString(k) {
+			return fmt.Errorf("%s: 别名 %q 非法（允许字母/数字/点/下划线/冒号/连字符，不能含 /，≤64）", field, k)
+		}
+		if strings.TrimSpace(v) == "" || len(v) > 200 {
+			return fmt.Errorf("%s.%s: 目标模型名必须非空且 ≤200 字符", field, k)
+		}
+		if modelSet[k] {
+			return fmt.Errorf("%s.%s: 别名与 models 条目重名（同渠道内会歧义）", field, k)
+		}
+	}
+	return nil
+}
+
+// providerHeaderNameRe 静态头名合法性（与 provider 侧一致的 RFC 7230 token 子集）。
+var providerHeaderNameRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,64}$`)
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom/append 模式）。
 //

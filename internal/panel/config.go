@@ -53,8 +53,18 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 	// scrubExtChannelSentinels 删除、深合并保留原值（避免掩码写回）。
 	if ecs, ok := m["ext_channels"].([]any); ok {
 		for _, e := range ecs {
-			if ec, ok := e.(map[string]any); ok {
-				maskSecret(ec, "api_key")
+			ec, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			maskSecret(ec, "api_key")
+			// 凭证级 secret 同一套脱敏（P0-1）：非空 → 哨兵；保存时
+			// scrubExtCredentialSentinels 按 (渠道 name, 凭证 label) 回填磁盘原值。
+			creds, _ := ec["credentials"].([]any)
+			for _, ce := range creds {
+				if cm, ok := ce.(map[string]any); ok {
+					maskSecret(cm, "secret")
+				}
 			}
 		}
 	}

@@ -5,6 +5,7 @@
 //   - core.js     全局基础设施（状态/主题/工具/trange/密钥门，最先加载）
 //   - app.js      视图主体逻辑（账号池/用量/积分构成/模型/日志/配置/任务）
 //   - keys.js     API 密钥视图（自包含模块）
+//
 // 前端脚本独立为同源文件而非内联，为了启用无需 unsafe-inline 的严格 CSP。
 //
 // 安全头对"面板页面与全部 /startport/api/* 响应"统一生效：CSP 限制脚本只能来自本服务，
@@ -20,7 +21,7 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
-//go:embed app.js core.js keys.js ext.js
+//go:embed app.js core.js keys.js ext.js extwiz.js
 var panelFS embed.FS
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：

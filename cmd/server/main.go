@@ -32,8 +32,8 @@ import (
 	"github.com/RisingInsight/startport/internal/scheduler"
 	"github.com/RisingInsight/startport/internal/server"
 	"github.com/RisingInsight/startport/internal/session"
-	"github.com/RisingInsight/startport/internal/upstream"
 	"github.com/RisingInsight/startport/internal/update"
+	"github.com/RisingInsight/startport/internal/upstream"
 	"github.com/RisingInsight/startport/internal/usage"
 )
 
@@ -42,7 +42,7 @@ import (
 // 用 var 而非 const：const 无法被 `go build -ldflags -X` 注入，CI 也就无法把
 // git tag 打成二进制版本号（自动更新的「版本源」必须可注入）。默认值保留源码
 // 版本，本地裸构建（不带 -X）行为与改动前完全一致。
-var appVersion = "1.0.0"
+var appVersion = "1.1.0"
 
 // appCommit / appBuildTime 构建期元信息，由 CI 经 -ldflags -X 注入（本地构建为空）。
 // 仅用于启动日志与 /startport/api/overview 观测，不参与任何路由或出站决策。
@@ -415,7 +415,7 @@ func main() {
 		Update:      upd,
 		APIKeys:     keyStore,
 		// 外部渠道只读观测（多平台阶段一）：渠道快照 + 额度情报端点。
-		ExtChan:     extMgr,
+		ExtChan: extMgr,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
@@ -800,15 +800,31 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 func extChannelDefs(src []ExtChannel) []extchan.ChannelDef {
 	out := make([]extchan.ChannelDef, 0, len(src))
 	for _, ec := range src {
-		out = append(out, extchan.ChannelDef{
+		def := extchan.ChannelDef{
 			Name:           ec.Name,
 			BaseURL:        ec.BaseURL,
 			APIKey:         ec.APIKey,
+			Protocol:       ec.Protocol,
+			Path:           ec.Path,
+			Auth:           ec.Auth.Spec(),
+			Headers:        ec.Headers,
 			Models:         ec.Models,
+			Aliases:        ec.Aliases,
+			Note:           ec.Note,
 			Disabled:       ec.Disabled,
 			TimeoutSeconds: ec.TimeoutSeconds,
 			AllowPrivate:   ec.AllowPrivate,
-		})
+		}
+		for _, cred := range ec.Credentials {
+			def.Credentials = append(def.Credentials, extchan.CredentialDef{
+				Label:     cred.Label,
+				Secret:    cred.Secret,
+				ExpiresAt: cred.ExpiresAt,
+				Disabled:  cred.Disabled,
+				Auth:      cred.Auth.Spec(),
+			})
+		}
+		out = append(out, def)
 	}
 	return out
 }
@@ -862,18 +878,95 @@ func scrubSecretSentinels(incoming, cur map[string]any) {
 	// 替换不是深合并，哨兵留在项里会把"已设置"写成字面哨兵串。
 	if ecs, ok := incoming["ext_channels"].([]any); ok {
 		for _, e := range ecs {
-			if ec, ok := e.(map[string]any); ok {
-				if v, ok := ec["api_key"].(string); ok && v == panel.SecretSentinel {
-					// 用磁盘上的原渠道值回填（按 name 匹配）。
-					if orig := extChannelKeyByName(cur, ec); orig != "" {
-						ec["api_key"] = orig
-					} else {
-						delete(ec, "api_key")
-					}
+			ec, ok := e.(map[string]any)
+			if !ok {
+				continue
+			}
+			if v, ok := ec["api_key"].(string); ok && v == panel.SecretSentinel {
+				// 用磁盘上的原渠道值回填（按 name 匹配）。
+				if orig := extChannelKeyByName(cur, ec); orig != "" {
+					ec["api_key"] = orig
+				} else {
+					delete(ec, "api_key")
 				}
 			}
+			// 凭证级 secret 哨兵（P0-1）：按 (渠道 name, 凭证 label) 从磁盘回填。
+			// 找不到（新凭证误带哨兵）→ 删除该字段，绝不把哨兵写盘。
+			scrubExtCredentialSentinels(cur, ec)
 		}
 	}
+}
+
+// scrubExtCredentialSentinels 把提交里 credentials[].secret 的脱敏哨兵替换为
+// 磁盘上的原值。数组是整体替换（不做深合并），必须逐项回填——少回填一项就是
+// 把"已设置"写成字面哨兵串，下次请求会把哨兵当密钥发给上游。
+func scrubExtCredentialSentinels(cur, ec map[string]any) {
+	creds, ok := ec["credentials"].([]any)
+	if !ok || len(creds) == 0 {
+		return
+	}
+	orig := extChannelCredsByName(cur, ec)
+	for _, ce := range creds {
+		cm, ok := ce.(map[string]any)
+		if !ok {
+			continue
+		}
+		v, ok := cm["secret"].(string)
+		if !ok || v != panel.SecretSentinel {
+			continue
+		}
+		label, _ := cm["label"].(string)
+		if orig != nil {
+			if s, ok := orig[label]; ok && s != "" {
+				cm["secret"] = s
+				continue
+			}
+		}
+		delete(cm, "secret")
+	}
+}
+
+// extChannelCredsByName 从磁盘配置里取「同名渠道的 label → secret」映射。
+func extChannelCredsByName(cur, ec map[string]any) map[string]string {
+	name, _ := ec["name"].(string)
+	if name == "" {
+		return nil
+	}
+	oldList, ok := cur["ext_channels"].([]any)
+	if !ok {
+		return nil
+	}
+	for _, e := range oldList {
+		old, ok := e.(map[string]any)
+		if !ok {
+			continue
+		}
+		if n, _ := old["name"].(string); n != name {
+			continue
+		}
+		out := map[string]string{}
+		creds, _ := old["credentials"].([]any)
+		for _, ce := range creds {
+			cm, ok := ce.(map[string]any)
+			if !ok {
+				continue
+			}
+			label, _ := cm["label"].(string)
+			secret, _ := cm["secret"].(string)
+			if label != "" {
+				out[label] = secret
+			}
+		}
+		if len(out) == 0 {
+			// 老配置（只有 api_key）在面板里被改写成 credentials[{label:"default"}]
+			// 时，默认凭证的 secret 从 api_key 兜底回填。
+			if k, _ := old["api_key"].(string); k != "" {
+				out["default"] = k
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // extChannelKeyByName 从磁盘配置（cur）里找同名渠道的 api_key 原值。

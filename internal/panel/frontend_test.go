@@ -18,7 +18,9 @@ import (
 // 拼接后再以单文件形态执行——经典脚本共享全局作用域，拼接顺序错误会引入
 // TDZ / 引用错误（如 app.js 顶层用 $ 而 $ 定义在 core.js）。
 // 2026-10-18 增补 ext.js（外部渠道视图，自包含模块，依赖 core.js 的 $/esc/ago/api/dur）。
-var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js"}
+// 2026-10-18 增补 extwiz.js（外部渠道新建/编辑弹层 + 情报草稿；ext.js 在运行时调用
+// 它导出的 openExtWizard，故必须排在 ext.js 之后加载）。
+var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js", "extwiz.js"}
 
 // mergedAppJSPath 拼接全部面板 JS 为临时文件并返回路径（供 node harness 读取）。
 // 这样所有按函数名切片 app.js 的既有测试在拆分后无需改动切法。
@@ -1332,5 +1334,59 @@ func TestPanelTrangeCalFlexBasis(t *testing.T) {
 	rule := html[idx : idx+strings.Index(html[idx:], "}")]
 	if !strings.Contains(rule, "flex: 1 1 0") {
 		t.Fatalf(".tr-cal must use flex-basis 0 (otherwise calendar wraps below quick list): %s", rule)
+	}
+}
+
+// TestExtChannelWizardDOM 外部渠道向导/卡片 DOM 与「不渲染 secret」断言。
+//
+// 为什么钉这些：
+//   - 向导元素缺失 = 前端按钮点了没反应（app.js 的 go() 仍会调 loadExt，页面看似正常）；
+//   - ext.js 只要出现 `.secret` 读取，就可能把秘密值渲染进 DOM（XSS/截图泄露面）。
+func TestExtChannelWizardDOM(t *testing.T) {
+	htmlBytes, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	for _, id := range []string{
+		"view-extchan", "ecCards", "ecSummary", "btnEcNew",
+		"extWizVeil", "ewName", "ewProtocol", "ewBase", "ewPath",
+		"ewAuthMode", "ewAuthParam", "ewAuthHeader", "ewHeaders",
+		"ewModels", "ewAliases", "ewCreds", "ewAddCred", "ewNote",
+		"ewProbe", "ewProbeOut", "ewSave", "ewCancel", "ewErr", "ewNative",
+	} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("index.html 缺外部渠道向导元素 id=%q", id)
+		}
+	}
+	// 情报表新增「草稿」列（表头 9 列，空态 colspan 必须同步，否则表格错位）。
+	if !strings.Contains(html, "<th>草稿</th>") {
+		t.Error("情报表缺「草稿」列")
+	}
+	if !strings.Contains(html, `colspan="9"`) {
+		t.Error("情报空态 colspan 未同步为 9")
+	}
+	// extwiz.js 必须被 index.html 引入且排在 ext.js 之后。
+	extIdx := strings.Index(html, `<script src="ext.js"></script>`)
+	wizIdx := strings.Index(html, `<script src="extwiz.js"></script>`)
+	if extIdx < 0 || wizIdx < 0 || wizIdx < extIdx {
+		t.Error("index.html 必须按 ext.js → extwiz.js 顺序引入脚本")
+	}
+
+	// ext.js 不得读取任何 secret 字段（快照里本来也没有；防回归）。
+	extJS, err := os.ReadFile("ext.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{".secret", "credentials[].secret", "api_key"} {
+		if strings.Contains(string(extJS), bad) {
+			t.Errorf("ext.js 出现了敏感字段引用 %q（状态快照不含秘密值，禁止渲染）", bad)
+		}
+	}
+	// 向导 DOM 不得出现 api_key 输入框（老字段只读保留，向导只写 credentials）。
+	wizHTML := html[strings.Index(html, `id="extWizVeil"`):]
+	wizHTML = wizHTML[:strings.Index(wizHTML, "<!-- 配置 -->")]
+	if strings.Contains(wizHTML, "api_key") {
+		t.Error("向导不应出现 api_key 字段（凭证统一走 credentials[]）")
 	}
 }
