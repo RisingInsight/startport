@@ -597,6 +597,205 @@ func TestProbeDraftPlainOpenAI401Unchanged(t *testing.T) {
 	}
 }
 
+// Qoder 端到端：COSY 头齐全、请求体已编码（不是裸 JSON）、信封解包成
+// OpenAI chunk、首帧预读在字节下发前转 typed error。
+func TestDoQoderAdapterEndToEnd(t *testing.T) {
+	var sawAuth, sawModelKey, sawSigPath, sawBody, sawCT string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawAuth = r.Header.Get("Authorization")
+		sawModelKey = r.Header.Get("X-Model-Key")
+		sawSigPath = r.Header.Get("Cosy-Sigpath")
+		sawCT = r.Header.Get("Content-Type")
+		raw, _ := io.ReadAll(r.Body)
+		sawBody = string(raw)
+		// 上游恒流式 + 信封。
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{\\\"role\\\":\\\"assistant\\\",\\\"content\\\":\\\"pong\\\"}}]}\"}\n\n" +
+			"data: {\"statusCodeValue\":200,\"body\":\"{\\\"choices\\\":[{\\\"delta\\\":{},\\\"finish_reason\\\":\\\"stop\\\"}]}\"}\n\n" +
+			"data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "qoder", BaseURL: "https://gateway.qoder.com.cn.invalid", Protocol: "openai",
+		Adapter:     "qoder",
+		Models:      []string{"Qwen3.8-Flash"},
+		Credentials: []CredentialDef{{Label: "p", Secret: `{"mode":"cn","accessToken":"jt-t","userId":"u-1","machineId":"m-1"}`}},
+	}})
+	// base 指向 mock：适配器把 /algo/... 拼在 base 后（ SigPath 剥掉 /algo 前缀）。
+	chDef := m.Get("qoder")
+	chDef.mu.Lock()
+	chDef.BaseURL = upstream.URL
+	chDef.mu.Unlock()
+
+	res, err := m.Do(context.Background(), ch2(m, "qoder"), &OutRequest{
+		Body:         []byte(`{"model":"Qwen3.8-Flash","messages":[{"role":"user","content":"hi"}]}`),
+		DisplayModel: "ext:qoder/Qwen3.8-Flash",
+	})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != http.StatusOK {
+		t.Fatalf("status = %d: %s", res.Status, res.Body)
+	}
+	if !strings.HasPrefix(sawAuth, "Bearer COSY.") {
+		t.Errorf("Authorization = %q, want Bearer COSY.<payload>.<sig>", sawAuth)
+	}
+	if sawModelKey != "qfmodel" {
+		t.Errorf("X-Model-Key = %q, want qfmodel", sawModelKey)
+	}
+	if sawSigPath != "/api/v2/service/pro/sse/agent_chat_generation" {
+		t.Errorf("Cosy-Sigpath = %q（剥 /algo 前缀）", sawSigPath)
+	}
+	if sawCT != "application/json" {
+		t.Errorf("Content-Type = %q", sawCT)
+	}
+	if strings.HasPrefix(sawBody, "{") {
+		t.Errorf("请求体应是编码后形态（不是裸 JSON）: %.60s", sawBody)
+	}
+	// 客户端拿到的是解包后的 OpenAI 帧（非流式聚合）。
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(res.Body, &resp); err != nil {
+		t.Fatalf("响应不是 JSON: %s", res.Body)
+	}
+	if len(resp.Choices) != 1 || resp.Choices[0].Message.Content != "pong" {
+		t.Errorf("信封解包/聚合异常: %s", res.Body)
+	}
+	_ = ch2
+	_ = chDef
+}
+
+// ch2 取渠道（测试辅助，避免与局部变量名冲突）。
+func ch2(m *Manager, name string) *Channel { return m.Get(name) }
+
+// 首帧预读：HTTP 200 + 排队信封 → 在字节下发前转 typed error（503
+// qoder_model_busy），且不罚渠道（冷却不生效，紧跟着的请求还能正常走）。
+func TestDoQoderStreamQueuedNoChannelPenalty(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"statusCodeValue\":403,\"body\":\"{\\\"code\\\":\\\"10605\\\",\\\"message\\\":\\\"排队\\\",\\\"retryAfterSeconds\\\":9}\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "qoder", BaseURL: srv.URL, Adapter: "qoder",
+		Models:      []string{"Qwen3.8-Flash"},
+		Credentials: []CredentialDef{{Label: "p", Secret: `{"mode":"cn","accessToken":"jt-t","userId":"u-1"}`}},
+	}})
+	ch := m.Get("qoder")
+	_, err := m.Do(context.Background(), ch, &OutRequest{
+		Body:         []byte(`{"model":"Qwen3.8-Flash","messages":[]}`),
+		Stream:       true,
+		DisplayModel: "ext:qoder/Qwen3.8-Flash",
+	})
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("应为 typed error, got %v", err)
+	}
+	if he.Status != http.StatusServiceUnavailable || he.Code != "qoder_model_busy" {
+		t.Errorf("排队语义异常: %+v", he)
+	}
+	if ch.Cooldown() {
+		t.Error("排队不应触发渠道冷却（既不是凭证问题也不是账号问题）")
+	}
+}
+
+// 401（业务码 105）→ 鉴权语义：凭证标 invalid + typed error token_invalid。
+func TestDoQoderStreamAuthError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"statusCodeValue\":401,\"body\":\"{\\\"code\\\":\\\"105\\\",\\\"message\\\":\\\"expired\\\"}\"}\n\n"))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "qoder", BaseURL: srv.URL, Adapter: "qoder",
+		Models:      []string{"Qwen3.8-Flash"},
+		Credentials: []CredentialDef{{Label: "p", Secret: `{"mode":"cn","accessToken":"jt-t","userId":"u-1"}`}},
+	}})
+	ch := m.Get("qoder")
+	_, err := m.Do(context.Background(), ch, &OutRequest{
+		Body:         []byte(`{"model":"Qwen3.8-Flash","messages":[]}`),
+		Stream:       true,
+		DisplayModel: "ext:qoder/Qwen3.8-Flash",
+	})
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("应为 typed error, got %v", err)
+	}
+	if he.Status != http.StatusUnauthorized || he.Code != "token_invalid" {
+		t.Errorf("401 语义异常: %+v", he)
+	}
+	if ch.CredentialByLabel("p").State() != CredInvalid {
+		t.Error("鉴权失败应把凭证标为 invalid")
+	}
+}
+
+// 未知名模型：硬失败 model_not_found（不静默回落）。
+func TestDoQoderUnknownModelHardFail(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("模型未知名不应发起上游请求")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "qoder", BaseURL: srv.URL, Adapter: "qoder",
+		Models:      []string{"Qwen3.8-Flash"},
+		Credentials: []CredentialDef{{Label: "p", Secret: `{"mode":"cn","accessToken":"jt-t","userId":"u-1"}`}},
+	}})
+	_, err := m.Do(context.Background(), m.Get("qoder"), &OutRequest{
+		Body:         []byte(`{"model":"claude-sonnet-4","messages":[]}`),
+		DisplayModel: "ext:qoder/claude-sonnet-4",
+	})
+	var he *Error
+	if !errors.As(err, &he) {
+		t.Fatalf("应为 typed error, got %v", err)
+	}
+	if he.Code != "model_not_found" || he.Status != http.StatusBadRequest {
+		t.Errorf("错误语义异常: %+v", he)
+	}
+}
+
+// 静态目录：FetchModels / 探测都不发 HTTP（零上游请求）。
+func TestQoderStaticModelsNoHTTP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("静态目录适配器不应发起 HTTP 请求")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	m.ReplaceAll([]ChannelDef{{
+		Name: "qoder", BaseURL: srv.URL, Adapter: "qoder",
+		Credentials: []CredentialDef{{Label: "p", Secret: `{"mode":"cn","accessToken":"jt-t","userId":"u-1"}`}},
+	}})
+	ids, err := m.FetchModels(context.Background(), m.Get("qoder"))
+	if err != nil {
+		t.Fatalf("FetchModels: %v", err)
+	}
+	if len(ids) == 0 || ids[0] != "Qwen3.8-Flash" {
+		t.Errorf("静态目录 = %v", ids)
+	}
+	res := m.ProbeDraft(context.Background(), ChannelDef{
+		Name: "qoder", BaseURL: srv.URL, Adapter: "qoder",
+		Credentials: []CredentialDef{{Label: "p", Secret: `{"mode":"cn","accessToken":"jt-t","userId":"u-1"}`}},
+	}, "")
+	if !res.OK || res.ModelsCount == 0 {
+		t.Errorf("探测异常: %+v", res)
+	}
+}
+
 // 名字归一：配置里写 "Loomy" 也能用（大小写不敏感）。
 func TestAdapterNameNormalized(t *testing.T) {
 	m := New(Config{TimeoutSeconds: 5})

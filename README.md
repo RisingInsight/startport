@@ -150,6 +150,20 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 
 > 已知边界（AutoClaw）：① 远程模型目录（`/proxy/autoclaw-model-config`）与 token 刷新都需要客户端签名，本期用静态路由表与手工粘贴替代——上游新增模型时，可在渠道 `models` 里显式登记，`X-Request-Model` 走显式前缀透传；② 上游闸门（头集合 / system 白名单 / max_tokens）是**实测行为**，可能随上游版本变化，`406` 文案里列了排查方向。
 
+**`qoder` / `qoder-intl`（阿里 Qoder，中国版 / 国际版）**
+
+- **COSY 自签名**：推理网关不认 Bearer——每个请求动态构造：一次性 AES-128-CBC 密钥加密用户身份 JSON（`info`）、内置 RSA 公钥加密该密钥（`key`）、`MD5(payload \n key \n 时间戳 \n 编码后请求体 \n 签名路径)` 做签名，拼成 `Authorization: Bearer COSY.<payload>.<签名>` + 一组 `Cosy-*` 头。请求体**先编码再签名**（base64 → 分段重排 → 自定义字母表替换）。签名密钥随代码分发（公钥，非机密材料）。
+- **凭证是整个账号 JSON**（裸 token 不够——COSY 签名需要用户与设备标识）：
+  ```json
+  {"mode":"global","accessToken":"jt-…","userId":"…","machineId":"…","nickname":"…","email":"…"}
+  ```
+  `machineId` 缺省时按凭证确定性派生（同账号跨重启稳定）。`mode` 与适配器不匹配会直接报错（两站令牌不通用）。
+- **两个地区 = 两个适配器 + 令牌分流硬规则**：中国版 `qoder`（base `https://gateway.qoder.com.cn`）、国际版 `qoder-intl`——**作业令牌（`jt-`）必须走 `https://api2.qoder.sh`、设备流令牌（`dt-`）走 `https://api3.qoder.sh`**，打错主机稳定 403 Login expired；错误文案里会提示令牌类型与主机是否匹配。
+- **信封与业务错误**：HTTP 恒 200，错误在 SSE 信封 `statusCodeValue` 里——网关在状态层归一：排队（业务码 10605）→ **503** `qoder_model_busy`（不是登录态/额度问题，稍后重试即可，不罚凭证也不罚渠道）；额度/限流 → 429 `qoder_quota_exceeded`；401/业务码 105 → 401 `token_invalid`（重新粘贴）。流式下靠**首帧预读**在向客户端写任何字节之前完成归一（换证无损）。
+- **模型未知名是硬失败**：`model_not_found`，**不**静默回落（与 AutoClaw 的 `zai_auto` 回退不同）——静态表在 README/预设里，上游新增模型请等适配器更新。
+- **思考拆解**：上游可能把思考混在正文里（`<thinking>` 等标签），适配器跨分片拆解成 `reasoning_content`；"关闭思考"降级为不指定（上游无法真正关闭，发 false 会断连）。
+- **不做**：token 刷新 / PAT 兑换 / 上下文档位 / 签到 / 额度查询（设计文档 §1.2，每项的后果与替代见 `starport-qoder-design.md`）。
+
 后续规划：`qoder` / `trae` 这类需要客户端签名或有状态转发的平台，将按同一套 `RegisterNative` 接口逐个补齐（签名类还需要设备指纹与登录态，工作量大得多）。
 
 ### StarPort 相对上游的自有增量

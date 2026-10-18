@@ -60,12 +60,27 @@ var presetList = []Preset{
 		DocsURL:        "https://copilot.tencent.com/",
 	},
 	{
-		Key: "qoder-cn", Name: "Qoder（阿里）", Vendor: "阿里巴巴",
-		Aliases:  []string{"qoder", "qoder cn"},
-		Protocol: ProtocolOpenAI, Auth: AuthSpec{Mode: AuthBearer},
-		NativeRequired: true,
-		Note:           "客户端侧 COSY 签名，静态 key 无法直连；需原生适配器（P2）。",
-		DocsURL:        "https://qoder.com/",
+		Key: "qoder", Name: "Qoder（阿里 · 中国版）", Vendor: "阿里",
+		Aliases: []string{"qoder", "qoder cn"},
+		// 原生适配器（中国版）：推理网关走 COSY 自签名（RSA 包 AES 密钥 + MD5
+		// 签名 + 自定义 base64 编码），静态 key 无法直连——adapter 覆盖。
+		Protocol: ProtocolOpenAI, Adapter: QoderAdapterName,
+		Models:         []string{"Qwen3.8-Flash", "Qwen3.8-Max", "Auto", "GLM-5.3"},
+		NativeRequired: false,
+		Note: "原生适配器（adapter=qoder，中国版）：base 建议 https://gateway.qoder.com.cn（以官方为准）；" +
+			"凭证存整个账号 JSON（accessToken/userId/machineId/nickname/email，COSY 签名需要用户与设备标识，裸 token 不够）；" +
+			"模型未知名是硬失败（不静默回落）；业务错误在 SSE 信封里（HTTP 恒 200），排队会返回 503 qoder_model_busy；" +
+			"401 = token 失效需重新粘贴。签名用 RSA/AES/MD5，密钥随代码分发。",
+	},
+	{
+		Key: "qoder-intl", Name: "Qoder（阿里 · 国际版）", Vendor: "阿里",
+		Aliases:  []string{"qoder intl", "qoder-intl"},
+		Protocol: ProtocolOpenAI, Adapter: QoderIntlAdapterName,
+		Models:         []string{"Qwen3.8-Flash", "Qwen3.8-Max", "Ultimate", "GLM-5.3"},
+		NativeRequired: false,
+		Note: "原生适配器（adapter=qoder-intl，国际版）：base 建议 https://api2.qoder.sh（PAT 换来的作业令牌 jt-；" +
+			"设备流令牌 dt- 走 https://api3.qoder.sh——打错主机会 403 Login expired，以官方为准）；" +
+			"凭证与签名同中国版（账号 JSON），但两站令牌不通用；模型未知名硬失败。",
 	},
 	{
 		Key: "trae", Name: "TRAE（字节）", Vendor: "字节跳动",
