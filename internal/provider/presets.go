@@ -26,6 +26,8 @@ type Preset struct {
 	Aliases []string `json:"aliases,omitempty"`
 	// Protocol 建议出站协议。
 	Protocol Protocol `json:"protocol"`
+	// Adapter 建议原生适配器名（空 = 按协议；如 "loomy"）。
+	Adapter string `json:"adapter,omitempty"`
 	// Auth 建议鉴权形态。
 	Auth AuthSpec `json:"auth"`
 	// BaseURL 建议 base_url——**恒为空**（必须由用户确认后填）。
@@ -167,11 +169,17 @@ var presetList = []Preset{
 		Note:           "入口形态待核实；平台侧若需签名/特殊头，静态 key 无法直连（需原生适配）。",
 	},
 	{
-		Key: "loomy", Name: "Loomy", Vendor: "Loomy",
-		Aliases:  []string{"loomy"},
-		Protocol: ProtocolOpenAI, Auth: AuthSpec{Mode: AuthBearer},
-		NativeRequired: true,
-		Note:           "未见公开标准 API；需原生适配器（P2）。",
+		Key: "loomy", Name: "Loomy（讯飞）", Vendor: "Loomy",
+		Aliases: []string{"loomy", "讯飞 loomy"},
+		// 原生适配器样板：报文是 OpenAI 兼容，但鉴权是**双头**（token +
+		// Authorization: Bearer），四种 auth 都表达不了 → 用 adapter 覆盖。
+		Protocol: ProtocolOpenAI, Adapter: LoomyAdapterName,
+		// Auth 留空：adapter 非空时配置层明确禁止再配 auth（校验会报错）。
+		NativeRequired: false,
+		Note: "原生适配器（adapter=loomy）：base 建议 https://loomyad.xunfei.cn/api/v1（以官方为准）；" +
+			"凭证填 Loomy 客户端登录态里的 session，适配器会自动注入 token + Authorization 双头；" +
+			"session 有效期 14 天且上游无续期接口，过期需重新登录后更新 secret；" +
+			"聊天转发不需要签名（HMAC 只用于账号登录，本项目不做登录）。",
 	},
 	{
 		Key: "huawei-codearts", Name: "华为云码道 CodeArts", Vendor: "华为云",

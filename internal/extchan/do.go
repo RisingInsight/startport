@@ -141,6 +141,48 @@ func (m *Manager) BuildTarget(ch *Channel, cred *Credential, displayModel string
 	}
 }
 
+// usesNativeAdapter 报告该渠道是否挂了原生适配器。
+//
+// 用途：原生适配器承载的平台可能用非 OpenAI 的错误体（Loomy 是 {code,desc}），
+// 错误路径也要过 ConvertResponse 才能给客户端一个可解析的信封；而三协议基准
+// （adapter 为空）的错误体保持逐字节透传（保留上游 error.code，零回归）。
+func (c *Channel) usesNativeAdapter() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.Adapter != ""
+}
+
+// adapterSelection 读 (protocol, adapter)（加锁；零值协议归一为 openai）。
+func (c *Channel) adapterSelection() (provider.Protocol, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	proto := c.Protocol
+	if !proto.Valid() {
+		proto = provider.ProtocolOpenAI
+	}
+	return proto, c.Adapter
+}
+
+// adapterFor 解析该渠道要用的适配器。
+//
+//	adapter 非空 → 原生适配器（名字必须已注册、协议必须与 protocol 一致）
+//	adapter 为空 → 协议适配器（三协议基准，老配置行为不变）
+//
+// 解析失败返回 typed error（code=ext_adapter_unknown）：配置写错必须显式暴露，
+// 绝不静默回落到协议适配器——那会用错鉴权方式打上游，症状是难以定位的 401。
+func adapterFor(ch *Channel) (provider.Adapter, error) {
+	proto, name := ch.adapterSelection()
+	a, err := provider.AdapterFor(proto, name)
+	if err != nil {
+		return nil, &Error{
+			Status:  http.StatusBadRequest,
+			Code:    "ext_adapter_unknown",
+			Message: err.Error(),
+		}
+	}
+	return a, nil
+}
+
 // Do 执行一次出站请求（含选证、换证与状态记账）。
 //
 // 返回：
@@ -169,7 +211,10 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 	if !proto.Valid() {
 		proto = provider.ProtocolOpenAI // 防御：未走 ReplaceAll 的零值协议
 	}
-	adapter := provider.DefaultRegistry.MustGet(proto)
+	adapter, err := adapterFor(ch)
+	if err != nil {
+		return nil, err
+	}
 
 	tried := make(map[string]bool, maxCredAttempts)
 	var last *DoResult
@@ -221,13 +266,33 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 			}
 		}
 
+		// 原生适配器可以把"状态码与 body 语义不一致"的响应归一（Loomy 用
+		// `HTTP 200 + {code,desc}` 表达 session 过期）。不归一的话，按状态码
+		// 判定成功的 SDK 会把错误当正常响应下发。
+		//
+		// 只在非流式做：流式 body 是待转发的流，预读会破坏逐字节透传
+		// （README 已把"流式不做归一"记为已知边界）。
+		if !req.Stream {
+			if sn, ok := adapter.(provider.StatusNormalizer); ok {
+				status, body = sn.NormalizeStatus(status, body)
+				if status >= 400 {
+					// 适配器侧拿不到 Target（接口不带 secret），这里补一次带本文
+					// 凭证的脱敏，防上游把 session 回显进错误文案。
+					body = []byte(provider.ScrubSecrets(string(body), target.Secret))
+				}
+			}
+		}
+
 		if status >= 400 {
 			if rc != nil {
 				_ = rc.Close()
 				rc = nil
 			}
 			// 跨协议错误折回 OpenAI 信封（message 截断 + 脱敏）。
-			if proto != provider.ProtocolOpenAI {
+			// 原生适配器也一并折回：它承载的平台可能用非 OpenAI 的错误体
+			// （如 Loomy 的 {code,desc}），不转换客户端就解析不了；
+			// 三协议基准（adapter 为空）的错误体仍然逐字节透传，零回归。
+			if proto != provider.ProtocolOpenAI || ch.usesNativeAdapter() {
 				body = adapter.ConvertResponse(target, status, body)
 			}
 			last = &DoResult{

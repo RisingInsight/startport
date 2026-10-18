@@ -35,6 +35,16 @@ func TestPresetsCatalog(t *testing.T) {
 		if p.Note == "" {
 			t.Errorf("预设 %q 缺备注", p.Key)
 		}
+		// 原生适配器预设的硬约束：名字必须已注册，且不能再声明 auth
+		// （配置层 forbid 两者并存，预设不该给出自相矛盾的建议）。
+		if p.Adapter != "" {
+			if _, ok := Native(p.Adapter); !ok {
+				t.Errorf("预设 %q 的 adapter %q 未注册", p.Key, p.Adapter)
+			}
+			if !p.Auth.IsZero() {
+				t.Errorf("预设 %q 声明了 adapter 又声明了 auth: %+v", p.Key, p.Auth)
+			}
+		}
 	}
 	// 三个协议基准必须在。
 	for _, k := range []string{"siliconflow", "google-gemini", "anthropic-official", "volc-ark", "openrouter"} {
@@ -42,8 +52,9 @@ func TestPresetsCatalog(t *testing.T) {
 			t.Errorf("缺关键预设 %q", k)
 		}
 	}
-	// native_required 至少覆盖 Qoder/TRAE/CatPaw/Loomy/华为云码道。
-	for _, k := range []string{"qoder-cn", "trae", "catpaw", "loomy", "huawei-codearts"} {
+	// native_required 至少覆盖 Qoder/TRAE/CatPaw/华为云码道。
+	// Loomy 已由原生适配器（adapter=loomy）覆盖，故不再标注（见 v1.2.0）。
+	for _, k := range []string{"qoder-cn", "trae", "catpaw", "huawei-codearts"} {
 		found := false
 		for _, p := range list {
 			if p.Key == k {
@@ -55,6 +66,18 @@ func TestPresetsCatalog(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("缺预设 %q", k)
+		}
+	}
+	// loomy 反过来：必须挂原生适配器且不再 native_required（可由用户直接接入）。
+	for _, p := range list {
+		if p.Key != "loomy" {
+			continue
+		}
+		if p.Adapter != LoomyAdapterName {
+			t.Errorf("loomy 预设应挂 adapter=%q, got %q", LoomyAdapterName, p.Adapter)
+		}
+		if p.NativeRequired {
+			t.Error("loomy 已有原生适配器，不应再标 native_required")
 		}
 	}
 }

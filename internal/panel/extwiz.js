@@ -85,6 +85,7 @@ async function extDraftFromIntel(it) {
     name: name,
     base_url: '',
     protocol: p ? p.protocol : 'openai',
+    adapter: (p && p.adapter) || '',
     path: (p && p.path) || '',
     auth: (p && p.auth) || { mode: 'bearer' },
     headers: (p && p.headers) || {},
@@ -116,12 +117,15 @@ function openExtWizard(channel, draft) {
   ewEl('ewName').disabled = false;
   ewEl('ewBase').value = src.base_url || '';
   ewEl('ewProtocol').value = src.protocol || 'openai';
+  if (ewEl('ewAdapter')) ewEl('ewAdapter').value = src.adapter || '';
   ewEl('ewPath').value = src.path || '';
   ewEl('ewTimeout').value = src.timeout_seconds ? String(src.timeout_seconds) : '';
   const auth = src.auth || {};
   ewEl('ewAuthMode').value = auth.mode || '';
   ewEl('ewAuthParam').value = auth.param || '';
   ewEl('ewAuthHeader').value = auth.header || '';
+  // 适配器与鉴权互斥：auth 字段填完再收窄 UI（顺序反了会把已填的 auth 留在禁用控件里）。
+  ewSyncAdapter();
   ewEl('ewHeaders').value = Object.keys(src.headers || {})
     .map(k => k + ': ' + src.headers[k]).join('\n');
   ewEl('ewModels').value = (src.models || []).join('\n');
@@ -167,6 +171,26 @@ function ewErr(msg, show) {
   if (!el) return;
   el.textContent = msg || '';
   el.hidden = !show;
+}
+
+/* ewSyncAdapter 原生适配器与「鉴权方式」互斥：选了适配器就置灰并清空 auth 字段。
+   服务端对两者并存是硬错误（adapter 自己注入鉴权），这里提前把 UI 收窄，
+   避免用户配完再被保存校验打回。 */
+function ewSyncAdapter() {
+  const sel = ewEl('ewAdapter');
+  const on = !!(sel && sel.value);
+  ['ewAuthMode', 'ewAuthParam', 'ewAuthHeader'].forEach(id => {
+    const el = ewEl(id);
+    if (!el) return;
+    el.disabled = on;
+    if (on && id === 'ewAuthMode') el.value = '';
+  });
+  const hint = ewEl('ewAuthHint');
+  if (hint) {
+    hint.textContent = on
+      ? '已选原生适配器：鉴权由适配器注入（此处置灰）'
+      : '选了原生适配器时此项由适配器接管（会置灰）';
+  }
 }
 
 /* ewAddCredRow 渲染一行凭证。cred 非空 = 来自已保存配置（secret 可能为哨兵）。 */
@@ -241,6 +265,10 @@ function ewCollect(strict) {
   const ch = { name: name };
   if (base) ch.base_url = base;
   ch.protocol = ewEl('ewProtocol').value || 'openai';
+  // 原生适配器（空 = 按协议）。非空时 auth 一律不发：服务端对两者并存是硬错误，
+  // 且 ui 已把鉴权控件置灰（ewSyncAdapter）。
+  const adapter = String((ewEl('ewAdapter') || {}).value || '').trim();
+  if (adapter) ch.adapter = adapter;
   const path = String(ewEl('ewPath').value || '').trim();
   if (path) ch.path = path;
   const tmo = parseInt(ewEl('ewTimeout').value, 10);
@@ -254,7 +282,7 @@ function ewCollect(strict) {
   const note = String(ewEl('ewNote').value || '').trim();
   if (note) ch.note = note;
 
-  const mode = ewEl('ewAuthMode').value || '';
+  const mode = adapter ? '' : (ewEl('ewAuthMode').value || '');
   if (mode) {
     const auth = { mode: mode };
     if (mode === 'query') auth.param = String(ewEl('ewAuthParam').value || '').trim() || 'key';
@@ -285,7 +313,8 @@ function ewCollect(strict) {
     }
     if (expires) item.expires_at = expires;
     if (disabled) item.disabled = true;
-    if (row.dataset.auth) {
+    // 原生适配器独占鉴权：不再回传凭证级 auth（服务端拒绝两者并存）。
+    if (!adapter && row.dataset.auth) {
       try { item.auth = JSON.parse(row.dataset.auth); } catch (e) {}
     }
     creds.push(item);
@@ -381,6 +410,7 @@ async function ewProbe() {
 
 if (ewEl('extWizVeil')) {
   if (ewEl('ewAddCred')) ewEl('ewAddCred').onclick = () => ewAddCredRow(null);
+  if (ewEl('ewAdapter')) ewEl('ewAdapter').onchange = ewSyncAdapter;
   if (ewEl('ewSave')) ewEl('ewSave').onclick = ewSave;
   if (ewEl('ewProbe')) ewEl('ewProbe').onclick = ewProbe;
   if (ewEl('ewCancel')) ewEl('ewCancel').onclick = closeExtWizard;

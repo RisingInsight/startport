@@ -86,7 +86,7 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 - **别名与路由**：模型名 `ext:<渠道名>/<模型名或别名>` 精确路由；别名条目会出现在 `/v1/models`（带 `alias_of`）。裸名在渠道间唯一匹配时也可直达（多渠道同名 → 要求前缀消歧）。入站 `/v1/chat/completions` 只认前缀形态（裸名仍走 CodeBuddy 池，与阶段一一致）；`/v1/messages` 走完整解析（含裸名）。
 - **面板与向导**：面板「外部渠道」视图是**渠道卡片 + 凭证列表 + 新建/编辑弹层**：每张卡显示协议、派生状态（可用 / 冷却 / 全部凭证失效 / 全部凭证冷却 / 已停用）、凭证可用数、模型数、最近成功、最近错误；每条凭证显示 label / 状态 / 请求数 / token 累计 / 过期时间 / 最近错误，并可单独「测试」。**写路径只有一条**：`POST /startport/api/config` 提交 `ext_channels` 数组。
 - **连通性测试（只读）**：`POST /startport/api/ext_channels/probe` 只发模型目录请求（不发 chat、不消耗额度），独立 10s 超时、8MiB 上限、错误摘要脱敏；**不落盘、不改渠道状态、不计用量**。
-- **情报 → 草稿**：面板内置 21 个平台预设（`GET /startport/api/ext_presets`），情报表格的「生成草稿」会把渠道名、建议协议/鉴权、来源链接预填到向导；`base_url` **永远为空**、凭证必须你自己填（情报是第三方数据，会过期）。`native_required=true` 的平台（Qoder / TRAE / AutoClaw / CatPaw / Loomy / 华为云码道 / MonkeyCode / Antigravity / WorkBuddy）按钮置灰并说明原因——它们需要客户端签名、设备指纹或有状态转发。
+- **情报 → 草稿**：面板内置 21 个平台预设（`GET /startport/api/ext_presets`），情报表格的「生成草稿」会把渠道名、建议协议/鉴权/原生适配器、来源链接预填到向导；`base_url` **永远为空**、凭证必须你自己填（情报是第三方数据，会过期）。`native_required=true` 的平台（Qoder / TRAE / AutoClaw / CatPaw / 华为云码道 / MonkeyCode / Antigravity / WorkBuddy）按钮置灰并说明原因——它们需要客户端签名、设备指纹或有状态转发。Loomy 已由原生适配器覆盖（见下文「原生 Agent 适配器」），不再置灰。
 - **观测**：`/status` 新增 `ext_channels` 键（协议、派生状态、凭证计数与逐凭证运行态，**只增键**，账号池字段不变）；面板渠道卡片展示同样的数据。凭证用量为**本进程内累计**（重启清零），长期趋势请看用量视图的按渠道口径（`realm=ext`）。
 
 **能力边界（不是 bug，已刻意收窄）**
@@ -105,6 +105,38 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 - 任何接口、日志、错误体都不出现凭证明文：`GET /startport/api/config` 对 `api_key` 与 `credentials[].secret` 一律返回哨兵 `__STARPORT_SECRET_SET__`，保存时按 (渠道名, 凭证 label) 从磁盘回填原值；`query` 鉴权的 URL 在日志/错误里先做 `?key=***` 脱敏；上游错误原文截断后再脱敏。
 - `base_url` 在**启动与保存双期**做 SSRF 校验（内网/链路本地/云元数据字面地址拒绝；自建聚合器可显式 `allow_private: true` 放行内网，元数据端点恒拒）；`path` 不能是完整 URL、不能含 `..`；`headers` 禁止 `Host`/`Content-Length`/`Transfer-Encoding`/`Connection`/`Proxy-*`，`Authorization` 必须走 `auth` 字段。
 - 探测与真实请求不共用超时体系（独立 client），但共用 Transport 复用 TLS 连接池；探测有并发闸（4）。
+
+#### 原生 Agent 适配器（`adapter`）
+
+`protocol` 决定**报文形态**（URL 模板 + body 编解码），`adapter` 决定**平台契约**（鉴权怎么发、要不要专属头）。两者正交：同一份 OpenAI 报文，普通上游走 `bearer` 就够了，而有些客户端类平台要求"同一个 session 同时出现在两个头里"，四种 `auth` 表达不了（每种只写一个头）。这类平台走命名适配器：
+
+```jsonc
+{
+  "name": "loomy",
+  "base_url": "https://loomyad.xunfei.cn/api/v1",
+  "protocol": "openai",     // 报文形态
+  "adapter": "loomy",       // 平台契约：双头 session
+  "credentials": [{ "label": "primary", "secret": "<Loomy session>" }]
+  // 注意：adapter 非空时不能再配 auth（校验会直接拒绝）
+}
+```
+
+当前内置一个：**`loomy`（讯飞 Loomy）**
+
+- **双头鉴权**：`token: <session>` 与 `Authorization: Bearer <session>` **同时**发。两个网关（模型 / 积分）对头名偏好不同，官方客户端也是两个都发；`headers` 里写 `token`/`Authorization` 覆盖不掉（平台契约由适配器独占）。
+- **鉴权与登录分离**：聊天转发**不需要 HMAC 签名**——签名只服务账号面（短信登录、签到），本项目不做登录，你只需把客户端登录态里的 session 粘进凭证。
+- **session 14 天、无续期**：上游没有 refresh 接口。过期有两种表达，都会被归一成 OpenAI 的 `authentication_error` / `session_expired` 信封（文案写明"14 天 / 无续期 / 请重新登录"）：
+  - `HTTP 200` + `{code:"020002"}`（或 `100002`）——**状态码也会被改成 401**，否则按状态码判定的 SDK 会把过期当成功；
+  - 裸 `HTTP 401` / `403`（body 是 OpenAI 信封或纯文本均可）。
+  此时请重新登录 Loomy 并更新该凭证的 secret（改 secret = 新凭证，冷却/失效状态会重置）。
+- **业务错误不会被当成 200 成功**：其它 `{code,desc}` 业务码（内容审核 / 参数 / 额度等）会被归成 **`400`** + `upstream_error`（`error.code = loomy_<code>`）。用 400 而不是 5xx 是刻意的：5xx 会触发渠道短冷却，而这类错误换证或冷却都解决不了；4xx/5xx 自带语义的状态码保持原样（例如 429 仍然是 429，冷却策略按限流退避走）。
+- **目录与聊天同源**：`GET {base}/models`、`POST {base}/chat/completions`，都用同一对头。
+- **base 不要写 `/v1`**：Loomy 的版本段是 `/api/v1`。`base_url` 建议 `https://loomyad.xunfei.cn/api/v1`（以官方为准）；配 `adapter` 后**不会**触发 OpenAI 那条"补 /v1"的历史规则。
+- **配置错就是硬错**：`adapter` 写错一个字母不会静默回落到协议适配器，启动/保存时直接报错并列出可用值（`ext_adapter_unknown`）。
+
+> 已知边界：Loomy 若在**流式**请求上返回 `200` + `{code,desc}`（而不是 SSE），适配器按"原样透传"处理，客户端会表现为流式解析失败——用非流式或先探测一次即可确认凭证是否有效。
+
+后续规划：`autoclaw` / `qoder` / `trae` 这类需要客户端签名或有状态转发的平台，将按同一套 `RegisterNative` 接口逐个补齐（签名类还需要设备指纹与登录态，工作量大得多）。
 
 ### StarPort 相对上游的自有增量
 
@@ -223,7 +255,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` / `header_timeout_seconds` / `idle_timeout_seconds` | `120` / 回落 / `300` | 三段超时分别管：短 RPC 总时长 / 聊天首字节前 / 流中空闲。聊天无总时长上限，长思考不掐断 |
 | `upstream.user_agent` | 空 | 出站 UA 覆盖；空保持现状（可配 `WorkBuddy/<ver>` 让官网「使用端」正确归因） |
 | `upstash.url` / `token` | 空 | Redis 镜像（可选），粘性绑定与池状态防重启丢失 |
-| `ext_channels[]` | `[]` | 外部渠道（多平台 Provider）：`name` / `base_url` / `protocol`（openai 缺省 / anthropic / gemini）/ `path`（路径覆盖，支持 `{model}`）/ `auth`（bearer / x-api-key / query / custom）/ `headers`（静态头，禁传输层头）/ `models`（显式名单，空 = 自动发现）/ `aliases`（别名 → 上游模型名）/ `credentials[]`（`label`/`secret`/`expires_at`/`disabled`/`auth`，≤20 条）/ `note` / `disabled` / `timeout_seconds` / `allow_private`。`api_key` 为兼容字段（与 `credentials` 互斥，非空时合成 `label="default"` 凭证）。模型名 `ext:<渠道>/<模型或别名>` 路由；凭证池按配置顺序选证，遇 429 / 401 / 403 自动换下一条凭证重试（单请求最多换 1 次、共 2 次上游往返）；任何接口不回显 secret（只回脱敏哨兵，保存时按渠道名/label 回填磁盘原值）；`base_url` 在**启动与保存双期**做 SSRF 校验（内网/元数据字面地址拒绝，`allow_private` 显式放行内网） |
+| `ext_channels[]` | `[]` | 外部渠道（多平台 Provider）：`name` / `base_url` / `protocol`（openai 缺省 / anthropic / gemini）/ `adapter`（原生适配器名，空 = 按协议；当前可用 `loomy`，非空时禁配 `auth`）/ `path`（路径覆盖，支持 `{model}`）/ `auth`（bearer / x-api-key / query / custom）/ `headers`（静态头，禁传输层头）/ `models`（显式名单，空 = 自动发现）/ `aliases`（别名 → 上游模型名）/ `credentials[]`（`label`/`secret`/`expires_at`/`disabled`/`auth`，≤20 条）/ `note` / `disabled` / `timeout_seconds` / `allow_private`。`api_key` 为兼容字段（与 `credentials` 互斥，非空时合成 `label="default"` 凭证）。模型名 `ext:<渠道>/<模型或别名>` 路由；凭证池按配置顺序选证，遇 429 / 401 / 403 自动换下一条凭证重试（单请求最多换 1 次、共 2 次上游往返）；任何接口不回显 secret（只回脱敏哨兵，保存时按渠道名/label 回填磁盘原值）；`base_url` 在**启动与保存双期**做 SSRF 校验（内网/元数据字面地址拒绝，`allow_private` 显式放行内网） |
 | `ext_intel.enabled` / `url` / `interval_hours` | `true` / token-fbi / `12` | 面板额度情报拉取（仅展示，不参与路由）；`enabled=false` 或 `url=""` 关闭外联 |
 | `update.check_enabled` / `check_interval_hours` | `true` / `6` | 版本检查开关与间隔；只提示不自动下载，离线场景可关 |
 | `logging.request_archive_enabled` / `retention_days` / `max_mb` | `true` / `7` / `100` | 请求元数据 JSONL 归档（不含提示词、响应正文与凭证）与保留策略 |
@@ -344,7 +376,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | 会话粘性 / Redis 镜像 | `internal/server` / `internal/redisstore` |
 | 中性提示词 / 降级重试 | `internal/prompt/prompt.go` · `Degraded`；`internal/server/degrade.go` |
 | Agent 密钥 | `internal/apikeys/apikeys.go`（包注释含完整设计说明） |
-| 外部渠道（多平台） | `internal/extchan/extchan.go`（Manager / 渠道状态）、`credential.go`（凭证池状态机）、`route.go`（前缀/别名路由）、`do.go`（选证→适配→换证主链路）、`probe.go`（只读探测）、`intel.go`（额度情报）；`internal/provider/`（三协议适配器 + 鉴权 + 预设）；`internal/server/extrelay.go`（chat 转发）、`exthropic.go`（Anthropic /v1/messages 双向转换） |
+| 外部渠道（多平台） | `internal/extchan/extchan.go`（Manager / 渠道状态）、`credential.go`（凭证池状态机）、`route.go`（前缀/别名路由）、`do.go`（选证→适配→换证主链路 + `adapterFor`）、`probe.go`（只读探测）、`intel.go`（额度情报）；`internal/provider/`（三协议适配器 + `native.go` 命名适配器注册表 + `loomy.go` 原生适配器 + 鉴权 + 预设）；`internal/server/extrelay.go`（chat 转发）、`exthropic.go`（Anthropic /v1/messages 双向转换） |
 | 更新检查 | `internal/update/update.go` |
 | SSRF 校验 | `internal/upstream/ssrf.go` |
 | 配置定义与默认值 | `cmd/server/config.go` |

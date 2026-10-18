@@ -2003,7 +2003,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <div class="hint" id="ewHint">基础信息 + 鉴权 + 模型/别名 + 凭证列表；保存后立即生效（热重载）。</div>
         </header>
         <div class="body" id="ewBody">
-          <div class="grid2">
+          <div class="grid3">
             <label class="fld"><span class="lb">渠道名 *</span>
               <input id="ewName" placeholder="siliconflow（小写字母/数字/连字符/下划线）" autocomplete="off">
               <span class="hint">路由前缀 <code>ext:渠道名/模型名</code>；改渠道名 = 新渠道</span></label>
@@ -2014,6 +2014,12 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
                 <option value="gemini">gemini · generateContent</option>
               </select>
               <span class="hint">决定 URL 形态与默认鉴权（anthropic→x-api-key、gemini→x-goog-api-key）</span></label>
+            <label class="fld"><span class="lb">原生适配器</span>
+              <select id="ewAdapter">
+                <option value="">默认（按协议）</option>
+                <option value="loomy">loomy · 双头 session（讯飞）</option>
+              </select>
+              <span class="hint">平台专属覆盖（鉴权/请求形态）；选中后不再使用下面的鉴权方式</span></label>
           </div>
           <label class="fld"><span class="lb">base_url *</span>
             <input id="ewBase" placeholder="https://api.example.com" autocomplete="off">
@@ -2033,7 +2039,8 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
                 <option value="x-api-key">x-api-key</option>
                 <option value="query">query · URL 参数</option>
                 <option value="custom">custom · 指定 header</option>
-              </select></label>
+              </select>
+              <span class="hint" id="ewAuthHint">选了原生适配器时此项由适配器接管（会置灰）</span></label>
             <label class="fld"><span class="lb">query 参数名 / custom 头名</span>
               <input id="ewAuthParam" placeholder="key（仅 query）" autocomplete="off">
               <input id="ewAuthHeader" placeholder="x-goog-api-key（仅 custom）" autocomplete="off"

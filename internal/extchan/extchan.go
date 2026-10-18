@@ -19,6 +19,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,9 @@ type Channel struct {
 	APIKey string `json:"api_key"`
 	// Protocol 出站协议（openai / anthropic / gemini；空归一为 openai）。
 	Protocol provider.Protocol `json:"protocol"`
+	// Adapter 平台原生适配器名（空 = 按协议选；如 "loomy"）。
+	// 非空时由 provider.AdapterFor 解析，未知名字是配置错（装配期即报，不静默回落）。
+	Adapter string `json:"adapter,omitempty"`
 	// Path 自定义路径覆盖（空 = 协议默认模板；支持 {model} 占位）。
 	Path string `json:"path,omitempty"`
 	// Auth 渠道级鉴权规格（凭证级非零时整体覆盖）。
@@ -159,6 +163,7 @@ type Status struct {
 	Name       string            `json:"name"`
 	BaseURL    string            `json:"base_url"`
 	Protocol   string            `json:"protocol"`
+	Adapter    string            `json:"adapter,omitempty"`
 	Disabled   bool              `json:"disabled"`
 	State      string            `json:"state"`
 	Models     []string          `json:"models"`
@@ -213,6 +218,7 @@ func (c *Channel) Snapshot() Status {
 		Name:                    c.Name,
 		BaseURL:                 c.BaseURL,
 		Protocol:                string(c.Protocol),
+		Adapter:                 c.Adapter,
 		Disabled:                c.Disabled,
 		Models:                  append([]string(nil), c.Models...),
 		Aliases:                 copyStringMap(c.Aliases),
@@ -267,6 +273,12 @@ func copyStringMap(m map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// normalizeAdapterName 原生适配器名归一（小写 + 去首尾空白）；空串 = 按协议。
+// 与 provider 侧归一规则一致：`Loomy` / ` loomy ` 都落在 "loomy"。
+func normalizeAdapterName(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
 }
 
 // availableModels 渠道当前可路由的模型名单：显式配置优先；否则用自动发现缓存。
@@ -373,12 +385,14 @@ func (m *Manager) ReplaceAll(defs []ChannelDef) {
 			ch = &Channel{Name: d.Name}
 		}
 		ch.mu.Lock()
-		if ch.BaseURL != d.BaseURL || ch.Protocol != proto || ch.Path != d.Path {
+		if ch.BaseURL != d.BaseURL || ch.Protocol != proto || ch.Path != d.Path ||
+			ch.Adapter != normalizeAdapterName(d.Adapter) {
 			ch.modelsCache, ch.modelsAt = nil, time.Time{}
 		}
 		ch.BaseURL = d.BaseURL
 		ch.APIKey = d.APIKey
 		ch.Protocol = proto
+		ch.Adapter = normalizeAdapterName(d.Adapter)
 		ch.Path = d.Path
 		ch.Auth = d.Auth
 		ch.Headers = copyStringMap(d.Headers)
@@ -429,6 +443,7 @@ type ChannelDef struct {
 	BaseURL        string            `json:"base_url"`
 	APIKey         string            `json:"api_key,omitempty"`
 	Protocol       string            `json:"protocol,omitempty"`
+	Adapter        string            `json:"adapter,omitempty"` // 原生适配器名（空 = 按协议；如 "loomy"）
 	Path           string            `json:"path,omitempty"`
 	Auth           provider.AuthSpec `json:"auth,omitempty"`
 	Headers        map[string]string `json:"headers,omitempty"`
@@ -576,7 +591,10 @@ func (m *Manager) FetchModels(ctx context.Context, ch *Channel) ([]string, error
 		}
 	}
 	target := m.BuildTarget(ch, cred, "")
-	adapter := provider.DefaultRegistry.MustGet(ch.Protocol)
+	adapter, aerr := adapterFor(ch)
+	if aerr != nil {
+		return nil, aerr
+	}
 	req, err := adapter.BuildModels(ctx, target)
 	if err != nil {
 		// 安全红线（P0-4）：query 鉴权下请求 URL 里带秘密值，错误文本必须脱敏
