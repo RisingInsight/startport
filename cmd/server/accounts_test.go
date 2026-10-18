@@ -6,7 +6,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -370,3 +373,64 @@ func TestSaveChannelsAndSaveConfigSameBytes(t *testing.T) {
 // usage 记录器（编译期占位：applyConfig 热应用不触碰它，导入仅为对齐 main 的
 // 依赖形态——防未来有人把 usage 热应用塞进 applyConfig 时无测试覆盖）。
 var _ = usage.Recorder{}
+
+// 集成回归（清单第 2 项）：账号 blob 带 base_url 覆盖 → 投影 → 托管渠道经
+// 引擎 Do 走通（mock 上游断言 Loomy 双头与业务信封——投影产物与手写渠道等价）。
+func TestProjectedChannelServesChat(t *testing.T) {
+	var sawToken, sawBearer string
+	upstreamMock := newAcctLoomyMock(t, &sawToken, &sawBearer)
+
+	e := newAcctTestEnv(t)
+	store, err := account.Load(filepath.Join(e.dir, "accounts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetLogf(func(string, ...any) {})
+	t.Cleanup(store.Close)
+	// blob.base_url 指向 mock（投影用它建渠道）。
+	if _, err := store.Add(account.PlatformLoomy,
+		json.RawMessage(`{"session":"sess-0123456789abcdef","base_url":"`+upstreamMock+`","allow_private":true}`), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acctchan.Sync(store, e.loadDefs, e.saveChannels, func(string, ...any) {}); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+	// 引擎 Do：投影渠道转发一条聊天（非流式）。
+	res, err := e.extMgr.Do(context.Background(), e.extMgr.Get(account.PlatformLoomy),
+		&extchan.OutRequest{Body: []byte(`{"model":"glm-x","messages":[{"role":"user","content":"hi"}]}`),
+			DisplayModel: "ext:loomy/glm-x"})
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	if res.Status != http.StatusOK {
+		t.Fatalf("status = %d: %s", res.Status, res.Body)
+	}
+	if sawToken != "sess-0123456789abcdef" || sawBearer != "Bearer sess-0123456789abcdef" {
+		t.Errorf("投影渠道的双头异常: token=%q bearer=%q", sawToken, sawBearer)
+	}
+	var body struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	_ = json.Unmarshal(res.Body, &body)
+	if len(body.Choices) != 1 || body.Choices[0].Message.Content != "pong" {
+		t.Errorf("投影渠道转发内容异常: %s", res.Body)
+	}
+}
+
+// newAcctLoomyMock 起一个 Loomy 形态的 mock 上游（业务信封 + 回显请求头）。
+func newAcctLoomyMock(t *testing.T, token, bearer *string) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*token = r.Header.Get("token")
+		*bearer = r.Header.Get("Authorization")
+		// 标准聊天完成体（含 choices + model——非流式回写由 server 层做，
+		// extchan.Do 层透传信封）。
+		_, _ = w.Write([]byte(`{"code":"000000","desc":"ok","data":{},"choices":[{"message":{"role":"assistant","content":"pong"}}],"model":"glm-x"}`))
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL
+}

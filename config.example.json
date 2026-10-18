@@ -186,6 +186,8 @@
       "allow_private": false
     }
   ],
+      "account_center_note": "账号中心（v1.6.0）：平台账号存 data/accounts.json（0600），凭证自动投影为 config 的 managed 渠道（adapter=loomy/autoclaw/qoder 等）。blob 形态（最小字段）：loomy= session；autoclaw= token + 可选 refresh_token；qoder= access_token + user_id；custom= base_url + secret。签到默认每天 09:00（失败 30 分钟后重试最多 2 次）；managed 渠道的 credentials 请经账号中心修改，本键仅说明用，网关不读取。",
+
   "ext_intel": {
     "enabled": true,
     "url": "https://token-fbi.com/data.json",

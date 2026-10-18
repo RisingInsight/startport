@@ -166,6 +166,17 @@ function closeExtWizard() {
   ewDraftNative = false;
 }
 
+/* ewFriendlySaveError 托管渠道的凭证保护报错转人话：
+   后端 managedCredentialDiff 拒绝时会指名"由账号中心托管"，这里补一句操作指引。 */
+function ewFriendlySaveError(msg) {
+  if (msg && msg.indexOf('账号中心托管') >= 0) {
+    return '该渠道的凭证由「账号中心」托管，不能在这里增删改凭证。\n'
+      + '请到「账号中心」对应平台页签添加/编辑/删除账号；渠道级字段（base_url / 模型 / 别名 / 超时）仍可保存。\n'
+      + '原始报错：' + msg;
+  }
+  return '保存失败：' + msg;
+}
+
 function ewErr(msg, show) {
   const el = ewEl('ewErr');
   if (!el) return;
@@ -365,7 +376,7 @@ async function ewSave() {
     closeExtWizard();
     loadExt();
   } catch (e) {
-    ewErr('保存失败：' + e.message, true);
+    ewErr(ewFriendlySaveError(e.message), true);
   }
 }
 

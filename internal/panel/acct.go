@@ -21,6 +21,7 @@ import (
 
 	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/acctchan"
+	"github.com/RisingInsight/startport/internal/checkin"
 	"github.com/RisingInsight/startport/internal/extchan"
 )
 
@@ -435,14 +436,11 @@ func (p *Panel) extChannelStatuses() map[string]extchan.Status {
 	return out
 }
 
-// checkinSupported 平台是否有签到活动（T3 的 Checker 注册表驱动；
-// 本期占位：loomy/autoclaw/qoder 支持，qoder-intl/custom 无——架构 §5 Q5）。
+// checkinSupported 平台是否有签到活动（internal/checkin 注册表驱动：loomy /
+// autoclaw / autoclaw-intl / qoder 支持；qoder-intl 与 custom 无——架构 §5 Q4/Q5，
+// For() 返回 false 时 UI 显示「平台无此活动」）。
 func checkinSupported(platform string) bool {
-	switch platform {
-	case account.PlatformLoomy, account.PlatformAutoClaw, account.PlatformQoder:
-		return true
-	}
-	return false
+	return checkin.Supported(platform)
 }
 
 // timeRFC3339 响应时间戳格式。

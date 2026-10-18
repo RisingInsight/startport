@@ -446,7 +446,8 @@ func invalidReasonFor(status int, body []byte) InvalidReason {
 	if status == http.StatusPaymentRequired {
 		return InvalidQuota
 	}
-	if code := envelopeErrorCode(body); code == "qoder_quota_exceeded" || code == "quota_exceeded" {
+	if code := envelopeErrorCode(body); code == "qoder_quota_exceeded" || code == "quota_exceeded" ||
+		code == "membership_required" { // autoclaw 403 pay-view/810001：会员/额度类（账号中心 v1.6.0 T3）
 		return InvalidQuota
 	}
 	low := strings.ToLower(string(body))

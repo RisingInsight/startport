@@ -198,6 +198,20 @@ func BaseURLOf(platform string, cred json.RawMessage) (string, error) {
 	}
 }
 
+// AllowPrivateOf blob 显式放行内网的标记（架构 §4.1 配套：账号 blob 的
+// allow_private 会被投影带进渠道的 allow_private——SSRF 红线不变：放行内网
+// 但元数据端点恒拒；校验仍由 config 层执行）。
+func AllowPrivateOf(platform string, cred json.RawMessage) bool {
+	m, err := decodeBlob(cred)
+	if err != nil {
+		return false
+	}
+	if ap, ok := m["allow_private"].(bool); ok {
+		return ap
+	}
+	return false
+}
+
 // AdapterOf 平台对应的原生适配器名（custom = 空，投影为普通渠道）。
 func AdapterOf(platform string) string {
 	if NativePlatform(platform) {
