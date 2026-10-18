@@ -1350,14 +1350,20 @@ func TestExtChannelWizardDOM(t *testing.T) {
 	html := string(htmlBytes)
 	for _, id := range []string{
 		"view-extchan", "ecCards", "ecSummary", "btnEcNew",
-		"extWizVeil", "ewName", "ewProtocol", "ewBase", "ewPath",
-		"ewAuthMode", "ewAuthParam", "ewAuthHeader", "ewHeaders",
+		"extWizVeil", "ewName", "ewProtocol", "ewAdapter", "ewBase", "ewPath",
+		"ewAuthMode", "ewAuthParam", "ewAuthHeader", "ewAuthHint", "ewHeaders",
 		"ewModels", "ewAliases", "ewCreds", "ewAddCred", "ewNote",
 		"ewProbe", "ewProbeOut", "ewSave", "ewCancel", "ewErr", "ewNative",
 	} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html 缺外部渠道向导元素 id=%q", id)
 		}
+	}
+	// 原生适配器下拉：空值 = 按协议，另有 loomy 一项。
+	adapterSel := html[strings.Index(html, `id="ewAdapter"`):]
+	adapterSel = adapterSel[:strings.Index(adapterSel, "</select>")]
+	if !strings.Contains(adapterSel, `value=""`) || !strings.Contains(adapterSel, `value="loomy"`) {
+		t.Error("ewAdapter 应有「默认（按协议）」与 loomy 两个选项")
 	}
 	// 情报表新增「草稿」列（表头 9 列，空态 colspan 必须同步，否则表格错位）。
 	if !strings.Contains(html, "<th>草稿</th>") {
@@ -1388,5 +1394,19 @@ func TestExtChannelWizardDOM(t *testing.T) {
 	wizHTML = wizHTML[:strings.Index(wizHTML, "<!-- 配置 -->")]
 	if strings.Contains(wizHTML, "api_key") {
 		t.Error("向导不应出现 api_key 字段（凭证统一走 credentials[]）")
+	}
+
+	// 原生适配器接线：向导写 adapter、卡片渲染 adapter 徽标。
+	wizJS, err := os.ReadFile("extwiz.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ewAdapter", "ewSyncAdapter", "ch.adapter"} {
+		if !strings.Contains(string(wizJS), want) {
+			t.Errorf("extwiz.js 缺原生适配器接线 %q", want)
+		}
+	}
+	if !strings.Contains(string(extJS), "c.adapter") {
+		t.Error("ext.js 应在渠道卡片上渲染 adapter 徽标")
 	}
 }

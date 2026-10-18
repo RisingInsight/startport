@@ -60,6 +60,23 @@ type Adapter interface {
 	DecodeModels(t *Target, status int, body []byte) ([]string, error)
 }
 
+// StatusNormalizer 可选能力：把"状态码与 body 语义不一致"的上游响应归一。
+//
+// 典型场景：某些平台用 `HTTP 200 + {code,desc}` 表达业务错误（Loomy 的登录态
+// 失效就是 `{"code":"020002"}`）。若只改 body 不改状态码，按状态码判定成功的
+// SDK 会把错误当成功——所以需要同时改写状态码。
+//
+// 这是**可选接口**（不是 Adapter 的必备方法）：只有需要的适配器实现它，
+// 三个协议基准适配器不实现，行为完全不变。
+//
+// 调用方约定：
+//   - 只在**非流式**响应上调用（流式 body 是流，预读会破坏逐字节透传）；
+//   - 返回 (原 status, 原 body) 表示"无需归一"；
+//   - 归一后的错误体应是 OpenAI 错误信封，便于客户端直接解析。
+type StatusNormalizer interface {
+	NormalizeStatus(status int, body []byte) (int, []byte)
+}
+
 // ErrStreamUnsupported 上游不接受/不返回 SSE 流式（Gemini 未按 alt=sse 返回）。
 // 调用方应把它翻译成 502 gemini_stream_unsupported 并提示改用非流式。
 var ErrStreamUnsupported = errors.New("upstream does not support SSE streaming")

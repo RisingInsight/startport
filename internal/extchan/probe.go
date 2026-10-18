@@ -37,9 +37,11 @@ type ProbeResult struct {
 	ModelsCount  int      `json:"models_count"`
 	ModelsSample []string `json:"models_sample,omitempty"`
 	Protocol     string   `json:"protocol"`
-	Probe        string   `json:"probe"`
-	Error        string   `json:"error,omitempty"`
-	ErrorCode    string   `json:"error_code,omitempty"`
+	// Adapter 生效的原生适配器名（空 = 按协议）；面板据此显示"走的是哪个适配器"。
+	Adapter   string `json:"adapter,omitempty"`
+	Probe     string `json:"probe"`
+	Error     string `json:"error,omitempty"`
+	ErrorCode string `json:"error_code,omitempty"`
 }
 
 // probeTransport 探测专用 Transport（共享连接池/默认拨号；不复用渠道 client）。
@@ -62,6 +64,7 @@ func (m *Manager) ProbeDraft(ctx context.Context, def ChannelDef, credentialLabe
 		Name:           def.Name,
 		BaseURL:        def.BaseURL,
 		Protocol:       proto,
+		Adapter:        normalizeAdapterName(def.Adapter),
 		Path:           def.Path,
 		Auth:           def.Auth,
 		Headers:        def.Headers,
@@ -106,7 +109,7 @@ func (m *Manager) probeWith(ctx context.Context, ch *Channel, creds []*Credentia
 	if !proto.Valid() {
 		proto = provider.ProtocolOpenAI
 	}
-	result := ProbeResult{Protocol: string(proto), Probe: "models"}
+	result := ProbeResult{Protocol: string(proto), Adapter: ch.Adapter, Probe: "models"}
 
 	// 并发闸：容量 4（探测是面板单用户操作，4 足够；防手抖连点打爆上游）。
 	if m.probeSem != nil {
@@ -163,10 +166,12 @@ func (m *Manager) probeWith(ctx context.Context, ch *Channel, creds []*Credentia
 		target.Auth = cred.AuthFor(ch.Auth)
 	}
 
-	adapter, ok := provider.DefaultRegistry.Get(proto)
-	if !ok {
-		result.Error = fmt.Sprintf("no adapter for protocol %q", proto)
-		result.ErrorCode = "invalid_protocol"
+	// 与 Do 同一套适配器解析：草稿带了 adapter 也能探测（面板"测试连通"覆盖
+	// 原生适配器）；未知 adapter 明确报错，不静默回落到协议适配器。
+	adapter, aerr := provider.AdapterFor(proto, ch.Adapter)
+	if aerr != nil {
+		result.Error = aerr.Error()
+		result.ErrorCode = "invalid_adapter"
 		return result
 	}
 	req, err := adapter.BuildModels(ctx, target)

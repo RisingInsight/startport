@@ -100,6 +100,8 @@ function renderChannelCard(c) {
     + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
     + '<b>' + esc(c.name) + '</b>'
     + '<span class="tag mute">' + esc(c.protocol || 'openai') + '</span>'
+    // 原生适配器徽标：只在显式配置时出现（空 = 按协议，不缺省刷一个标签）。
+    + (c.adapter ? ' <span class="tag" title="原生适配器">' + esc(c.adapter) + '</span>' : '')
     + '<span class="tag ' + st[1] + '">' + esc(st[0]) + '</span>' + cool
     + '<span class="grow" style="flex:1"></span>'
     + '<button type="button" class="xs" data-ec="probe" data-name="' + esc(c.name) + '">测试</button>'

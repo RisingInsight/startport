@@ -197,4 +197,84 @@ func TestExtChannelsStatusSummary(t *testing.T) {
 		body.Summary["usable"] != 1 || body.Summary["abnormal"] != 0 {
 		t.Errorf("summary 异常: %+v", body.Summary)
 	}
+	// 未配 adapter 的渠道不该凭空多出该字段（omitempty）。
+	if got := body.Channels[0].Adapter; got != "" {
+		t.Errorf("普通渠道 Adapter 应为空, got %q", got)
+	}
+}
+
+// 渠道状态端点透出 adapter（面板徽标的数据来源）。
+func TestExtChannelsStatusExposesAdapter(t *testing.T) {
+	mgr := extchan.New(extchan.Config{TimeoutSeconds: 5})
+	mgr.ReplaceAll([]extchan.ChannelDef{{
+		Name: "loomy", BaseURL: "https://loomyad.xunfei.cn/api/v1",
+		Protocol: "openai", Adapter: "loomy",
+		Credentials: []extchan.CredentialDef{{Label: "p", Secret: "sess-panel"}},
+	}})
+	p := New(Config{Version: "test", ExtChan: mgr})
+	req := httptest.NewRequest("GET", "/startport/api/ext_channels", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var body struct {
+		Channels []struct {
+			Name     string `json:"name"`
+			Protocol string `json:"protocol"`
+			Adapter  string `json:"adapter"`
+		} `json:"channels"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Channels) != 1 {
+		t.Fatalf("channels = %d", len(body.Channels))
+	}
+	if body.Channels[0].Adapter != "loomy" {
+		t.Errorf("adapter 未透出: %+v", body.Channels[0])
+	}
+	if body.Channels[0].Protocol != "openai" {
+		t.Errorf("protocol = %q", body.Channels[0].Protocol)
+	}
+	if strings.Contains(rec.Body.String(), "sess-panel") {
+		t.Error("渠道状态泄露 secret")
+	}
+}
+
+// 预设端点透出 adapter（向导据此自动选中"原生适配器"下拉）。
+func TestExtPresetsExposesAdapter(t *testing.T) {
+	p, _ := newProbePanel(t, "https://api.example.com")
+	req := httptest.NewRequest("GET", "/startport/api/ext_presets", nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d", rec.Code)
+	}
+	var body struct {
+		Presets []struct {
+			Key            string `json:"key"`
+			Adapter        string `json:"adapter"`
+			NativeRequired bool   `json:"native_required"`
+		} `json:"presets"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, pr := range body.Presets {
+		if pr.Key != "loomy" {
+			continue
+		}
+		found = true
+		if pr.Adapter != "loomy" {
+			t.Errorf("loomy 预设 adapter = %q", pr.Adapter)
+		}
+		if pr.NativeRequired {
+			t.Error("loomy 已由原生适配器覆盖，不应再 native_required")
+		}
+	}
+	if !found {
+		t.Fatal("预设端点缺 loomy")
+	}
 }

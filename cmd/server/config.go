@@ -293,6 +293,10 @@ type ExtChannel struct {
 	APIKey string `json:"api_key"`
 	// Protocol 出站协议：openai（缺省）/ anthropic / gemini。
 	Protocol string `json:"protocol,omitempty"`
+	// Adapter 原生适配器名（空 = 按协议；当前可用：loomy）。
+	// 与 protocol 是两个正交维度：protocol 管报文形态，adapter 管平台契约
+	// （双头鉴权、专属路径等）。非空时禁止再配 auth（见 validateExtAdapter）。
+	Adapter string `json:"adapter,omitempty"`
 	// Path 自定义路径覆盖（空 = 协议默认模板；支持 {model} 占位）。
 	// 火山 Ark 这类非 /v1 形态必须用它（base 含 /api/v3，历史 endpoint 会补 /v1）。
 	Path string `json:"path,omitempty"`
@@ -765,6 +769,9 @@ func (c *Config) validateExtChannels() error {
 		if err := validateExtPath(ch.Path); err != nil {
 			return fmt.Errorf("%s.path: %v", field, err)
 		}
+		if err := validateExtAdapter(field, &c.ExtChannels[i]); err != nil {
+			return err
+		}
 		if err := ch.authSpec().Validate(field + ".auth"); err != nil {
 			return err
 		}
@@ -814,6 +821,51 @@ func (c *Config) validateExtChannels() error {
 			if err := cred.authSpec().Validate(cfield + ".auth"); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+// validateExtAdapter 校验原生适配器声明（顺带把名字归一成小写）。
+//
+// 三条规则都是"配置自相矛盾"的硬错误，刻意不做宽松推断：
+//  1. adapter 必须是已注册的原生适配器名（provider.NativeNames()）；
+//  2. 适配器自带的协议必须与 protocol 一致（Loomy 只能是 openai）——
+//     配成 anthropic 不是"灵活"，而是会让 URL 与报文形态各按一套规则走；
+//  3. adapter 非空时**不允许再配 auth**（渠道级与凭证级都不行）：原生适配器
+//     独占鉴权注入（如 Loomy 的双头），两套并存会拼出互相冲突的请求头。
+func validateExtAdapter(field string, ch *ExtChannel) error {
+	name := strings.ToLower(strings.TrimSpace(ch.Adapter))
+	ch.Adapter = name // 归一后写回（stdout 与运行期看到同一个值）
+	if name == "" {
+		return nil
+	}
+	na, ok := provider.Native(name)
+	if !ok {
+		avail := provider.NativeNames()
+		hint := "当前没有可用的原生适配器"
+		if len(avail) > 0 {
+			hint = "可用：" + strings.Join(avail, " / ")
+		}
+		return fmt.Errorf("%s.adapter: %q 不是已注册的原生适配器（%s；留空 = 按协议选择）",
+			field, name, hint)
+	}
+	proto, err := provider.ParseProtocol(ch.Protocol)
+	if err != nil {
+		return fmt.Errorf("%s.protocol: %v", field, err)
+	}
+	if na.Protocol() != proto {
+		return fmt.Errorf("%s.adapter: %q 只支持 protocol=%s（当前是 %q）",
+			field, name, string(na.Protocol()), string(proto))
+	}
+	if !ch.Auth.Spec().IsZero() {
+		return fmt.Errorf("%s.auth: adapter=%q 时不能配置 auth"+
+			"（该适配器自己注入鉴权，两套并存会拼出互相冲突的请求头）", field, name)
+	}
+	for j, cred := range ch.Credentials {
+		if !cred.Auth.Spec().IsZero() {
+			return fmt.Errorf("%s.credentials[%d].auth: adapter=%q 时不能配置凭证级 auth（同上）",
+				field, j, name)
 		}
 	}
 	return nil

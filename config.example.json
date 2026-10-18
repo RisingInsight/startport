@@ -133,6 +133,23 @@
       "disabled": true,
       "timeout_seconds": 0,
       "allow_private": false
+    },
+    {
+      "name": "loomy",
+      "base_url": "https://loomyad.xunfei.cn/api/v1",
+      "protocol": "openai",
+      "adapter": "loomy",
+      "path": "",
+      "models": [],
+      "aliases": {},
+      "note": "示例：原生适配器（adapter=loomy）。凭证填 Loomy 客户端登录态里的 session（14 天、无续期）；token 与 Authorization 双头由适配器自动注入，因此不要配 auth。默认停用。",
+      "credentials": [
+        { "label": "primary", "secret": "REPLACE_WITH_LOOMY_SESSION", "expires_at": "" }
+      ],
+      "api_key": "",
+      "disabled": true,
+      "timeout_seconds": 0,
+      "allow_private": false
     }
   ],
   "ext_intel": {
