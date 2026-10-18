@@ -1264,6 +1264,13 @@ $('importFile').onchange = async () => {
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
 $('btnAdd').onclick = openAdd;
+/* 「前往外部渠道」引导（v1.5.1）：添加账号弹窗里的多平台入口提示。
+   复用导航同一套视图切换（go() + hash），先关弹窗（closeAdd 会停掉登录轮询）。 */
+if ($('addGoExtchan')) $('addGoExtchan').onclick = () => {
+  closeAdd();
+  go('extchan');
+  history.replaceState(null, '', '#extchan');
+};
 $('btnRefresh').onclick = async () => {
   const b = $('btnRefresh');
   b.disabled = true; b.textContent = '刷新中…';

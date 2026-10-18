@@ -2399,6 +2399,9 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             <label class="realm-opt"><input type="radio" name="addRealm" value="global"> 国际版（Global）</label>
           </div>
           <div class="hint" style="font-size: var(--fs-xs);margin-top:2px">国际版登录后，网关自动完成注册地区、激活与试用额度领取，全程无需手动操作。</div>
+          <!-- 引导（v1.5.1）：「添加账号」只服务 CodeBuddy 账号池；多平台入口在「外部渠道」。
+               点击切到 extchan 视图——复用 app.js 的 go()（与导航链接同一机制），见 app.js 的绑定。 -->
+          <div class="hint" style="font-size: var(--fs-xs);margin-top:6px">添加账号仅用于 CodeBuddy（WorkBuddy）账号池。要接入其它平台 / 模型（Loomy / AutoClaw / Qoder / OpenAI 兼容聚合等 20+ 预设），请到左侧「外部渠道」→「新建渠道」。<button type="button" class="xs" id="addGoExtchan" style="margin-left:6px">前往外部渠道</button></div>
         </div>
         <div id="addLoad" class="state" hidden><span class="dots">正在获取授权链接</span></div>
         <div id="addReady" hidden>

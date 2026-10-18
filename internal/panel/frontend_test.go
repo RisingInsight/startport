@@ -1410,3 +1410,35 @@ func TestExtChannelWizardDOM(t *testing.T) {
 		t.Error("ext.js 应在渠道卡片上渲染 adapter 徽标")
 	}
 }
+
+// 添加账号弹窗的多平台引导（v1.5.1）：hint 存在 + 内联按钮接线到 extchan 视图。
+// 「添加账号」只服务 CodeBuddy 账号池，多平台入口在「外部渠道」——这条引导防止
+// 用户在错误入口找 Loomy / AutoClaw / Qoder 等平台的接入方式。
+func TestAddAccountModalExtchanGuide(t *testing.T) {
+	htmlBytes, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	// 弹窗内：hint 文案 + 内联按钮。
+	if !strings.Contains(html, `id="addGoExtchan"`) {
+		t.Error("添加账号弹窗缺「前往外部渠道」按钮（id=addGoExtchan）")
+	}
+	if !strings.Contains(html, "添加账号仅用于 CodeBuddy（WorkBuddy）账号池") {
+		t.Error("添加账号弹窗缺多平台引导文案")
+	}
+	if !strings.Contains(html, "外部渠道」→「新建渠道」") {
+		t.Error("引导文案应指到「外部渠道」→「新建渠道」")
+	}
+	// app.js：按钮点击 = 关弹窗 + 切 extchan 视图（复用 go()，与导航同机制）。
+	appJS, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(appJS)
+	for _, want := range []string{`$('addGoExtchan')`, "closeAdd()", "go('extchan')", "'#extchan'"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("app.js 缺引导接线 %q", want)
+		}
+	}
+}
