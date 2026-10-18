@@ -3,7 +3,7 @@
    自包含模块：只依赖 core.js 的 $ / esc / ago / dur / api / toast。
    职责：
      - 渠道卡片流（协议徽标 / 派生状态 / 凭证 x/y / 模型数 / 最近成功 / 最近错误
-       + 每凭证的 label/状态/请求数/tokens/过期/最近错误）；
+       + 每凭证的 label/状态/尝试数（上游往返，含失败）/tokens/过期/最近错误）；
      - 测试连通、编辑、删除（删除/保存都走 extwiz.js 的 extMutateChannels，
        写路径只有 POST /startport/api/config）；
      - 额度情报表格 + 「生成草稿」（草稿由 extwiz.js 打开向导并预填）。
@@ -90,7 +90,7 @@ function renderChannelCard(c) {
   let credTable;
   if (credRows) {
     credTable = '<table class="acc zebra" style="margin-top:10px">'
-      + '<thead><tr><th>凭证</th><th>状态</th><th class="num">请求</th><th class="num">tokens</th>'
+      + '<thead><tr><th>凭证</th><th>状态</th><th class="num" title="上游尝试次数（含被 429/401 淘汰的失败尝试）">尝试</th><th class="num">tokens</th>'
       + '<th>过期</th><th>最近错误</th><th class="c-acts"></th></tr></thead>'
       + '<tbody>' + credRows + '</tbody></table>';
   } else {

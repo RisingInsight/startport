@@ -526,6 +526,77 @@ func TestProbeDraftStaticAdapter(t *testing.T) {
 	}
 }
 
+// 探测归一（v1.4.0）：Loomy 裸 401 → error_code=session_expired（不是 upstream_401）。
+func TestProbeDraftLoomy401Normalized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"unauthorized"}}`))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	res := m.ProbeDraft(context.Background(), ChannelDef{
+		Name: "loomy", BaseURL: srv.URL + "/api/v1", Adapter: "loomy",
+		Credentials: []CredentialDef{{Label: "p", Secret: "sess-probe"}},
+	}, "")
+	if res.OK {
+		t.Fatal("探测应失败")
+	}
+	if res.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", res.Status)
+	}
+	if res.ErrorCode != "session_expired" {
+		t.Errorf("error_code = %q, want session_expired（让用户知道该换 session）", res.ErrorCode)
+	}
+}
+
+// 探测归一：Loomy 200 + 登录失效业务码 → 状态归一为 401 + session_expired。
+func TestProbeDraftLoomy200BizErrorNormalized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"020002","desc":"登录已失效"}`))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	res := m.ProbeDraft(context.Background(), ChannelDef{
+		Name: "loomy", BaseURL: srv.URL + "/api/v1", Adapter: "loomy",
+		Credentials: []CredentialDef{{Label: "p", Secret: "sess-probe"}},
+	}, "")
+	if res.OK {
+		t.Fatal("业务错误不应判为连通")
+	}
+	if res.Status != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401（状态码归一）", res.Status)
+	}
+	if res.ErrorCode != "session_expired" {
+		t.Errorf("error_code = %q, want session_expired", res.ErrorCode)
+	}
+}
+
+// 说明：AutoClaw 的探测**不会**走到 401 归一路径——它实现 StaticModels，
+// probeWith 在发 HTTP 之前就短路返回静态清单（见 TestProbeDraftStaticAdapter）。
+// 它的 StatusNormalizer 只在 Do 的错误路径生效（token_invalid 等信封由
+// TestDoAutoClawAdapter401TokenInvalid 锚定）。
+
+// 零回归锚点：普通 openai 探测 401 仍是 upstream_401（三协议基准适配器
+// 不实现 StatusNormalizer，探测行为逐字节不变）。
+func TestProbeDraftPlainOpenAI401Unchanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"invalid key"}}`))
+	}))
+	defer srv.Close()
+
+	m := New(Config{TimeoutSeconds: 5})
+	res := m.ProbeDraft(context.Background(), ChannelDef{
+		Name: "plain", BaseURL: srv.URL, Protocol: "openai",
+		Credentials: []CredentialDef{{Label: "p", Secret: "sk-abcdef"}},
+	}, "")
+	if res.ErrorCode != "upstream_401" {
+		t.Errorf("error_code = %q, want upstream_401（零回归）", res.ErrorCode)
+	}
+}
+
 // 名字归一：配置里写 "Loomy" 也能用（大小写不敏感）。
 func TestAdapterNameNormalized(t *testing.T) {
 	m := New(Config{TimeoutSeconds: 5})

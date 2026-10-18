@@ -353,10 +353,20 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 				// 全部凭证都被限流：渠道也进入指数退避（客户端快速失败）。
 				ch.NoteRateLimited(m.base, m.max, "429 rate limited (all credentials)")
 			}
+			// 换证前的失败尝试计入该凭证的请求数（v1.4.0 口径）：这次上游往返
+			// 真实发生过，只是被换证淘汰。只在"确实会换证"时记——不换证时这次
+			// 尝试就是最终结果，由 server 侧 NoteUsage 计，避免双计。
+			if attempts < maxCredAttempts && ch.pickCredential(tried) != nil {
+				cred.NoteAttempt()
+			}
 			recordAttemptLog(ch, cred, status, attempts, started, "429 rate limited")
 
 		case status == http.StatusUnauthorized || status == http.StatusForbidden:
 			cred.NoteInvalid(fmt.Sprintf("%d authentication failed", status))
+			// 同 429：只在确实会换证时计（见上方注释）。
+			if attempts < maxCredAttempts && ch.pickCredential(tried) != nil {
+				cred.NoteAttempt()
+			}
 			recordAttemptLog(ch, cred, status, attempts, started, "invalid credential")
 
 		case status >= 500:
