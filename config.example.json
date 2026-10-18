@@ -114,6 +114,25 @@
       "disabled": true,
       "timeout_seconds": 0,
       "allow_private": false
+    },
+    {
+      "name": "gemini-example",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "protocol": "gemini",
+      "path": "",
+      "auth": { "mode": "custom", "header": "x-goog-api-key" },
+      "headers": {},
+      "models": ["gemini-2.0-flash"],
+      "aliases": { "fast": "gemini-2.0-flash-8b" },
+      "note": "示例：多凭证 + 别名 + 自定义鉴权（默认停用；把 secret 换成你自己的 key 再启用）",
+      "credentials": [
+        { "label": "primary", "secret": "REPLACE_WITH_YOUR_KEY", "expires_at": "" },
+        { "label": "backup", "secret": "REPLACE_WITH_YOUR_KEY", "disabled": true }
+      ],
+      "api_key": "",
+      "disabled": true,
+      "timeout_seconds": 0,
+      "allow_private": false
     }
   ],
   "ext_intel": {

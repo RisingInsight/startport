@@ -290,7 +290,19 @@ func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
 		},
+		// 外部渠道快照（多平台阶段三）：只新增一个键，既有账号池字段一字不改。
+		// 含协议、派生状态、凭证计数与逐凭证运行态（永不回显 secret）。
+		"ext_channels": h.extChannelStatuses(),
 	})
+}
+
+// extChannelStatuses /status 的外部渠道快照（未配置渠道时为空数组而非 null，
+// 便于脚本直接遍历）。
+func (h *Handler) extChannelStatuses() []extchan.Status {
+	if h.cfg.Ext == nil {
+		return []extchan.Status{}
+	}
+	return h.cfg.Ext.Status()
 }
 
 // countsMapFrom 把 CountsDetailed 五元组打包成 /status 的域分组建模。

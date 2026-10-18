@@ -1949,33 +1949,23 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       </div>
     </section>
 
-    <!-- 外部渠道（多平台阶段一）：只读观测。渠道增删改走「配置」视图 ext_channels。 -->
+    <!-- 外部渠道（多平台阶段三）：渠道卡片 + 凭证池 + 新建/编辑弹层 + 情报草稿。
+         写路径只有一条：POST /startport/api/config（ext_channels 数组整体提交）。 -->
     <section class="view" id="view-extchan" hidden>
       <div class="box">
         <header>
           <h3>外部渠道</h3>
           <span class="grow"></span>
+          <button type="button" class="xs" id="btnEcNew">新建渠道</button>
           <span class="note" id="ecNote">—</span>
         </header>
-        <div class="hint" style="padding:12px 20px 0">
-          任意 OpenAI 兼容上游（硅基流动 / 百炼 / OpenRouter / NIM / 自建聚合器…）与 CodeBuddy
-          账号池并存。在「配置」视图的 <code>ext_channels</code> 里添加渠道（base_url + api_key），
-          保存后即时生效；客户端用模型名 <code>ext:渠道名/模型名</code> 调用。api_key 只落
-          config.json，任何接口不回显。429 自动短冷却指数退避、5xx 短冷却、连续失败熔断。
+        <div class="hint" id="ecSummary" style="padding:12px 20px 0">加载中…</div>
+        <div class="hint" style="padding:6px 20px 12px">
+          三种出站协议（openai / anthropic / gemini）× 四种鉴权（bearer / x-api-key / query / custom）。
+          客户端用 <code>ext:渠道名/模型名</code>（或别名）调用；凭证按顺序尝试，429 自动换下一条重试一次。
+          秘密值只落 config.json（0600），任何接口不回显。
         </div>
-        <div class="tbl-wrap">
-          <table class="acc zebra">
-            <thead>
-              <tr>
-                <th class="mark" aria-hidden="true"></th>
-                <th>渠道</th><th>状态</th><th>模型</th><th class="num">在途</th><th>最近成功</th><th>调用形态</th>
-              </tr>
-            </thead>
-            <tbody id="ecBody">
-              <tr><td colspan="6" class="empty">加载中…</td></tr>
-            </tbody>
-          </table>
-        </div>
+        <div id="ecCards" style="padding:0 20px 18px;color:var(--ink-3)">加载中…</div>
       </div>
 
       <div class="box">
@@ -1994,16 +1984,91 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             <thead>
               <tr>
                 <th class="mark" aria-hidden="true"></th>
-                <th>平台</th><th>类型</th><th>额度</th><th>可用模型</th><th>门槛</th><th>核实</th><th>入口</th>
+                <th>平台</th><th>类型</th><th>额度</th><th>可用模型</th><th>门槛</th><th>核实</th><th>入口</th><th>草稿</th>
               </tr>
             </thead>
             <tbody id="eiBody">
-              <tr><td colspan="7" class="empty">加载中…</td></tr>
+              <tr><td colspan="9" class="empty">加载中…</td></tr>
             </tbody>
           </table>
         </div>
       </div>
     </section>
+
+    <!-- 外部渠道向导/编辑弹层（表单由 extwiz.js 读写；保存只提交 ext_channels）。 -->
+    <div class="veil" id="extWizVeil">
+      <div class="dlg" style="width:780px;max-width:96vw">
+        <header>
+          <h3 id="ewTitle">新建渠道</h3>
+          <div class="hint" id="ewHint">基础信息 + 鉴权 + 模型/别名 + 凭证列表；保存后立即生效（热重载）。</div>
+        </header>
+        <div class="body" id="ewBody">
+          <div class="grid2">
+            <label class="fld"><span class="lb">渠道名 *</span>
+              <input id="ewName" placeholder="siliconflow（小写字母/数字/连字符/下划线）" autocomplete="off">
+              <span class="hint">路由前缀 <code>ext:渠道名/模型名</code>；改渠道名 = 新渠道</span></label>
+            <label class="fld"><span class="lb">出站协议</span>
+              <select id="ewProtocol">
+                <option value="openai">openai · Chat Completions</option>
+                <option value="anthropic">anthropic · Messages</option>
+                <option value="gemini">gemini · generateContent</option>
+              </select>
+              <span class="hint">决定 URL 形态与默认鉴权（anthropic→x-api-key、gemini→x-goog-api-key）</span></label>
+          </div>
+          <label class="fld"><span class="lb">base_url *</span>
+            <input id="ewBase" placeholder="https://api.example.com" autocomplete="off">
+            <span class="hint">上游根地址；协议默认路径会自动拼（OpenAI 会补 /v1）</span></label>
+          <div class="grid2">
+            <label class="fld"><span class="lb">路径覆盖（可选）</span>
+              <input id="ewPath" placeholder="/chat/completions" autocomplete="off">
+              <span class="hint">非 /v1 形态（如火山 Ark /api/v3）必须显式填；支持 {model} 占位</span></label>
+            <label class="fld"><span class="lb">超时（秒，留空 = 120）</span>
+              <input id="ewTimeout" type="number" min="0" placeholder="120"></label>
+          </div>
+          <div class="grid2">
+            <label class="fld"><span class="lb">鉴权方式</span>
+              <select id="ewAuthMode">
+                <option value="">协议默认</option>
+                <option value="bearer">bearer · Authorization: Bearer</option>
+                <option value="x-api-key">x-api-key</option>
+                <option value="query">query · URL 参数</option>
+                <option value="custom">custom · 指定 header</option>
+              </select></label>
+            <label class="fld"><span class="lb">query 参数名 / custom 头名</span>
+              <input id="ewAuthParam" placeholder="key（仅 query）" autocomplete="off">
+              <input id="ewAuthHeader" placeholder="x-goog-api-key（仅 custom）" autocomplete="off"
+                     style="margin-top:6px"></label>
+          </div>
+          <div class="grid2">
+            <label class="fld"><span class="lb">静态请求头（每行 K: V）</span>
+              <textarea id="ewHeaders" rows="3" placeholder="X-Title: StarPort"></textarea>
+              <span class="hint">禁 Host/Content-Length/Connection；Authorization 请用鉴权方式</span></label>
+            <label class="fld"><span class="lb">模型名单（逗号/换行分隔）</span>
+              <textarea id="ewModels" rows="3" placeholder="Qwen/Qwen3-235B-A22B"></textarea>
+              <span class="hint">留空 = 首次调用 /v1/models 时自动发现</span></label>
+          </div>
+          <label class="fld"><span class="lb">别名（每行 别名=上游模型名）</span>
+            <textarea id="ewAliases" rows="2" placeholder="fast=Qwen/Qwen3-8B"></textarea>
+            <span class="hint">客户端可用 <code>ext:渠道名/别名</code> 调用；/v1/models 会暴露别名</span></label>
+          <div class="switch"><span class="lb">放行内网 base_url（自建聚合器）</span>
+            <input type="checkbox" id="ewAllowPrivate"></div>
+          <div class="fld"><span class="lb">凭证（按顺序尝试；429 自动换下一条）</span>
+            <div id="ewCreds"></div>
+            <button type="button" class="xs" id="ewAddCred">添加凭证</button>
+            <span class="hint">秘密值只落 config.json，任何接口不回显；改 label 或 secret = 视为新凭证（状态重置）</span></div>
+          <label class="fld"><span class="lb">备注</span>
+            <input id="ewNote" placeholder="来源/用途（情报草稿会自动填来源链接）" autocomplete="off"></label>
+          <div class="hint" id="ewNative" hidden style="color:var(--warn)"></div>
+          <div class="state err" id="ewErr" hidden></div>
+        </div>
+        <footer>
+          <button type="button" class="xs" id="ewProbe">测试连通</button>
+          <span class="note" id="ewProbeOut" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis"></span>
+          <button type="button" class="xs" id="ewCancel">取消</button>
+          <button type="button" id="ewSave">保存</button>
+        </footer>
+      </div>
+    </div>
 
     <!-- 配置 -->
     <section class="view" id="view-config" hidden>
@@ -2417,5 +2482,6 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 <script src="app.js"></script>
 <script src="keys.js"></script>
 <script src="ext.js"></script>
+<script src="extwiz.js"></script>
 </body>
 </html>

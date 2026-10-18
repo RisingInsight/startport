@@ -39,18 +39,72 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 
 签到（09/21 点）、活跃上报（10 点）、猫猫旅行（09/21 点）、token 保活（22 点）、夜猫子补足（23 点）、连登档位兑换与抽奖（挂在签到排程末尾）——六类动作独立开关，幂等可重复执行。成长计划 18 个任务中 17 个可在面板一键纯 API 完成并自动领奖（唯一例外是需要真实捐款的任务）。
 
-### 外部渠道（多平台阶段一）
+### 外部渠道（多平台 Provider 框架）
 
-把任意 **OpenAI 兼容上游**接入同一个 `/v1` 出口，与 CodeBuddy 账号池并存：
+把**任意上游平台**收敛成「协议 × 鉴权 × 路径/静态头 × 凭证池」四要素接入同一个 `/v1` 出口，与 CodeBuddy 账号池并存。新增平台 = 改配置，代码改动为 0（需要客户端签名/指纹的原生平台除外，见能力边界）。
 
-- **接入形态**：config 的 `ext_channels` 数组填 `name` + `base_url` + `api_key` 即成一条渠道（硅基流动、阿里百炼、OpenRouter、NVIDIA NIM、火山 Ark、自建 one-api/new-api 聚合器……全部适用）。保存即热重载，无需重启。
-- **路由协议**：模型名 `ext:<渠道名>/<模型名>` 精确路由；裸名在渠道间唯一匹配时也可直达（多渠道同名 → 要求用前缀消歧，不静默选边）。`/v1/models` 合并三域名单（`cn:` / `global:` / `ext:`）。
-- **三协议出口**（阶段二）：`/v1/chat/completions` 之外新增 **`/v1/messages`**（Anthropic Messages 形态）——Claude Code / Anthropic SDK 直接把 `ANTHROPIC_BASE_URL` 指到本网关即可调用外部渠道；请求/响应双向协议转换（system / tools / tool_use / tool_result / stop_reason 映射），流式做事件级映射（`message_start` / `content_block_delta` / `message_stop`）。仅服务外部渠道；CodeBuddy 上游的 Anthropic 形态因缓存兼容性未经验证暂不开放（对齐 hub 的默认关闭策略）。
-- **独立治理**：429 短冷却指数退避（封顶 30 分钟）、5xx 固定短冷却、传输连续失败熔断（达阈 10 分钟）；成功即清零。不占 CodeBuddy 池的在途租约、不喂池熔断器，两套观测互不污染。
-- **正确性边界**：外部渠道路径**不做**提示词改写、指纹脱敏与 DSML 工具调用修复（那是 CodeBuddy 上游特有的对抗语义，标准 OpenAI 上游透传是唯一正确语义）；流式**逐字节透传**（不走 SSE 帧白名单重建，第三方上游的私有字段——OpenRouter 归因、自定义 `usage` 键——原样保留）；错误原文透传。
-- **密钥安全**：`api_key` 只落 config.json（0600），面板与 `/status` 一律不回显（哨兵脱敏 + 保存时按渠道名回填原值）；出站 `base_url` 经启动/保存双期 SSRF 校验，指向内网/元数据地址直接拒绝（自建聚合器可显式 `allow_private: true` 放行内网，云元数据端点恒拒）。
-- **用量归因**：外部渠道流量进入用量视图（realm=`ext`、按渠道分组），TTFB / 速率 / token 与 CodeBuddy 流量同口径统计；`/v1/messages` 出口同桶记账。
-- **额度情报**：面板「外部渠道」视图内置免费额度汇总（默认拉取 [token-fbi.com](https://token-fbi.com/) 开放数据 `data.json`，每日人工复核、含观望区/下架状态）。仅供发现可注册的新平台，领取一律走各平台官方入口——网关不解析情报内容做任何路由决策，也绝不自动注册。`ext_intel.enabled=false` 或 `url=""` 关闭。
+```jsonc
+{
+  "ext_channels": [
+    {
+      // 老配置形态（阶段一）：只填 api_key，行为逐字节不变。
+      "name": "siliconflow",
+      "base_url": "https://api.siliconflow.cn",
+      "api_key": "sk-xxx",
+      "models": ["Qwen/Qwen3-235B-A22B"]
+    },
+    {
+      // 新形态：协议 + 鉴权 + 路径 + 静态头 + 别名 + 凭证池。
+      "name": "gemini",
+      "base_url": "https://generativelanguage.googleapis.com",
+      "protocol": "gemini",                       // openai（缺省）/ anthropic / gemini
+      "auth": {"mode": "custom", "header": "x-goog-api-key"},
+      "headers": {"X-Title": "StarPort"},          // 禁 Host/Content-Length/Connection 等传输层头
+      "models": ["gemini-2.0-flash"],
+      "aliases": {"fast": "gemini-2.0-flash-8b"},  // ext:gemini/fast → 上游 gemini-2.0-flash-8b
+      "credentials": [
+        {"label": "primary", "secret": "AIza-xxx", "expires_at": "2027-01-01"},
+        {"label": "backup",  "secret": "AIza-yyy", "disabled": false,
+         "auth": {"mode": "query", "param": "key"}}
+      ]
+    },
+    {
+      "name": "ark",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "protocol": "openai",
+      "path": "/chat/completions",                 // 非 /v1 形态必须显式覆盖路径
+      "api_key": "sk-yyy",
+      "disabled": true
+    }
+  ]
+}
+```
+
+- **三种出站协议**：`openai`（Chat Completions，缺省，URL 规则逐字节兼容阶段一）、`anthropic`（Messages，`POST {base}/v1/messages`，自动带 `anthropic-version: 2023-06-01`）、`gemini`（`POST {base}/v1beta/models/{model}:generateContent`，流式为 `:streamGenerateContent?alt=sse`）。入站 `/v1/chat/completions` 与 `/v1/messages` 对三类渠道**都可服务**。
+- **四种鉴权**：`bearer`（缺省，`Authorization: Bearer`）、`x-api-key`、`query`（URL 参数，默认 `key`，日志/错误全链路脱敏）、`custom`（指定头名；anthropic/gemini 的协议默认分别是 `x-api-key` / `x-goog-api-key`）。凭证级 `auth` **整体覆盖**渠道级（不做字段级合并——半覆盖会把秘密值投到错误的头里且无报错）。
+- **凭证池与换证**：渠道下可配 ≤20 条凭证，按配置顺序选第一条可用（未停用、非失效、不在冷却、未过期）。**429 只冷却该凭证**（60s 指数退避封顶 30m）并**自动换下一条重试一次**；**401/403 标记失效**退出轮换（改 secret 才恢复）；5xx 只让渠道短冷却 30s、**不换证**；400/404/422 只记最近错误不处罚；传输连续失败 5 次熔断 10 分钟。全部凭证不可用 → `503 all_credentials_unavailable`。
+- **别名与路由**：模型名 `ext:<渠道名>/<模型名或别名>` 精确路由；别名条目会出现在 `/v1/models`（带 `alias_of`）。裸名在渠道间唯一匹配时也可直达（多渠道同名 → 要求前缀消歧）。入站 `/v1/chat/completions` 只认前缀形态（裸名仍走 CodeBuddy 池，与阶段一一致）；`/v1/messages` 走完整解析（含裸名）。
+- **面板与向导**：面板「外部渠道」视图是**渠道卡片 + 凭证列表 + 新建/编辑弹层**：每张卡显示协议、派生状态（可用 / 冷却 / 全部凭证失效 / 全部凭证冷却 / 已停用）、凭证可用数、模型数、最近成功、最近错误；每条凭证显示 label / 状态 / 请求数 / token 累计 / 过期时间 / 最近错误，并可单独「测试」。**写路径只有一条**：`POST /startport/api/config` 提交 `ext_channels` 数组。
+- **连通性测试（只读）**：`POST /startport/api/ext_channels/probe` 只发模型目录请求（不发 chat、不消耗额度），独立 10s 超时、8MiB 上限、错误摘要脱敏；**不落盘、不改渠道状态、不计用量**。
+- **情报 → 草稿**：面板内置 21 个平台预设（`GET /startport/api/ext_presets`），情报表格的「生成草稿」会把渠道名、建议协议/鉴权、来源链接预填到向导；`base_url` **永远为空**、凭证必须你自己填（情报是第三方数据，会过期）。`native_required=true` 的平台（Qoder / TRAE / AutoClaw / CatPaw / Loomy / 华为云码道 / MonkeyCode / Antigravity / WorkBuddy）按钮置灰并说明原因——它们需要客户端签名、设备指纹或有状态转发。
+- **观测**：`/status` 新增 `ext_channels` 键（协议、派生状态、凭证计数与逐凭证运行态，**只增键**，账号池字段不变）；面板渠道卡片展示同样的数据。凭证用量为**本进程内累计**（重启清零），长期趋势请看用量视图的按渠道口径（`realm=ext`）。
+
+**能力边界（不是 bug，已刻意收窄）**
+
+1. **Gemini 流式有硬前提**：上游必须按 `?alt=sse` 返回 `text/event-stream`。上游返回 JSON 时明确返回 `502 gemini_stream_unsupported` 并提示改用 `stream:false`——**绝不把整包 JSON 伪装成流式**（伪流式会让客户端 TTFT/吞吐观测全错）。非流式 Gemini 完全可用。
+2. **Gemini + 多轮工具调用不支持**：Gemini 的 `functionCall` 没有 id、参数不分片；出站时 id 用 `call_<seq>` 合成，Anthropic 入站客户端回传的 `tool_use_id` 与上游无法关联。**单轮工具调用可用**，多轮请改用 OpenAI/Anthropic 协议的渠道。
+3. **图片不支持跨协议**：`/v1/messages` 的 `image` 块返回 400；OpenAI wire 里的图片 part 在转 Anthropic/Gemini 时被忽略（图片转码成本高、收益低，P1 再做）。
+4. **ANT→ANT 走双转换**：Anthropic 入站 + Anthropic 渠道不是字节透传，而是 `Anthropic → OpenAI → Anthropic`（复用同一条链路）。语义等价（system / tools / tool_use / tool_result / stop_reason / usage 都能折回），但上游私有字段（如 `cache_control`、`thinking`）不会保留。需要 100% 透传请直连上游。
+5. **改 label 或 secret = 新凭证**：运行态复用键是 `label + sha256(secret)`。改 secret 会重置冷却/失效状态（这是预期：换 key 就是换凭证）；改 label 同样视为新凭证。只改 `expires_at`/`disabled`/`base_url` 不会重置。
+6. **OpenAI 流式响应不回写别名**：非流式响应会把 `model` 回写客户端请求的名字（别名），流式为了逐字节透传不改写帧内 `model`（仍是上游真实模型名）。
+7. **凭证级用量不落盘**：P0-9 采用进程内计数（详见上文「观测」），`internal/usage` 的桶格式与既有用量视图口径一字未改。
+8. **老配置（只有 `api_key`）在面板里编辑**：向导不显示 `api_key`；直接保存会带回脱敏哨兵并由服务端按渠道名回填，鉴权不丢。但**改渠道名**时无法按名回填，向导会要求你先添加一条凭证（否则会静默丢 key）。
+
+**安全边界**
+
+- 任何接口、日志、错误体都不出现凭证明文：`GET /startport/api/config` 对 `api_key` 与 `credentials[].secret` 一律返回哨兵 `__STARPORT_SECRET_SET__`，保存时按 (渠道名, 凭证 label) 从磁盘回填原值；`query` 鉴权的 URL 在日志/错误里先做 `?key=***` 脱敏；上游错误原文截断后再脱敏。
+- `base_url` 在**启动与保存双期**做 SSRF 校验（内网/链路本地/云元数据字面地址拒绝；自建聚合器可显式 `allow_private: true` 放行内网，元数据端点恒拒）；`path` 不能是完整 URL、不能含 `..`；`headers` 禁止 `Host`/`Content-Length`/`Transfer-Encoding`/`Connection`/`Proxy-*`，`Authorization` 必须走 `auth` 字段。
+- 探测与真实请求不共用超时体系（独立 client），但共用 Transport 复用 TLS 连接池；探测有并发闸（4）。
 
 ### StarPort 相对上游的自有增量
 
@@ -58,7 +112,7 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 
 | 能力 | 说明 |
 |---|---|
-| **外部渠道（多平台）** | 任意 OpenAI 兼容上游与 CodeBuddy 池并存：`ext:` 路由、渠道级冷却/熔断、SSRF 校验、密钥脱敏、用量分组；面板「外部渠道」视图 + token-fbi 额度情报（详见上节） |
+| **外部渠道（多平台）** | 任意上游（OpenAI / Anthropic / Gemini 三种协议）与 CodeBuddy 池并存：四种鉴权（bearer / x-api-key / query / custom）、凭证池与 429 换证、路径/静态头覆盖、别名路由、只读探测、SSRF 校验、密钥脱敏；面板卡片/凭证列表/新建向导 + 情报草稿（详见上节） |
 | **Agent 接入密钥** | 面板「API 密钥」视图创建 / 吊销多把接入密钥：仅开放 `/v1/*` 聊天与模型列表，不开放面板与账号凭证；存储侧只留 SHA-256 摘要，全钥仅创建时可见一次。把网关分享给自己的多台设备 / 工具时不必交出管理密钥。这是面板第 9 个视图（上游为 7 个） |
 | **出站 SSRF 防护** | 可配置的上游地址在启动时校验：拒绝非 http(s) scheme、内网 / 链路本地 / CGNAT / 云元数据字面 IP 与内部主机名，校验失败直接拒启（`internal/upstream/ssrf.go`；外部渠道 `base_url` 复用同一红线） |
 | **XFF 信任边界** | 默认从不采信 `X-Forwarded-For` / `X-Real-IP`（客户端可伪造）；仅当直连地址落在 `server.trusted_proxies` 白名单内才读取转发头，防伪造审计来源与污染上游风控判据 |
@@ -169,7 +223,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` / `header_timeout_seconds` / `idle_timeout_seconds` | `120` / 回落 / `300` | 三段超时分别管：短 RPC 总时长 / 聊天首字节前 / 流中空闲。聊天无总时长上限，长思考不掐断 |
 | `upstream.user_agent` | 空 | 出站 UA 覆盖；空保持现状（可配 `WorkBuddy/<ver>` 让官网「使用端」正确归因） |
 | `upstash.url` / `token` | 空 | Redis 镜像（可选），粘性绑定与池状态防重启丢失 |
-| `ext_channels[]` | `[]` | 外部 OpenAI 兼容渠道（多平台阶段一）：`name` / `base_url` / `api_key` / `models`（显式名单，空 = 自动发现）/ `disabled` / `timeout_seconds`。模型名 `ext:<name>/<model>` 路由；api_key 不回显；base_url 经 SSRF 校验 |
+| `ext_channels[]` | `[]` | 外部渠道（多平台 Provider）：`name` / `base_url` / `protocol`（openai 缺省 / anthropic / gemini）/ `path`（路径覆盖，支持 `{model}`）/ `auth`（bearer / x-api-key / query / custom）/ `headers`（静态头，禁传输层头）/ `models`（显式名单，空 = 自动发现）/ `aliases`（别名 → 上游模型名）/ `credentials[]`（`label`/`secret`/`expires_at`/`disabled`/`auth`，≤20 条）/ `note` / `disabled` / `timeout_seconds` / `allow_private`。`api_key` 为兼容字段（与 `credentials` 互斥，非空时合成 `label="default"` 凭证）。模型名 `ext:<渠道>/<模型或别名>` 路由；凭证池按配置顺序选证，遇 429 / 401 / 403 自动换下一条凭证重试（单请求最多换 1 次、共 2 次上游往返）；任何接口不回显 secret（只回脱敏哨兵，保存时按渠道名/label 回填磁盘原值）；`base_url` 在**启动与保存双期**做 SSRF 校验（内网/元数据字面地址拒绝，`allow_private` 显式放行内网） |
 | `ext_intel.enabled` / `url` / `interval_hours` | `true` / token-fbi / `12` | 面板额度情报拉取（仅展示，不参与路由）；`enabled=false` 或 `url=""` 关闭外联 |
 | `update.check_enabled` / `check_interval_hours` | `true` / `6` | 版本检查开关与间隔；只提示不自动下载，离线场景可关 |
 | `logging.request_archive_enabled` / `retention_days` / `max_mb` | `true` / `7` / `100` | 请求元数据 JSONL 归档（不含提示词、响应正文与凭证）与保留策略 |
@@ -290,7 +344,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | 会话粘性 / Redis 镜像 | `internal/server` / `internal/redisstore` |
 | 中性提示词 / 降级重试 | `internal/prompt/prompt.go` · `Degraded`；`internal/server/degrade.go` |
 | Agent 密钥 | `internal/apikeys/apikeys.go`（包注释含完整设计说明） |
-| 外部渠道（多平台） | `internal/extchan/extchan.go`（Manager / 渠道状态机）、`extrelay.go`（`internal/server`，chat 转发链路）、`exthropic.go`（Anthropic /v1/messages 双向转换）、`intel.go`（额度情报） |
+| 外部渠道（多平台） | `internal/extchan/extchan.go`（Manager / 渠道状态）、`credential.go`（凭证池状态机）、`route.go`（前缀/别名路由）、`do.go`（选证→适配→换证主链路）、`probe.go`（只读探测）、`intel.go`（额度情报）；`internal/provider/`（三协议适配器 + 鉴权 + 预设）；`internal/server/extrelay.go`（chat 转发）、`exthropic.go`（Anthropic /v1/messages 双向转换） |
 | 更新检查 | `internal/update/update.go` |
 | SSRF 校验 | `internal/upstream/ssrf.go` |
 | 配置定义与默认值 | `cmd/server/config.go` |

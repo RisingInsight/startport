@@ -1,22 +1,17 @@
 // exthropic.go 外部渠道的 Anthropic Messages 出口（POST /v1/messages）。
 //
-// 目的：Claude Code / Anthropic SDK 客户端直连本网关使用外部渠道（阶段二借鉴
-// workbuddy2api-hub 与 TriDefender/zcode-api 的三协议形态）。转换是**协议级**
-// 的：请求 Anthropic Messages → OpenAI Chat Completions 发往 ext 渠道；响应按
-// 原方向折回。只覆盖 /v1/messages 主干（system / messages / tools / max_tokens /
-// temperature / stream）；thinking 块、cache_control、citations 等 Anthropic 专有
-// 特性不透传（ext 渠道侧无对应语义）。
+// 目的：Claude Code / Anthropic SDK 客户端直连本网关使用外部渠道。转换是
+// **协议级**的：请求 Anthropic Messages → OpenAI Chat Completions 发往 ext
+// 渠道（由 extchan.Do 按协议适配器决定最终上游形态）；响应按原方向折回。
+// 只覆盖 /v1/messages 主干（system / messages / tools / max_tokens /
+// temperature / stream）；thinking 块、cache_control、citations 等 Anthropic
+// 专有特性不透传（ext 渠道侧无对应语义）。
 //
-// 路由模型名约定：Anthropic 客户端把模型名放 body.model，同样支持
-// "ext:<channel>/<model>" 前缀与裸名唯一匹配（与 /v1/chat/completions 一致）。
-//
-// 范围边界（阶段二第一刀，刻意收窄）：
-//   - 只服务外部渠道；CodeBuddy 上游的 Anthropic 形态是 hub 实验性特性
-//     （缓存兼容性未经验证），不在此刀范围；
-//   - 非流式与流式都支持；流式做事件级映射（message_start / content_block_delta /
-//     message_delta / message_stop / ping + [DONE]），不做 tool_use 块的流式拼装——
-//     OpenAI 侧 tool_calls 在非流式响应里整体折回（流式带工具调用的客户端
-//     暂回退非流式，README 已注明）。
+// 阶段三变化（语义未变）：
+//   - 转发改走 extchan.Do（凭证池选证/换证 + 协议适配）；
+//   - 记账带凭证 label，并累计凭证级进程内计数；
+//   - 转换函数 anthropicToOpenAI / extMessagesSync / extMessagesStream 的
+//     转换语义一字未改（只换了调用形态与参数字段）。
 package server
 
 import (
@@ -29,22 +24,21 @@ import (
 	"time"
 
 	"github.com/RisingInsight/startport/internal/extchan"
-	"github.com/RisingInsight/startport/internal/pool"
-	"github.com/RisingInsight/startport/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/provider"
 	"github.com/RisingInsight/startport/internal/usage"
 )
 
 // anthropicReq Anthropic Messages 请求主干。
 type anthropicReq struct {
-	Model       string          `json:"model"`
-	Messages    []anthropicMsg  `json:"messages"`
-	System      json.RawMessage `json:"system"` // string 或 []content block
-	MaxTokens   int             `json:"max_tokens"`
-	Temperature *float64        `json:"temperature"`
-	TopP        *float64        `json:"top_p"`
-	Stream      bool            `json:"stream"`
-	Tools       []anthropicTool `json:"tools"`
-	StopSequences []string      `json:"stop_sequences"`
+	Model         string          `json:"model"`
+	Messages      []anthropicMsg  `json:"messages"`
+	System        json.RawMessage `json:"system"` // string 或 []content block
+	MaxTokens     int             `json:"max_tokens"`
+	Temperature   *float64        `json:"temperature"`
+	TopP          *float64        `json:"top_p"`
+	Stream        bool            `json:"stream"`
+	Tools         []anthropicTool `json:"tools"`
+	StopSequences []string        `json:"stop_sequences"`
 }
 
 type anthropicMsg struct {
@@ -94,43 +88,44 @@ func (h *Handler) handleExtMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusNotImplemented, "api_error", "no ext channels configured; /v1/messages serves ext channels only")
 		return
 	}
-	ch2, bare, rerr := h.cfg.Ext.RouteFor(areq.Model)
+	ch2, upstream, display, rerr := h.cfg.Ext.RouteModel(areq.Model)
 	if rerr != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "not_found_error", rerr.Error())
 		return
 	}
-	if ch2.Cooldown() {
-		writeAnthropicError(w, http.StatusServiceUnavailable, "overloaded_error",
-			fmt.Sprintf("ext channel %q is cooling down, retry later", ch2.Name))
-		return
-	}
 
-	// Anthropic → OpenAI 请求转换。
-	oaiBody, convErr := anthropicToOpenAI(&areq, bare)
+	// Anthropic → OpenAI 请求转换（上游模型名：别名已解析）。
+	oaiBody, convErr := anthropicToOpenAI(&areq, upstream)
 	if convErr != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", convErr.Error())
 		return
 	}
 
 	attemptStarted := time.Now()
-	rc, status, respBody, cerr := h.cfg.Ext.Chat(r.Context(), ch2, oaiBody, areq.Stream)
-	if cerr != nil {
-		ch2.NoteFailure(extFailThreshold, extBreaker, "transport: "+logfmtTrunc(cerr.Error()))
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", "ext channel transport error: "+cerr.Error())
+	res, derr := h.cfg.Ext.Do(r.Context(), ch2, &extchan.OutRequest{
+		Body:         oaiBody,
+		Stream:       areq.Stream,
+		DisplayModel: display,
+	})
+	if derr != nil {
+		status, code, msg := extErrorFields(derr)
+		writeAnthropicError(w, status, anthropicErrTypeForExt(code, status), msg)
 		return
 	}
-	if status >= 400 {
-		h.noteExtFailure(ch2, status, respBody)
-		// 上游 OpenAI 形态错误 → Anthropic 形态（message 保留上游原文）。
-		writeAnthropicError(w, status, anthropicErrTypeFor(status), upstreamErrorMsg(respBody))
+	cred := ch2.CredentialByLabel(res.CredentialLabel)
+	if res.Status >= 400 {
+		// 上游错误已由 Do 折回 OpenAI 信封（跨协议时），这里转 Anthropic 形态。
+		// 上游错误原文可能回显请求 URL/鉴权头：错误体是客户端可见面，先脱敏。
+		writeAnthropicError(w, res.Status, anthropicErrTypeFor(res.Status),
+			provider.ScrubSecrets(upstreamErrorMsg(res.Body), credSecret(cred)))
 		return
 	}
 
 	if areq.Stream {
-		h.extMessagesStream(w, ch2, bare, rc, attemptStarted, apiKeyName)
+		h.extMessagesStream(w, ch2, cred, display, res.Reader, attemptStarted, apiKeyName)
 		return
 	}
-	h.extMessagesSync(w, ch2, bare, respBody, attemptStarted, apiKeyName)
+	h.extMessagesSync(w, ch2, cred, display, res.Body, attemptStarted, apiKeyName)
 }
 
 func (h *Handler) maxBodyOr(d int64) int64 {
@@ -156,12 +151,24 @@ func anthropicErrTypeFor(status int) string {
 		return "authentication_error"
 	case status == http.StatusNotFound:
 		return "not_found_error"
-	case status >= 500:
-		return "api_error"
 	case status == http.StatusServiceUnavailable:
 		return "overloaded_error"
+	case status >= 500:
+		return "api_error"
 	default:
 		return "invalid_request_error"
+	}
+}
+
+// anthropicErrTypeForExt 先按错误码判定（凭证池/流式能力），再按状态码回落。
+func anthropicErrTypeForExt(code string, status int) string {
+	switch code {
+	case "all_credentials_unavailable", "channel_cooling":
+		return "overloaded_error" // 与 Anthropic 的 429/过载语义对齐
+	case "gemini_stream_unsupported":
+		return "api_error"
+	default:
+		return anthropicErrTypeFor(status)
 	}
 }
 
@@ -185,7 +192,7 @@ func upstreamErrorMsg(body []byte) string {
 	return s
 }
 
-// anthropicToOpenAI 请求转换。bare 为渠道内裸模型名。
+// anthropicToOpenAI 请求转换。bare 为渠道内上游模型名（别名已解析）。
 func anthropicToOpenAI(a *anthropicReq, bare string) ([]byte, error) {
 	oai := map[string]any{
 		"model":    bare,
@@ -365,13 +372,15 @@ func marshalCompact(v any) string {
 }
 
 // extMessagesSync 非流式：OpenAI 响应 → Anthropic Messages 形态。
-func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel, bare string,
-	respBody []byte, attemptStarted time.Time, apiKeyName string) {
+// display 为客户端可见模型名（"ext:<渠道>/<模型或别名>"）。
+func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel,
+	cred *extchan.Credential, display string, respBody []byte,
+	attemptStarted time.Time, apiKeyName string) {
 	var oaiResp struct {
 		Choices []struct {
 			Message struct {
-				Role      string          `json:"role"`
-				Content   string          `json:"content"`
+				Role      string           `json:"role"`
+				Content   string           `json:"content"`
 				ToolCalls []openAIToolCall `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
@@ -383,11 +392,9 @@ func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel, b
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &oaiResp); err != nil || len(oaiResp.Choices) == 0 {
-		ch2.NoteFailure(extFailThreshold, extBreaker, "parse upstream response")
 		writeAnthropicError(w, http.StatusBadGateway, "api_error", "ext channel returned unparseable response")
 		return
 	}
-	ch2.NoteSuccess()
 	choice := oaiResp.Choices[0]
 	// content blocks：text 块 + tool_use 块。
 	blocks := []map[string]any{}
@@ -411,7 +418,7 @@ func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel, b
 		"id":            "msg_" + fmt.Sprintf("%d", time.Now().UnixNano()),
 		"type":          "message",
 		"role":          "assistant",
-		"model":         "ext:" + ch2.Name + "/" + bare,
+		"model":         display,
 		"content":       blocks,
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
@@ -421,8 +428,8 @@ func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel, b
 			"input_tokens":  oaiResp.Usage.PromptTokens,
 			"output_tokens": oaiResp.Usage.CompletionTokens,
 		}
-		// 用量记账（realm=ext，与 chat 路径同口径）。
-		h.recordExtMessagesUsage(apiKeyName, ch2.Name, bare, oaiResp.Usage.PromptTokens,
+		// 用量记账（realm=ext，与 chat 路径同口径）+ 凭证级进程内计数。
+		h.recordExtMessagesUsage(apiKeyName, ch2, cred, display, oaiResp.Usage.PromptTokens,
 			oaiResp.Usage.CompletionTokens, oaiResp.Usage.TotalTokens, attemptStarted)
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -456,8 +463,9 @@ func mapAnthropicStop(openaiFinish string) string {
 // content_block_stop)* → message_delta(stop_reason, usage) → message_stop。
 // 工具调用流式拼装不做（OpenAI 侧 arguments 分片在第一刀直接聚合成完整
 // tool_use 块后一次性下发 content_block_start+input_delta+stop）。
-func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel, bare string,
-	rc io.ReadCloser, attemptStarted time.Time, apiKeyName string) {
+func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
+	cred *extchan.Credential, display string, rc io.ReadCloser,
+	attemptStarted time.Time, apiKeyName string) {
 	defer rc.Close()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -473,12 +481,11 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 			flusher.Flush()
 		}
 	}
-	modelName := "ext:" + ch2.Name + "/" + bare
 	sendEvent("message_start", map[string]any{
 		"type": "message_start",
 		"message": map[string]any{
 			"id": "msg_" + fmt.Sprintf("%d", time.Now().UnixNano()), "type": "message",
-			"role": "assistant", "model": modelName, "content": []any{},
+			"role": "assistant", "model": display, "content": []any{},
 			"stop_reason": nil, "stop_sequence": nil,
 			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
 		},
@@ -532,7 +539,7 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 		var chunk struct {
 			Choices []struct {
 				Delta struct {
-					Content   string           `json:"content"`
+					Content   string `json:"content"`
 					ToolCalls []struct {
 						Index    int    `json:"index"`
 						ID       string `json:"id"`
@@ -560,10 +567,9 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 		if chunk.Error != nil {
 			// 流中错误帧：按 Anthropic 形态补发 error 事件并终止。
 			sendEvent("error", map[string]any{
-				"type": "error",
+				"type":  "error",
 				"error": map[string]any{"type": "api_error", "message": chunk.Error.Message},
 			})
-			ch2.NoteSuccess() // 渠道健康（错误是请求级语义）
 			return
 		}
 		for _, c := range chunk.Choices {
@@ -622,56 +628,34 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 	})
 	sendEvent("message_stop", map[string]any{"type": "message_stop"})
 
-	ch2.NoteSuccess()
 	if hasUsage {
-		h.recordExtMessagesUsage(apiKeyName, ch2.Name, bare, inTokens, outTokens, inTokens+outTokens, attemptStarted)
+		h.recordExtMessagesUsage(apiKeyName, ch2, cred, display, inTokens, outTokens, inTokens+outTokens, attemptStarted)
 	}
 }
 
 // recordExtMessagesUsage /v1/messages 的用量记账（与 chat 路径同桶：realm=ext）。
-func (h *Handler) recordExtMessagesUsage(apiKeyName, channel, model string,
-	prompt, completion, total int64, started time.Time) {
+// 同时累计凭证级进程内计数（P0-9 降级方案 B）。
+func (h *Handler) recordExtMessagesUsage(apiKeyName string, ch2 *extchan.Channel,
+	cred *extchan.Credential, displayModel string, prompt, completion, total int64, started time.Time) {
+	if cred != nil {
+		cred.NoteUsage(prompt, completion)
+	}
 	if h.cfg.Usage == nil {
 		return
-	}
-	delta := pool.TokenUsageDelta{
-		HasPromptTokens:     prompt > 0,
-		PromptTokens:        prompt,
-		HasCompletionTokens: completion > 0,
-		CompletionTokens:    completion,
-		HasTotalTokens:      total > 0,
-		TotalTokens:         total,
-		Model:               "ext:" + channel + "/" + model,
 	}
 	latencyMs := time.Since(started).Milliseconds()
 	if latencyMs < 1 {
 		latencyMs = 1
 	}
-	delta.HasLatencyMs = true
-	delta.LatencyMs = latencyMs
-	h.cfg.Usage.Add(time.Now(), "ext", "ext:"+channel, delta.Model, usageDeltaFromPool(delta, apiKeyName),
-		prompt > 0 || completion > 0 || total > 0)
+	h.cfg.Usage.Add(time.Now(), "ext", "ext:"+ch2.Name, displayModel, usage.Delta{
+		KeyName:          apiKeyName,
+		PromptTokens:     prompt,
+		HasPromptTokens:  prompt > 0,
+		CompletionTokens: completion,
+		HasCompletion:    completion > 0,
+		TotalTokens:      total,
+		HasTotal:         total > 0,
+		LatencyMs:        latencyMs,
+		HasLatency:       true,
+	}, prompt > 0 || completion > 0 || total > 0)
 }
-
-// usageDeltaFromPool pool.TokenUsageDelta → usage.Delta（仅记录字段；速率等观测
-// 在 chat 路径已具足，messages 出口先补主干）。
-func usageDeltaFromPool(d pool.TokenUsageDelta, keyName string) usage.Delta {
-	return usage.Delta{
-		KeyName:          keyName,
-		PromptTokens:     d.PromptTokens,
-		HasPromptTokens:  d.HasPromptTokens,
-		CompletionTokens: d.CompletionTokens,
-		HasCompletion:    d.HasCompletionTokens,
-		TotalTokens:      d.TotalTokens,
-		HasTotal:         d.HasTotalTokens,
-		LatencyMs:        d.LatencyMs,
-		HasLatency:       d.HasLatencyMs,
-	}
-}
-
-// noteExtFailureWrapper 供 messages 路径复用 chat 路径的渠道治理。
-func (h *Handler) noteExtFailureWrapper(ch2 *extchan.Channel, status int, body []byte) {
-	h.noteExtFailure(ch2, status, body)
-}
-
-var _ = reqlog.OutcomeSuccess // 保持 import（后续 messages 路径接流水行日志）

@@ -85,3 +85,81 @@ func TestScrubExtChannelKeepsRealKeys(t *testing.T) {
 		t.Errorf("真实渠道密钥被误删/改写: %v", ec["api_key"])
 	}
 }
+
+// 凭证级哨兵回填：按 (渠道名, label) 从磁盘回填；新凭证的哨兵必须删除。
+func TestScrubExtCredentialSentinelRefill(t *testing.T) {
+	incoming := map[string]any{
+		"ext_channels": []any{
+			map[string]any{
+				"name": "a", "base_url": "https://a",
+				"credentials": []any{
+					map[string]any{"label": "primary", "secret": panel.SecretSentinel},
+					map[string]any{"label": "brand-new", "secret": panel.SecretSentinel},
+				},
+			},
+		},
+	}
+	cur := map[string]any{
+		"ext_channels": []any{
+			map[string]any{
+				"name": "a",
+				"credentials": []any{
+					map[string]any{"label": "primary", "secret": "sk-real-primary"},
+				},
+			},
+		},
+	}
+	scrubSecretSentinels(incoming, cur)
+	creds := incoming["ext_channels"].([]any)[0].(map[string]any)["credentials"].([]any)
+	primary := creds[0].(map[string]any)
+	if primary["secret"] != "sk-real-primary" {
+		t.Errorf("已保存凭证的哨兵应回填磁盘原值, got %v", primary["secret"])
+	}
+	if _, ok := creds[1].(map[string]any)["secret"]; ok {
+		t.Error("新凭证误带哨兵时应删除 secret（绝不把哨兵写盘）")
+	}
+}
+
+// 老配置兜底：磁盘上只有 api_key 时，提交的 credentials[{label:"default"}] 从
+// api_key 回填（面板把老渠道改写成凭证形态的场景）。
+func TestScrubExtCredentialLegacyAPIKeyFallback(t *testing.T) {
+	incoming := map[string]any{
+		"ext_channels": []any{
+			map[string]any{
+				"name": "legacy", "base_url": "https://legacy",
+				"credentials": []any{
+					map[string]any{"label": "default", "secret": panel.SecretSentinel},
+				},
+			},
+		},
+	}
+	cur := map[string]any{
+		"ext_channels": []any{
+			map[string]any{"name": "legacy", "api_key": "sk-legacy-key"},
+		},
+	}
+	scrubSecretSentinels(incoming, cur)
+	creds := incoming["ext_channels"].([]any)[0].(map[string]any)["credentials"].([]any)
+	if got := creds[0].(map[string]any)["secret"]; got != "sk-legacy-key" {
+		t.Errorf("老 api_key 应兜底回填 default 凭证, got %v", got)
+	}
+}
+
+// 老配置渠道原样回传（只有 api_key 哨兵）：按名回填，不丢鉴权。
+func TestScrubExtChannelLegacyRoundTrip(t *testing.T) {
+	incoming := map[string]any{
+		"ext_channels": []any{
+			map[string]any{"name": "legacy", "base_url": "https://legacy", "api_key": panel.SecretSentinel},
+		},
+	}
+	cur := map[string]any{
+		"ext_channels": []any{
+			map[string]any{"name": "legacy", "api_key": "sk-legacy-key"},
+		},
+	}
+	scrubSecretSentinels(incoming, cur)
+	ec := incoming["ext_channels"].([]any)[0].(map[string]any)
+	if ec["api_key"] != "sk-legacy-key" {
+		t.Errorf("老配置渠道回传应保留 api_key, got %v", ec["api_key"])
+	}
+}
