@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -72,7 +73,20 @@ func (c *qoderChecker) CheckIn(ctx context.Context, a *account.Account) (Result,
 	if err != nil {
 		return Result{}, err
 	}
-	campaign, err := pickClaimableCampaign(list)
+	// 业务码先行（真实账号联调修复）：真实上游的信封带业务码字段时按业务错误
+	// 报（含码值与 msg），**不要**误落到"形状已变更"。
+	if msg, failed := qoderBizFailed(list); failed {
+		return Result{Status: StatusFailed, Message: "签到失败：" + msg}, nil
+	}
+	// 容错提取活动数组（真实形状：data 可能是对象嵌套 list 等）。
+	items, ok := campaignsItems(list)
+	if !ok {
+		// 形状诊断（脱敏：只含键名与类型，不含值）——用户下次重试能把关键
+		// 信息带回来（team-lead 修复 1，永久保留）。
+		return Result{Status: StatusFailed,
+			Message: "平台接口可能已变更（活动列表形状无法解析：" + shapeDiagnosis(list) + "）"}, nil
+	}
+	campaign, err := pickClaimableCampaign(items)
 	if err != nil {
 		return Result{Status: StatusFailed, Message: err.Error()}, nil
 	}
@@ -87,6 +101,10 @@ func (c *qoderChecker) CheckIn(ctx context.Context, a *account.Account) (Result,
 		fmt.Sprintf("%s/%s/claim", qoderCampaignsPath, campaign.id))
 	if err != nil {
 		return Result{}, err
+	}
+	// claim 响应同样业务码先行（与 campaigns 同一口径）。
+	if msg, failed := qoderBizFailed(claim); failed {
+		return Result{Status: StatusFailed, Message: "签到失败：" + msg}, nil
 	}
 	// claim 响应形状未在 ref 固化：只做保守判读——顶层 success/errorMessage。
 	if success, ok := claim["success"].(bool); ok && !success {
@@ -114,19 +132,11 @@ type qoderCampaign struct {
 	reward string
 }
 
-// pickClaimableCampaign 从活动列表里找可领取的 CLAIM_BENEFIT。
+// pickClaimableCampaign 从活动条目数组里找可领取的 CLAIM_BENEFIT。
 //   - 找到可领取的 → 返回条目；
 //   - 有 CLAIM_BENEFIT 但全部已领取 → 返回 nil（上层走 already 文案）；
 //   - 列表形状无法解析 → 返回错误（显式告警）。
-func pickClaimableCampaign(list map[string]any) (*qoderCampaign, error) {
-	items, ok := list["data"].([]any)
-	if !ok {
-		// 上游可能直接给数组（无 data 信封）。
-		if arr, isArr := list["data"]; isArr {
-			_ = arr
-		}
-		return nil, fmt.Errorf("平台接口可能已变更（活动列表缺少 data 数组）")
-	}
+func pickClaimableCampaign(items []any) (*qoderCampaign, error) {
 	var claimable *qoderCampaign
 	sawBenefit := false
 	for _, item := range items {
@@ -167,6 +177,114 @@ func pickClaimableCampaign(list map[string]any) (*qoderCampaign, error) {
 	return claimable, nil
 }
 
+// qoderBizFailed 业务码先行（真实账号联调修复 · team-lead 修复 2）：
+// campaigns/claim 信封若带业务码字段（code/status/statusCode）且非成功值，
+// 按业务错误报（含码值与 msg）——不落到"形状已变更"。
+// 成功值口径：缺省 / 0 / "0" / "000000" / "success" / "ok"（涵盖数字码与
+// 字符串码两族——ref 信封与 loomy 同款字符串码都见过）。
+func qoderBizFailed(payload map[string]any) (string, bool) {
+	for _, key := range []string{"code", "status", "statusCode"} {
+		v, ok := payload[key]
+		if !ok {
+			continue
+		}
+		code := jsonString(v)
+		if code == "" {
+			if n := jsonInt64(v); n != 0 {
+				code = fmt.Sprintf("%d", n)
+			} else if _, isNum := v.(float64); isNum {
+				code = "0"
+			}
+		}
+		switch strings.ToLower(code) {
+		case "", "0", "000000", "success", "ok":
+			return "", false // 成功口径：继续解析
+		default:
+			msg := jsonString(payload["msg"])
+			if msg == "" {
+				msg = jsonString(payload["message"])
+			}
+			if msg == "" {
+				msg = jsonString(payload["errorMessage"])
+			}
+			if msg == "" {
+				msg = "上游未给原因"
+			}
+			return fmt.Sprintf("业务码 %s：%s", code, msg), true
+		}
+	}
+	return "", false // 无业务码字段：交给形状解析
+}
+
+// campaignsItems 容错提取活动数组（真实账号联调修复 · team-lead 修复 3）：
+//   - data 为数组（ref/实现原口径）；
+//   - data 为对象 → 常见嵌套键 list / campaigns / items / records；
+//   - 顶层 campaigns 键（数组或对象嵌套同上）；
+//   - 顶层直接是数组（sashDo 解成 map 前的形态，由调用方处理——见 sashDo）。
+//
+// 找不到 → false（调用方报形状变更 + 诊断）。
+func campaignsItems(payload map[string]any) ([]any, bool) {
+	if arr, ok := payload["data"].([]any); ok {
+		return arr, true
+	}
+	if obj, ok := payload["data"].(map[string]any); ok {
+		for _, key := range []string{"list", "campaigns", "items", "records"} {
+			if arr, ok := obj[key].([]any); ok {
+				return arr, true
+			}
+		}
+	}
+	if arr, ok := payload["campaigns"].([]any); ok {
+		return arr, true
+	}
+	if obj, ok := payload["campaigns"].(map[string]any); ok {
+		for _, key := range []string{"list", "items", "records"} {
+			if arr, ok := obj[key].([]any); ok {
+				return arr, true
+			}
+		}
+	}
+	return nil, false
+}
+
+// shapeDiagnosis 形状诊断（真实账号联调修复 · team-lead 修复 1，永久保留）：
+// 报**实际响应顶层键列表与 data 字段实际类型**——脱敏口径：只含键名/类型，
+// 绝不含值（值里可能有 token/用户信息）。用户重试失败时把诊断带回即可定位。
+func shapeDiagnosis(payload map[string]any) string {
+	keys := make([]string, 0, len(payload))
+	for k := range payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	diag := "顶层键=[" + strings.Join(keys, ",") + "]"
+	v, ok := payload["data"]
+	if !ok {
+		return diag + "，data=缺失"
+	}
+	switch typed := v.(type) {
+	case []any:
+		diag += "，data=数组"
+	case map[string]any:
+		inner := make([]string, 0, len(typed))
+		for k := range typed {
+			inner = append(inner, k)
+		}
+		sort.Strings(inner)
+		diag += "，data=对象（键=[" + strings.Join(inner, ",") + "]）"
+	case string:
+		diag += "，data=字符串"
+	case float64:
+		diag += "，data=数字"
+	case bool:
+		diag += "，data=布尔"
+	case nil:
+		diag += "，data=null"
+	default:
+		diag += "，data=未知"
+	}
+	return diag
+}
+
 // sashGet / sashPost sash 域薄封装（最小头束、无签名；消息已脱敏）。
 func (c *qoderChecker) sashGet(ctx context.Context, token, path string) (map[string]any, error) {
 	return c.sashDo(ctx, http.MethodGet, token, path, nil)
@@ -202,9 +320,23 @@ func (c *qoderChecker) sashDo(ctx context.Context, method, token, path string, b
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		return nil, authExpiredf("HTTP %d", resp.StatusCode)
 	}
-	var payload map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	// 顶层可能直接是数组（无信封）——先探 raw，数组则包成 {"data":[…]} 交给
+	// 同一条解析链（team-lead 修复 3 的顶层数组形态）。
+	var raw json.RawMessage
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, fmt.Errorf("平台接口可能已变更（响应不是 JSON）")
+	}
+	trimmed := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(trimmed, "[") {
+		var arr []any
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return nil, fmt.Errorf("平台接口可能已变更（响应数组无法解析）")
+		}
+		return map[string]any{"data": arr}, nil
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("平台接口可能已变更（响应不是 JSON 对象）")
 	}
 	return payload, nil
 }

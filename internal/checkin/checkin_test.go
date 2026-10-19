@@ -513,3 +513,118 @@ func readAllStr(r *http.Request) (string, error) {
 		}
 	}
 }
+
+// ── qoder 真实账号形状容错（用户实测修复回归）──────────────────
+
+func newQoderCheckerAt(url string) *qoderChecker {
+	c := newQoderChecker()
+	c.Base = url
+	return c
+}
+
+// 真实形状样例 1：data 为对象嵌套 list → 走通全链。
+func TestQoderRealShapeNestedList(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"list":[
+			  {"id":"c-9","actionType":"CLAIM_BENEFIT","claimStatus":"pending","rewardName":"100 credits"}
+			]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":0,"data":{"result":true}}`))
+	}))
+	defer srv.Close()
+	res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil || res.Status != StatusOK || !strings.Contains(res.Reward, "100 credits") {
+		t.Errorf("对象嵌套 list 应走通: %+v %v", res, err)
+	}
+}
+
+// 真实形状样例 2：data 对象嵌套 campaigns 键 + 顶层 campaigns 数组两形态。
+func TestQoderRealShapeAltKeys(t *testing.T) {
+	cases := []struct{ name, body string }{
+		{"data.campaigns", `{"data":{"campaigns":[{"id":"c-1","actionType":"CLAIM_BENEFIT","claimStatus":"pending"}]}}`},
+		{"top-level campaigns", `{"campaigns":[{"id":"c-1","actionType":"CLAIM_BENEFIT","claimStatus":"pending"}]}`},
+		{"top-level array", `[{"id":"c-1","actionType":"CLAIM_BENEFIT","claimStatus":"pending"}]`},
+		{"data.records", `{"data":{"records":[{"id":"c-1","actionType":"CLAIM_BENEFIT","claimStatus":"pending"}]}}`},
+	}
+	for _, tc := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(tc.body))
+				return
+			}
+			_, _ = w.Write([]byte(`{"success":true}`))
+		}))
+		res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+		srv.Close()
+		if err != nil || res.Status != StatusOK {
+			t.Errorf("%s: 应走通: %+v %v", tc.name, res, err)
+		}
+	}
+}
+
+// 业务码先行：非成功业务码 → 业务错误（含码与 msg），不误报形状变更。
+func TestQoderBizCodeFirst(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"500","msg":"server busy"}`))
+	}))
+	defer srv.Close()
+	res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusFailed || !strings.Contains(res.Message, "业务码 500") ||
+		!strings.Contains(res.Message, "server busy") {
+		t.Errorf("业务码应先行报错: %+v", res)
+	}
+	if strings.Contains(res.Message, "接口可能已变更") {
+		t.Errorf("业务码错误不应误报形状变更: %+v", res)
+	}
+	// 字符串成功码 "000000"（loomy 同款）→ 不算失败，继续解析。
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"code":"000000","data":[{"id":"c-2","actionType":"CLAIM_BENEFIT","claimStatus":"pending"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true}`))
+	}))
+	defer srv2.Close()
+	res, err = newQoderCheckerAt(srv2.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil || res.Status != StatusOK {
+		t.Errorf("字符串成功码应走通: %+v %v", res, err)
+	}
+}
+
+// 诊断信息：形状不符的错误含键名与 data 类型、不含值（脱敏）。
+func TestQoderShapeDiagnosis(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"errCode":"X-TOKEN-SECRET-VALUE","message":"welcome user 42","data":{"foo":"bar-value"}}`))
+	}))
+	defer srv.Close()
+	res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := res.Message
+	for _, want := range []string{"平台接口可能已变更", "顶层键=[data,errCode,message]", "data=对象（键=[foo]）"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("诊断缺 %q: %s", want, msg)
+		}
+	}
+	// 脱敏：值不进诊断（只有键名/类型）。
+	for _, leak := range []string{"X-TOKEN-SECRET-VALUE", "bar-value", "42"} {
+		if strings.Contains(msg, leak) {
+			t.Errorf("诊断泄露值 %q: %s", leak, msg)
+		}
+	}
+	// data 缺失形态。
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"message":"gone"}`))
+	}))
+	defer srv2.Close()
+	res, _ = newQoderCheckerAt(srv2.URL).CheckIn(context.Background(), newQoderAccount())
+	if !strings.Contains(res.Message, "data=缺失") {
+		t.Errorf("data 缺失诊断异常: %s", res.Message)
+	}
+}
