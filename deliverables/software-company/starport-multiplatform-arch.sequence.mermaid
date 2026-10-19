@@ -1,0 +1,89 @@
+%% StarPort 多平台 Provider 框架 · 时序图（来源：starport-multiplatform-arch.md §17）
+
+%% ── 时序图 1：入站 Anthropic + 出站 Gemini + 429 换证 + 记账 ──
+sequenceDiagram
+    autonumber
+    participant C as 客户端(Claude Code)
+    participant H as server.Handler
+    participant M as extchan.Manager
+    participant CH as Channel
+    participant CR as Credential
+    participant A as provider.Adapter(gemini)
+    participant U as 上游 Gemini
+    participant AC as usage.Recorder
+
+    C->>H: POST /v1/messages {model:"ext:gem/claude-ish", stream:true}
+    H->>H: chatAuth → apiKeyName
+    H->>M: RouteFor("ext:gem/claude-ish")
+    M->>CH: Get("gem")
+    M-->>H: (ch, 上游名 "gemini-2.5-pro")
+
+    H->>H: irFromAnthropic(anthropicReq) → IR
+    H->>M: Do(ctx, ch, OutRequest{IR, stream:true})
+
+    M->>CH: pick()
+    CH->>CR: usable(now)?
+    CR-->>CH: primary healthy → 选中
+    M->>M: target = BuildTarget(ch, primary)
+    M->>A: BuildChat(target, IR)
+    A->>A: BuildURL(gemini, model) + x-goog-api-key
+    A-->>M: *http.Request
+    M->>U: POST /v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse
+    U-->>M: 429 Too Many Requests
+
+    M->>CR: primary.NoteRateLimited(60s, 30m)
+    Note over M,CH: 换证判定：429 + 未达上限 + 还有可用凭证 + 未写响应
+    M->>CH: hasUsable(exclude=primary)
+    CH-->>M: true（backup）
+    M->>CH: pick() → backup
+
+    M->>A: BuildChat(target(backup), IR)
+    M->>U: POST ...?alt=sse（backup 的 key）
+    U-->>M: 200 text/event-stream
+
+    M-->>H: Result{Stream, Credential:backup, Attempts:2, Switched:true}
+
+    loop 每个 SSE 帧
+        H->>A: StreamReader.Next()
+        A-->>H: StreamEvent{Kind:text, Text:"…"}
+        H->>C: event: content_block_delta
+    end
+    A-->>H: StreamEvent{Kind:finish, Usage:{in,out}}
+    H->>C: message_delta + message_stop
+
+    H->>AC: Add(realm="ext", uid="ext:gem", model="ext:gem/claude-ish", Delta{Credential:"backup"})
+    M->>CR: backup.NoteSuccess()
+    H->>H: log "[ext] ch=gem cred=backup status=200 attempt=2"
+
+%% ── 时序图 2：面板探测（未保存草稿，不落盘不污染状态） ──
+sequenceDiagram
+    autonumber
+    participant W as extwiz.js(向导)
+    participant P as panel.Panel
+    participant V as upstream(SSRF 校验)
+    participant M as extchan.Manager
+    participant A as provider.Adapter
+    participant U as 上游
+
+    W->>P: POST /startport/api/ext_channels/probe {draft:{base_url,protocol,auth,credentials:[{label,secret}]}}
+    P->>P: withAuth(Bearer)
+    P->>P: 解析 draft → ChannelDef
+    P->>V: ValidateOutboundBaseAllowPrivate(base_url, allow_private)
+    alt 内网/元数据地址
+        V-->>P: error
+        P-->>W: 400 {error:"draft.base_url: 拒绝指向内网…"}
+    end
+
+    P->>P: sem <- struct{}{}  // 并发上限 4，defer 释放
+    P->>M: Probe(ctx(10s), def, credLabel)
+    M->>M: 构造临时 Channel（不注册进 m.channels）
+    M->>A: BuildModels(target)  // 只读：GET .../models
+    A-->>M: *http.Request
+    M->>U: GET /v1beta/models（或 /v1/models）
+    U-->>M: 200 [{models…}] / 401
+    M->>M: DecodeModels + 记录 latency
+    M-->>P: ProbeResult{OK,Status,LatencyMS,ModelsCount,Error(已脱敏)}
+    P-->>W: {ok:true,result:{…}}
+
+    Note over M,U: 全程不调用 NoteSuccess/NoteRateLimited/NoteInvalid<br/>不写 lastErr、不计 in_flight、不落盘、不缓存
+    W->>W: 渲染结果；保存按钮仍走 POST /startport/api/config

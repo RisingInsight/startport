@@ -164,9 +164,24 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 - **思考拆解**：上游可能把思考混在正文里（`<thinking>` 等标签），适配器跨分片拆解成 `reasoning_content`；"关闭思考"降级为不指定（上游无法真正关闭，发 false 会断连）。
 - **不做**：token 刷新 / PAT 兑换 / 上下文档位 / 签到 / 额度查询（设计文档 §1.2，每项的后果与替代见 `starport-qoder-design.md`）。
 
-### 账号中心（v1.6.0）
+### 账号中心（v1.6.0 / v1.7.0 登录式添加）
 
 把各平台账号（非 CodeBuddy）统一收进一个页面管理：**账号是运行数据**（落 `data/accounts.json`，0600），凭证**单向投影**进 config.json 的 managed 渠道（自动挂进转发引擎，`ext:<平台>/<model>` 路由不变）。
+
+**添加方式一：浏览器登录（v1.7.0，与 CodeBuddy 账号同体验）**
+
+「添加账号」向导首选 Tab。选平台 → 「获取授权链接」→ 浏览器打开登录 → 面板显示"等待授权完成，自动检测中…" → **成功后自动入池**（无需粘贴任何 token）：
+
+| 平台 | 登录方式 | 说明 |
+|---|---|---|
+| `qoder` / `qoder-intl` | PKCE 设备码轮询（官方登录页） | **无需本机客户端**；每平台同时只允许一个进行中会话 |
+| `autoclaw`（国内） | 手机号 + 短信验证码 | 60 秒发码频控；`autoclaw-intl` 需风控验证码，暂不支持 |
+| 其余平台 | 暂用「粘贴凭证」 | `trae`/`zcode` 等随各自转发适配器在后续版本开放 |
+
+- 会话 5 分钟超时；取消/过期/被新会话顶替都会停止后台轮询；全链路脱敏（授权链接不含 verifier，日志手机号打码）。
+- 本地联调/镜像可用环境变量覆盖登录端点：`STARPORT_ACCLOGIN_QODER_OPENAPI_CN/_INTL`、`STARPORT_ACCLOGIN_QODER_WEB_CN/_INTL`、`STARPORT_ACCLOGIN_AUTOCLAW_USERAPI`（空值=官方默认）。
+
+**添加方式二：粘贴凭证**（v1.6.0 起支持，仍是 loomy/custom 等平台的入口）
 
 **支持平台**
 

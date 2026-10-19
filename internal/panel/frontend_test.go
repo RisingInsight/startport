@@ -1549,6 +1549,53 @@ func TestAccountCenterDOM(t *testing.T) {
 		}
 	}
 
+	// 浏览器登录向导（v1.7.0）：双方式 Tab + 两条流（qoder 授权链接 / autoclaw 短信）
+	// 的 DOM 与接线断言。
+	for _, id := range []string{
+		"accAddMode", "accAddModeHint", "accAddBrowserPanel", "accAddPastePanel",
+		"abHint", "abSmsRow", "abPhone", "abSendCode", "abCode", "abSubmit",
+		"abUrlRow", "abUrl", "abCopyBtn", "abOpenBtn", "abStatus",
+		"abStart", "abRestart", "abCancelLogin",
+	} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("index.html 缺浏览器登录向导元素 id=%q", id)
+		}
+	}
+	acctJS, err := os.ReadFile("acct.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"accounts/login/capabilities", // 服务端能力开关（规格 §3.4 不硬编码）
+		"ACCT_BROWSER_PLATFORMS",      // 平台支持面（qoder 双区 / autoclaw 国内）
+		"ACCT_LOGIN_POLL_MS = 2000",   // wait 轮询间隔 2s（规格 §3.1）
+		"ACCT_SMS_RESEND_SEC = 60",    // 发码倒计时 60s（规格 R3）
+		"accounts/login/start",        // 会话创建端点
+		"accounts/login/wait",
+		"accounts/login/sms/send",
+		"accounts/login/sms/verify",
+		"accounts/login/cancel",
+		"等待授权完成，自动检测中",          // 轮询期 UI 文案
+		"acctBrowserSupported",  // 模式切换的平台支持判定
+		"acctLeaveCenterNotify", // 离开账号中心的会话提示钩子
+	} {
+		if !strings.Contains(string(acctJS), want) {
+			t.Errorf("acct.js 缺浏览器登录接线片段 %q", want)
+		}
+	}
+	// 契约回归：session_id 不得再走路径段（联调冻结为 body 形态）。
+	for _, bad := range []string{"+ '/wait'", "+ '/sms_verify'", "+ '/cancel'"} {
+		if strings.Contains(string(acctJS), bad) {
+			t.Errorf("acct.js 出现路径段形态的登录端点 %q（应为 body 传 session_id）", bad)
+		}
+	}
+	// app.js 必须在 go() 里挂acctLeaveCenterNotify 钩子（页面切换提示）。
+	for _, want := range []string{"acctLeaveCenterNotify"} {
+		if !strings.Contains(string(appJS), want) {
+			t.Errorf("app.js 缺浏览器登录会话提示钩子 %q", want)
+		}
+	}
+
 	// 迁入/回退接线（T5 契约冻结）：ext.js 必须直连两个端点，且回退前有确认语义
 	// （架构 §7.3：二次确认由前端做）。managed 渠道显示「回退」、非托管显示「迁入」。
 	extJS, err := os.ReadFile("ext.js")

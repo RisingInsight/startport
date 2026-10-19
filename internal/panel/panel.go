@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/acclogin"
 	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
@@ -90,6 +91,8 @@ type Config struct {
 	Accounts *account.Store
 	// Checkin 平台签到调度器（nil = 平台签到端点返回 501）。
 	Checkin *checkin.Scheduler
+	// Login 登录式添加会话管理器（nil = 登录端点返回 501）。
+	Login *acclogin.Manager
 	// SaveChannels 账号投影落盘闭包（main 注入 = saveConfig 同一条链：
 	// 校验/SSRF/原子写/热重载各只有一份实现）。账号 CRUD 后由 acct.go 调
 	// acctchan.Sync 完成 accounts.json → config.json 的投影。
@@ -247,6 +250,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /startport/api/accounts/{id}/state", p.withAuth(p.platformAccountState))
 	p.mux.HandleFunc("POST /startport/api/accounts/{id}/probe", p.withAuth(p.platformAccountProbe))
 	p.registerCheckinRoutes() // 平台签到（v1.6.0 T3；路由实现在 checkin.go）
+	p.registerLoginRoutes()   // 登录式添加（v1.7.0；路由实现在 acctlogin.go）
 	p.mux.HandleFunc("POST /startport/api/channels/{name}/migrate", p.withAuth(p.channelMigrate))
 	p.mux.HandleFunc("POST /startport/api/channels/{name}/rollback", p.withAuth(p.channelRollback))
 }

@@ -1,0 +1,132 @@
+%% StarPort 多平台 Provider 框架 · 类图（来源：starport-multiplatform-arch.md §3.5）
+%% 说明：IR 类型（ChatRequest/ChatResponse/StreamEvent）为简化投影，完整字段见 internal/provider/ir.go
+classDiagram
+  class Manager {
+    -channels []*Channel
+    -http *http.Client
+    -base time.Duration
+    -max time.Duration
+    -breaker time.Duration
+    +ReplaceAll(defs []ChannelDef)
+    +Get(name string) *Channel
+    +RouteFor(model string) (Channel, string, error)
+    +Do(ctx, ch, req *OutRequest) *Result
+    +ModelList(ctx) []map
+    +Status() []Status
+    +Probe(ctx, def ChannelDef, credLabel string) ProbeResult
+  }
+  class Channel {
+    +string Name
+    +string BaseURL
+    +Protocol Protocol
+    +string Path
+    +AuthSpec Auth
+    +map Headers
+    +[]string Models
+    +map Aliases
+    +[]*Credential Creds
+    +bool Disabled
+    +pick() *Credential
+    +hasUsable(exclude *Credential) bool
+    +Snapshot() Status
+    +NoteSuccess()
+    +noteChannelCooldown(base, max, reason)
+    +NoteServerUpstream(base, reason)
+    +NoteFailure(threshold, breaker, reason)
+  }
+  class Credential {
+    +string Label
+    +string Secret
+    +time.Time ExpiresAt
+    +bool Disabled
+    +AuthSpec Auth
+    -CredState state
+    -time.Time coolUntil
+    -int coolStreak
+    -time.Time lastOK
+    -time.Time lastUsed
+    -string lastErr
+    -string stateKey
+    +usable(now) bool
+    +NoteSuccess()
+    +NoteRateLimited(base, max, reason)
+    +NoteInvalid(reason)
+    +AuthFor(channelAuth AuthSpec) AuthSpec
+    +Snapshot() CredStatus
+  }
+  class Adapter {
+    <<interface>>
+    +Name() string
+    +Protocol() Protocol
+    +BuildChat(ctx, t *Target, req *ChatRequest) (*http.Request, error)
+    +DecodeChat(t, status int, body []byte) (*ChatResponse, *UpstreamError)
+    +DecodeStream(t, body io.ReadCloser) (StreamReader, error)
+    +BuildModels(ctx, t) (*http.Request, error)
+    +DecodeModels(t, status, body) ([]string, error)
+  }
+  class Registry {
+    -map m
+    +Get(p Protocol) (Adapter, bool)
+    +MustGet(p Protocol) Adapter
+  }
+  class ChatRequest {
+    +string Model
+    +[]Message Messages
+    +string System
+    +int MaxTokens
+    +float64 Temperature
+    +float64 TopP
+    +[]string Stop
+    +[]Tool Tools
+    +bool Stream
+  }
+  class ChatResponse {
+    +string ID
+    +string Model
+    +[]Choice Choices
+    +Usage Usage
+    +StopReason Finish
+  }
+  class Target {
+    +string Name
+    +Protocol Protocol
+    +string BaseURL
+    +string Path
+    +map Headers
+    +AuthSpec Auth
+    +string Secret
+    +time.Duration Timeout
+  }
+  class Preset {
+    +string Key
+    +string Name
+    +[]string Aliases
+    +Protocol Protocol
+    +AuthSpec Auth
+    +string BaseURL
+    +string Path
+    +[]string Models
+    +bool NativeRequired
+    +string Note
+  }
+  class Result {
+    +Channel Channel
+    +Credential Credential
+    +int Status
+    +[]byte Body
+    +io.ReadCloser Stream
+    +int Attempts
+    +bool Switched
+    +string ErrorCode
+    +error Err
+  }
+
+  Manager "1" o-- "*" Channel : 持有
+  Channel "1" o-- "1..20" Credential : 凭证池
+  Manager ..> Registry : 取适配器
+  Registry "1" o-- "3" Adapter : 内置注册
+  Adapter ..> Target : 读取
+  Adapter ..> ChatRequest : 编码
+  Adapter ..> ChatResponse : 解码
+  Manager ..> Result : 产出
+  Preset ..> Channel : 生成草稿
