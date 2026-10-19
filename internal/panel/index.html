@@ -2593,7 +2593,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
   <div class="dlg" style="width:640px;max-width:96vw">
     <header>
       <h3>添加平台账号</h3>
-      <div class="hint" id="accAddHint">选择平台后粘贴对应凭证 JSON；保存后立即投影为托管渠道并参与转发。</div>
+      <div class="hint" id="accAddHint">选择平台与添加方式；两种方式都立即投影为托管渠道并参与转发。</div>
     </header>
     <div class="body">
       <label class="fld"><span class="lb">平台</span>
@@ -2605,16 +2605,56 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <option value="qoder-intl">Qoder 国际（阿里）</option>
           <option value="custom">通用平台（OpenAI / Anthropic / Gemini 兼容）</option>
         </select></label>
-      <label class="fld"><span class="lb">凭证 JSON *</span>
-        <textarea id="accAddCred" rows="8" autocomplete="off" spellcheck="false"></textarea>
-        <span class="hint" id="accAddSchema"></span></label>
-      <div class="grid2">
-        <label class="fld"><span class="lb">备注名（可选）</span>
-          <input id="accAddLabel" placeholder="留空自动编号（账号-1…）" autocomplete="off"></label>
-        <label class="fld"><span class="lb">备注（可选）</span>
-          <input id="accAddNote" placeholder="来源 / 用途" autocomplete="off"></label>
+      <!-- 添加方式 Tab（v1.7.0）：浏览器登录支持 qoder 双区 / autoclaw 国内；
+           其余平台仅粘贴（页签置灰 + 提示）。 -->
+      <div class="seg" id="accAddMode" role="group" aria-label="添加方式">
+        <button type="button" data-mode="browser">浏览器登录</button>
+        <button type="button" data-mode="paste" class="on">粘贴凭证</button>
       </div>
-      <div class="state err" id="accAddErr" hidden></div>
+      <div class="hint" id="accAddModeHint" hidden style="margin:6px 0"></div>
+
+      <!-- 方式一：浏览器登录（登录规格 §3.1：login/start → wait 长轮询；autoclaw 走 sms_verify） -->
+      <div id="accAddBrowserPanel" hidden>
+        <div class="hint" id="abHint" style="margin-bottom:8px"></div>
+        <!-- autoclaw 国内：手机验证码两步 -->
+        <div id="abSmsRow" hidden style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin:0 0 8px">
+          <label class="fld" style="flex:2;min-width:150px"><span class="lb">手机号</span>
+            <input id="abPhone" maxlength="11" inputmode="numeric" placeholder="11 位手机号" autocomplete="off"></label>
+          <button type="button" class="xs" id="abSendCode" style="flex:0 0 auto">发送验证码</button>
+          <label class="fld" style="flex:1;min-width:110px"><span class="lb">验证码</span>
+            <input id="abCode" maxlength="6" inputmode="numeric" placeholder="6 位数字" autocomplete="one-time-code"></label>
+          <button type="button" class="xs" id="abSubmit" style="flex:0 0 auto">提交</button>
+        </div>
+        <!-- qoder 双区：授权链接 + 轮询 -->
+        <div id="abUrlRow" hidden style="margin:0 0 8px">
+          <div class="hint" style="margin-bottom:4px">在浏览器打开以下链接并完成登录（不要关闭本窗口）：</div>
+          <div class="url" id="abUrl" style="word-break:break-all"></div>
+          <div style="display:flex;gap:8px;margin-top:6px">
+            <button type="button" class="xs" id="abCopyBtn">复制链接</button>
+            <a class="xs" id="abOpenBtn" href="#" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-block">在浏览器打开</a>
+          </div>
+        </div>
+        <div class="state" id="abStatus" hidden></div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button type="button" class="xs" id="abStart">获取授权链接</button>
+          <button type="button" class="xs" id="abRestart" hidden>重新获取</button>
+          <button type="button" class="xs" id="abCancelLogin" hidden>取消登录</button>
+        </div>
+      </div>
+
+      <!-- 方式二：粘贴凭证（既有逻辑零改动） -->
+      <div id="accAddPastePanel">
+        <label class="fld"><span class="lb">凭证 JSON *</span>
+          <textarea id="accAddCred" rows="8" autocomplete="off" spellcheck="false"></textarea>
+          <span class="hint" id="accAddSchema"></span></label>
+        <div class="grid2">
+          <label class="fld"><span class="lb">备注名（可选）</span>
+            <input id="accAddLabel" placeholder="留空自动编号（账号-1…）" autocomplete="off"></label>
+          <label class="fld"><span class="lb">备注（可选）</span>
+            <input id="accAddNote" placeholder="来源 / 用途" autocomplete="off"></label>
+        </div>
+        <div class="state err" id="accAddErr" hidden></div>
+      </div>
     </div>
     <footer>
       <span class="note grow" id="accAddOut"></span>

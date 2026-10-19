@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/acclogin"
 	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/acctchan"
 	"github.com/RisingInsight/startport/internal/apikeys"
@@ -45,7 +46,7 @@ import (
 // 用 var 而非 const：const 无法被 `go build -ldflags -X` 注入，CI 也就无法把
 // git tag 打成二进制版本号（自动更新的「版本源」必须可注入）。默认值保留源码
 // 版本，本地裸构建（不带 -X）行为与改动前完全一致。
-var appVersion = "1.6.2"
+var appVersion = "1.7.0"
 
 // appCommit / appBuildTime 构建期元信息，由 CI 经 -ldflags -X 注入（本地构建为空）。
 // 仅用于启动日志与 /startport/api/overview 观测，不参与任何路由或出站决策。
@@ -312,10 +313,45 @@ func main() {
 	})
 	defer chkSched.Close()
 
-	// 启动期 Reconcile 延后到 live/sch 装配完成之后（见 scheduler.New 之后的
-	// acctReconcile 调用）——Sync 经 saveChannels 闭包走 applyConfig 全链，
-	// 需要全部运行时对象就位。
+	// ── 登录式添加（v1.7.0 首批）────────────────────────────────
+	// qoder 双区 PKCE 设备授权 + autoclaw 国内短信。入池走 Accounts.Add
+	// （既有校验）；投影经 AfterPool → acctchan.Sync（saveChannels 闭包在
+	// 下方赋值——闭包捕获变量，调用时已就位）。
+	acctLoader := func() []extchan.ChannelDef {
+		cur, lerr := Load(*cfgPath)
+		if lerr != nil {
+			log.Printf("[acclogin] 读取当前配置失败: %v", lerr)
+			return nil
+		}
+		return extChannelDefs(cur.ExtChannels)
+	}
 	var saveChannels func(defs []extchan.ChannelDef) error
+	// 端点环境变量覆盖（v1.7.0；本地联调/镜像场景）：空值 = 官方默认（键级回落
+	// 在 acclogin.NewManager 内）。刻意不进配置文件——避免面板暴露端点改写面。
+	loginOpenAPI, loginWeb, loginAutoClaw := accloginEndpointsFromEnv()
+	acctLoginMgr, err := acclogin.NewManager(acclogin.Config{
+		Store: acctStore,
+		AfterPool: func(platform, accountID string) {
+			if saveChannels == nil {
+				return
+			}
+			if _, serr := acctchan.Sync(acctStore, acctLoader, saveChannels, log.Printf); serr != nil {
+				log.Printf("[acclogin] 账号 %s 投影失败（入池成功，稍后 Reconcile 修齐）: %v", accountID, serr)
+			}
+		},
+		MachineIDFile:   stateSibling(cfg.StateFile, "qoder-machine-id"),
+		QoderOpenAPI:    loginOpenAPI,
+		QoderWeb:        loginWeb,
+		AutoClawUserAPI: loginAutoClaw, // 空值 → NewManager 回落官方默认
+		Logf:            log.Printf,
+	})
+	if err != nil {
+		log.Fatalf("config: 初始化登录式添加失败: %v", err)
+	}
+	defer acctLoginMgr.Close()
+
+	// 启动期 Reconcile 延后到 live/sch 装配完成之后（saveChannels 闭包在
+	// 上方声明、此处赋值——AfterPool 的登录入池投影同样经它走 applyConfig）。
 
 	sch := scheduler.New(scheduler.Config{
 		Pool:           p,
@@ -431,14 +467,6 @@ func main() {
 	saveChannels = func(defs []extchan.ChannelDef) error {
 		return saveChannelsAccounts(defs, *cfgPath, live, p, up, sch, extMgr)
 	}
-	acctLoader := func() []extchan.ChannelDef {
-		cur, cerr := Load(*cfgPath)
-		if cerr != nil {
-			log.Printf("[acctchan] 读取当前配置失败: %v", cerr)
-			return nil
-		}
-		return extChannelDefs(cur.ExtChannels)
-	}
 	if summary, serr := acctchan.Sync(acctStore, acctLoader, saveChannels, log.Printf); serr != nil {
 		log.Printf("[acctchan] 启动同步失败（账号未投影，转发不受影响）: %v", serr)
 	} else if summary != "no changes" {
@@ -486,6 +514,7 @@ func main() {
 		Accounts:     acctStore,
 		SaveChannels: saveChannels,
 		Checkin:      chkSched,
+		Login:        acctLoginMgr,
 		LoadChannelDefs: func() []extchan.ChannelDef {
 			cur, err := Load(*cfgPath)
 			if err != nil {

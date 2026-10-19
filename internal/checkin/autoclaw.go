@@ -388,3 +388,12 @@ func actionName(method string) string {
 	}
 	return "签到"
 }
+
+// AutoClawSignedHeaders userapi 域签名头的导出形态（账号中心登录流程
+// internal/acclogin 复用——签名常量与头束**只允许一份实现**，第二份就是
+// 稳定 400002）。now 注入时间戳（测试复算；生产传 time.Now()）。
+func AutoClawSignedHeaders(token string, now time.Time) [][2]string {
+	c := newAutoClawChecker(false)
+	c.Now = func() time.Time { return now }
+	return c.signedAuthHeaders(token)
+}

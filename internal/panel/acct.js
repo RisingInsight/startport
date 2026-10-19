@@ -349,11 +349,28 @@ function openAcctAdd(platform) {
   $('accAddCred').value = '';
   acctAddErr('', false);
   acctAddSchemaUI();
+  // v1.7.0：首屏默认「浏览器登录」（支持平台）；不支持的平台上「粘贴」页签并提示。
+  const plat = $('accAddPlatform').value;
+  const capsBefore = acctBrowserSupported(plat);
+  acctSetMode(capsBefore ? 'browser' : 'paste');
+  // 服务端能力开关异步到位后：仅当支持面判定翻转时才重跑模式（不打断进行中会话）。
+  acctLoadCapabilities().then(caps => {
+    if (!caps) return;
+    if (acctBrowserSupported(plat) !== capsBefore
+      && $('accAddVeil') && $('accAddVeil').classList.contains('on')) {
+      acctSetMode(acctAddMode);
+    }
+  });
   veil.classList.add('on');
-  setTimeout(() => { try { $('accAddCred').focus(); } catch (e) {} }, 60);
+  setTimeout(() => {
+    try {
+      (acctAddMode === 'browser' ? $('abStart') : $('accAddCred')).focus();
+    } catch (e) {}
+  }, 60);
 }
 
 function closeAcctAdd() {
+  stopAccLogin(true); // 进行中的登录会话：停轮询并通知后端取消（best-effort）
   const veil = $('accAddVeil');
   if (veil) veil.classList.remove('on');
 }
@@ -491,7 +508,12 @@ if ($('btnCheckinAll')) $('btnCheckinAll').onclick = () => acctCheckinAll($('btn
 if ($('btnExtDrawer')) $('btnExtDrawer').onclick = () => openAcctDrawer(!acctDrawerOpen);
 if ($('btnExtDrawerClose')) $('btnExtDrawerClose').onclick = () => openAcctDrawer(false);
 if ($('btnAcctConsistency')) $('btnAcctConsistency').onclick = acctConsistency;
-if ($('accAddPlatform')) $('accAddPlatform').onchange = acctAddSchemaUI;
+if ($('accAddPlatform')) $('accAddPlatform').onchange = () => {
+  acctAddSchemaUI();
+  // 平台切换后重跑当前模式判定：切到不支持浏览器登录的平台自动落回「粘贴」
+  // 并提示；切回来则解除置灰。会话随 UI 重置一并取消（防跨平台串会话）。
+  acctSetMode(acctAddMode);
+};
 if ($('accAddSave')) $('accAddSave').onclick = acctAddSave;
 if ($('accAddCancel')) $('accAddCancel').onclick = closeAcctAdd;
 if ($('accAddVeil')) {
@@ -500,3 +522,406 @@ if ($('accAddVeil')) {
     if (e.key === 'Escape' && $('accAddVeil').classList.contains('on')) closeAcctAdd();
   });
 }
+
+
+/* ══ 浏览器登录向导（v1.7.0）══════════════════════════════════════
+   契约（后端已冻结，internal/panel/acctlogin.go；session_id 走 body 不走路径段）：
+     POST /api/accounts/login/start          {platform, phone?}
+       → {session_id, mode:"auth_url"|"sms"|…, login_url?, expires_at?}
+     POST /api/accounts/login/wait           {session_id}
+       → {status:"pending"|"success"|"failed", account_id?, error?}（前端 2s 轮询）
+     POST /api/accounts/login/sms/send       {session_id}  → 200=已重发；400=频控/错误
+     POST /api/accounts/login/sms/verify     {session_id, code}  → 200（凭证入池）/ 4xx
+     POST /api/accounts/login/cancel         {session_id}  （取消后 wait 404）
+   降级：501（acclogin 未启用）/ 404（旧二进制无路由）→ 提示改用粘贴凭证。
+   平台支持面（spec §4 首批）：qoder / qoder-intl（授权链接+轮询）、
+   autoclaw（手机验证码两步）；autoclaw-intl / loomy / custom 仅粘贴。 */
+
+const ACCT_BROWSER_PLATFORMS = {
+  qoder: 'Qoder 国内',
+  'qoder-intl': 'Qoder 国际',
+  autoclaw: 'AutoClaw 国内'
+};
+const ACCT_LOGIN_POLL_MS = 2000;   // wait 轮询间隔（规格 §3.1）
+const ACCT_SMS_RESEND_SEC = 60;    // 发码倒计时（规格 R3 频控对策）
+
+let accAddMode = 'paste';
+let accLogin = null; // {session, platform, timer, smsTimer, smsLeft, startedAt, lastStatusText}
+
+/* 平台支持判定：服务端 capabilities（GET /api/accounts/login/capabilities，
+   规格 §3.4「前端不硬编码」）优先；未拉到/端点缺失时回退内置常量。 */
+let acctLoginCaps = null; // null = 未拉到（含 501/404：acclogin 未启用）
+
+async function acctLoadCapabilities() {
+  if (acctLoginCaps) return acctLoginCaps;
+  try {
+    const d = await api('accounts/login/capabilities');
+    const caps = {};
+    (d.platforms || []).forEach(p => { caps[p] = true; });
+    acctLoginCaps = caps;
+    return caps;
+  } catch (e) {
+    return null; // 拉取失败：保留内置回退，下次打开向导再试
+  }
+}
+
+function acctBrowserSupported(p) {
+  if (acctLoginCaps) return !!acctLoginCaps[p];
+  return !!ACCT_BROWSER_PLATFORMS[p]; // 回退：与服务端 SupportedPlatforms 同清单
+}
+
+/* 模式切换：browser 页签对不支持的平台置灰并提示（不静默吞）。 */
+function acctSetMode(mode) {
+  const platform = $('accAddPlatform') ? $('accAddPlatform').value : 'loomy';
+  const hint = $('accAddModeHint');
+  if (mode === 'browser' && !acctBrowserSupported(platform)) {
+    mode = 'paste';
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = (ACCT_BROWSER_PLATFORMS[platform] ? '' :
+        '该平台暂不支持浏览器登录（v1.7.0 支持：Qoder 国内/国际、AutoClaw 国内）；请使用粘贴凭证导入。');
+    }
+  } else if (hint) {
+    hint.hidden = true;
+    hint.textContent = '';
+  }
+  accAddMode = mode;
+  if ($('accAddMode')) {
+    $('accAddMode').querySelectorAll('button[data-mode]').forEach(b => {
+      b.classList.toggle('on', b.dataset.mode === mode);
+      b.disabled = mode === 'paste' && b.dataset.mode === 'browser' && !acctBrowserSupported(platform);
+    });
+  }
+  if ($('accAddBrowserPanel')) $('accAddBrowserPanel').hidden = mode !== 'browser';
+  if ($('accAddPastePanel')) $('accAddPastePanel').hidden = mode !== 'paste';
+  if ($('accAddSave')) $('accAddSave').hidden = mode === 'browser'; // 保存按钮只属粘贴流
+  if (mode === 'browser') acctBrowserUIReset();
+}
+
+/* 浏览器面板的静态形态（按平台：qoder=授权链接流；autoclaw=短信流）。 */
+function acctBrowserUIReset() {
+  const platform = $('accAddPlatform').value;
+  const isSms = platform === 'autoclaw';
+  if ($('abHint')) {
+    $('abHint').textContent = isSms
+      ? '输入 AutoClaw 国内版绑定的手机号获取短信验证码；登录成功后账号自动入池并投影为托管渠道。'
+      : '点击「获取授权链接」，在浏览器完成 ' + (ACCT_BROWSER_PLATFORMS[platform] || platform)
+        + ' 登录；本窗口会自动检测登录结果（最长约 5 分钟）。';
+  }
+  if ($('abSmsRow')) $('abSmsRow').hidden = !isSms;
+  if ($('abUrlRow')) $('abUrlRow').hidden = true;
+  if ($('abStatus')) { $('abStatus').hidden = true; $('abStatus').textContent = ''; $('abStatus').style.color = ''; }
+  if ($('abStart')) { $('abStart').hidden = false; $('abStart').textContent = isSms ? '发送验证码并开始登录' : '获取授权链接'; $('abStart').disabled = false; }
+  if ($('abRestart')) $('abRestart').hidden = true;
+  if ($('abCancelLogin')) $('abCancelLogin').hidden = true;
+  if ($('abCode')) $('abCode').value = '';
+  if ($('abPhone')) $('abPhone').disabled = false;
+  stopAccLogin(true); // 换形态/换平台：旧轮询停止 + 通知后端取消旧会话（不留悬挂会话）
+}
+
+/* 停止轮询/倒计时；（cancel=true 时）通知后端取消会话——cancel 后 wait 立即 404，
+   不能等超时（规格 §3.2）。全部 best-effort：失败不影响 UI。 */
+function stopAccLogin(cancel) {
+  if (accLogin) {
+    if (accLogin.timer) { clearInterval(accLogin.timer); accLogin.timer = null; }
+    if (accLogin.smsTimer) { clearInterval(accLogin.smsTimer); accLogin.smsTimer = null; }
+    if (cancel && accLogin.session) {
+      api('accounts/login/cancel', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: accLogin.session })
+      }).catch(() => {});
+    }
+  }
+  accLogin = null;
+}
+
+/* 掩码手机号（规格 §3.3-3：前 3 后 4；观测/提示用）。 */
+function acctMaskPhone(p) {
+  p = String(p || '');
+  return p.length === 11 ? p.slice(0, 3) + '****' + p.slice(7) : p.slice(0, 3) + '****';
+}
+
+/* abStatus 的统一写入口（颜色语义：'' 正常等待 / var(--bad) 失败 / var(--ink-3) 降级）。 */
+function acctLoginStatus(msg, color) {
+  const el = $('abStatus');
+  if (!el) return;
+  el.hidden = !msg;
+  el.textContent = msg || '';
+  el.style.color = color || '';
+}
+
+/* 登录服务不可用（501 = acclogin 未启用；404 = 旧二进制无路由）。 */
+function acctLoginDegrade(m) {
+  return m.indexOf('404') >= 0 || m.indexOf('501') >= 0 || m.indexOf('未启用') >= 0;
+}
+
+/* start：qoder（授权链接）与 autoclaw（手机发码）共用入口。
+   start 可重入：旧会话由后端自动 cancel（规格 §3.2），前端只停自己的轮询。 */
+async function acctLoginStart() {
+  const platform = $('accAddPlatform').value;
+  if (!acctBrowserSupported(platform)) return;
+  const isSms = platform === 'autoclaw';
+  const phone = ($('abPhone') ? $('abPhone').value : '').trim();
+  if (isSms && !/^1\d{10}$/.test(phone)) {
+    acctLoginStatus('请输入 11 位手机号', 'var(--bad)');
+    return;
+  }
+  stopAccLogin(false); // 停旧轮询/倒计时；旧会话由 start 重入语义在后端 cancel
+  acctLoginStatus(isSms ? '正在发送验证码…' : '正在获取授权链接…');
+  const btn = $('abStart');
+  if (btn) { btn.disabled = true; }
+  try {
+    const body = { platform: platform };
+    if (isSms) body.phone = phone;
+    const d = await api('accounts/login/start', { method: 'POST', body: JSON.stringify(body) });
+    accLogin = {
+      session: d.session_id || '',
+      platform: platform,
+      timer: null, smsTimer: null, smsLeft: 0,
+      startedAt: Date.now(), lastStatusText: ''
+    };
+    if ($('abStart')) $('abStart').hidden = true;
+    if ($('abRestart')) $('abRestart').hidden = false;
+    if ($('abCancelLogin')) $('abCancelLogin').hidden = false;
+    if ($('abPhone')) $('abPhone').disabled = true;
+    if (isSms) {
+      acctLoginStatus('验证码已发送至 ' + acctMaskPhone(phone) + '，请输入短信验证码');
+      acctSmsCountdown();
+      acctLoginPoll(); // 会话已创建：立即探一次，再进入 2s 轮询
+      acctLoginStartTimer();
+    } else if (d.login_url) {
+      if ($('abUrl')) $('abUrl').textContent = d.login_url;
+      if ($('abOpenBtn')) $('abOpenBtn').href = d.login_url;
+      if ($('abUrlRow')) $('abUrlRow').hidden = false;
+      acctLoginStatus('等待授权完成，自动检测中…');
+      acctLoginStartTimer();
+    } else {
+      // 未带 login_url 的形态（如 device_code）：仍进入轮询，提示见状态区。
+      acctLoginStatus('会话已创建，等待授权完成，自动检测中…');
+      acctLoginStartTimer();
+    }
+  } catch (e) {
+    const m = e.message || '';
+    if (acctLoginDegrade(m)) {
+      acctLoginStatus('浏览器登录服务未启用（后端 acclogin 未部署）；可改用「粘贴凭证」导入', 'var(--ink-3)');
+    } else {
+      acctLoginStatus('启动失败：' + m, 'var(--bad)');
+    }
+    if ($('abStart')) { $('abStart').hidden = false; $('abStart').disabled = false; }
+  } finally {
+    if (btn && accLogin && accLogin.session) { /* start 成功后按钮保持隐藏 */ }
+    else if (btn) { btn.disabled = false; }
+  }
+}
+
+/* wait 轮询（2s；pending 续轮；success/failed 终态；404 = 会话被取消或过期）。 */
+function acctLoginStartTimer() {
+  if (!accLogin) return;
+  accLogin.timer = setInterval(() => acctLoginPoll(), ACCT_LOGIN_POLL_MS);
+  acctLoginPoll();
+}
+
+async function acctLoginPoll() {
+  if (!accLogin || !accLogin.session || accLogin.timer === undefined) return;
+  let d = null;
+  try {
+    d = await api('accounts/login/wait', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: accLogin.session })
+    });
+  } catch (e) {
+    const m = e.message || '';
+    if (acctLoginDegrade(m)) {
+      acctLoginStopWithError('浏览器登录服务未启用（后端 acclogin 未部署）；可改用「粘贴凭证」导入', true);
+      return;
+    }
+    if (m === 'HTTP 404' || m.indexOf('404') >= 0) {
+      acctLoginStopWithError('登录会话已过期或已取消；请点击「重新获取」', false);
+      return;
+    }
+    // 网络抖动：保持轮询（状态区不打扰），下个周期重试。
+    return;
+  }
+  const st = d.status || 'pending';
+  if (st === 'success') {
+    const label = d.account_id ? ('（账号 ' + d.account_id + '）') : '';
+    stopAccLogin(false);
+    toast('登录成功，账号已入池并投影为托管渠道' + label, 'ok');
+    closeAcctAdd();
+    selectAcctTab(accLogin ? accLogin.platform : $('accAddPlatform').value);
+    loadAcctAccounts();
+    return;
+  }
+  if (st === 'failed') {
+    acctLoginStopWithError('登录失败：' + (d.error || '原因未明') + '；可点击「重新获取」重试', false);
+    return;
+  }
+  if (st === 'expired') {
+    // 过期会话在后端保留 1 分钟供观察，wait 显式回 expired（区别于取消后的 404）：
+    // UI 同「过期/取消」分支——展示原因 + 重新获取。
+    acctLoginStopWithError('登录会话已过期，请点击『重新获取』', false);
+    return;
+  }
+  // pending：更新等待时长（状态文本只在秒数变化时重写，避免闪烁）。
+  const sec = Math.floor((Date.now() - accLogin.startedAt) / 1000);
+  const text = '等待授权完成，自动检测中…（已等待 ' + sec + ' 秒）';
+  if (text !== accLogin.lastStatusText) {
+    accLogin.lastStatusText = text;
+    acctLoginStatus(text);
+  }
+}
+
+/* 终态统一收尾：停轮询、显示原因、亮出「重新获取」。keepPanel=true 时保留面板形态。 */
+function acctLoginStopWithError(msg, degrade) {
+  const platform = accLogin ? accLogin.platform : $('accAddPlatform').value;
+  const wasSms = platform === 'autoclaw';
+  stopAccLogin(false);
+  acctLoginStatus(msg, degrade ? 'var(--ink-3)' : 'var(--bad)');
+  if ($('abStart')) { $('abStart').hidden = false; $('abStart').disabled = false;
+    $('abStart').textContent = wasSms ? '发送验证码并开始登录' : '获取授权链接'; }
+  if ($('abRestart')) $('abRestart').hidden = false;
+  if ($('abCancelLogin')) $('abCancelLogin').hidden = true;
+  if ($('abPhone')) $('abPhone').disabled = false;
+}
+
+/* autoclaw：60s 发码倒计时（规格 R3：前端限频 + 后端 (device_id, phone) 60s 一次）。 */
+function acctSmsCountdown() {
+  if (!accLogin) return;
+  accLogin.smsLeft = ACCT_SMS_RESEND_SEC;
+  const btn = $('abSendCode');
+  const tick = () => {
+    if (!accLogin) { if (btn) { btn.disabled = false; btn.textContent = '发送验证码'; } return; }
+    if (accLogin.smsLeft <= 0) {
+      clearInterval(accLogin.smsTimer);
+      accLogin.smsTimer = null;
+      if (btn) { btn.disabled = false; btn.textContent = '重新发送'; }
+      return;
+    }
+    if (btn) { btn.disabled = true; btn.textContent = '重新发送(' + accLogin.smsLeft + 's)'; }
+    accLogin.smsLeft--;
+  };
+  tick();
+  accLogin.smsTimer = setInterval(tick, 1000);
+}
+
+/* autoclaw：重发验证码（后端 sms/send）。200 = 已重发（重启 60s 倒计时）；
+   400 = 频控/错误原文展示，**不**重启倒计时（规格 R3：频控窗口内不放行）。 */
+async function acctSmsResend() {
+  if (!accLogin || !accLogin.session) {
+    // 会话未建立：走 start 的首发路径（带手机号建会话）。
+    await acctLoginStart();
+    return;
+  }
+  const btn = $('abSendCode');
+  if (btn) btn.disabled = true;
+  try {
+    await api('accounts/login/sms/send', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: accLogin.session })
+    });
+    acctLoginStatus('验证码已重新发送，请查收短信');
+    acctSmsCountdown(); // 200：重启 60s 倒计时
+  } catch (e) {
+    const m = e.message || '';
+    if (acctLoginDegrade(m)) {
+      acctLoginStopWithError('浏览器登录服务未启用（后端 acclogin 未部署）', true);
+    } else {
+      acctLoginStatus('重新发送失败：' + m, 'var(--bad)'); // 400：不重启倒计时
+      if (btn) btn.disabled = false;
+    }
+  }
+}
+
+/* 发码按钮统一入口：会话未建 → start（首发）；已建 → sms/send（重发）。 */
+async function acctSmsSendOrResend() {
+  if (accLogin && accLogin.session) {
+    await acctSmsResend();
+    return;
+  }
+  await acctLoginStart();
+}
+
+/* autoclaw：验证码提交（sms_verify 200 = 凭证已入池；4xx = 原因透出，会话保留可重输）。 */
+async function acctSmsVerify() {
+  if (!accLogin || !accLogin.session) {
+    acctLoginStatus('请先发送验证码', 'var(--bad)');
+    return;
+  }
+  const code = ($('abCode') ? $('abCode').value : '').trim();
+  if (!/^\d{6}$/.test(code)) {
+    acctLoginStatus('请输入 6 位数字验证码', 'var(--bad)');
+    return;
+  }
+  const btn = $('abSubmit');
+  if (btn) btn.disabled = true;
+  try {
+    await api('accounts/login/sms/verify', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: accLogin.session, code: parseInt(code, 10) })
+    });
+    acctLoginStatus('验证码通过，正在确认登录结果…');
+    acctLoginStartTimer(); // 立即探一次 wait，再进入 2s 轮询直到 success
+  } catch (e) {
+    const m = e.message || '';
+    if (acctLoginDegrade(m)) {
+      acctLoginStopWithError('浏览器登录服务未启用（后端 acclogin 未部署）', true);
+    } else {
+      // 验证码错误/过期：会话保留，可直接改号重输（不清空手机号）。
+      acctLoginStatus('验证码校验失败：' + m + '；请重输或重新发送', 'var(--bad)');
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* 复制授权链接（clipboard 优先，execCommand 兜底——CSP 下 execCommand 仍可用）。 */
+async function acctCopyLoginUrl() {
+  const url = $('abUrl') ? $('abUrl').textContent : '';
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+    toast('链接已复制', 'ok');
+  } catch (e) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+      toast('链接已复制', 'ok');
+    } catch (e2) {
+      toast('复制失败，请手动选择链接复制', 'bad');
+    }
+  }
+}
+
+/* 用户主动取消登录（向导内按钮）。 */
+function acctLoginCancel() {
+  stopAccLogin(true);
+  acctBrowserUIReset();
+  toast('登录会话已取消', 'mute');
+}
+
+/* 离开账号中心时的进行中会话提示（app.js 的 go() 钩子；不阻塞导航）。 */
+function acctLeaveCenterNotify() {
+  if (accLogin && accLogin.session) {
+    toast('提示：有进行中的浏览器登录会话，切走后仍会继续；可回到「账号中心」查看，或在向导内取消', 'mute');
+  }
+}
+
+/* ── 浏览器登录事件绑定（顶层守卫） ──────────────────────────────── */
+
+if ($('accAddMode')) {
+  $('accAddMode').onclick = e => {
+    const b = e.target.closest('button[data-mode]');
+    if (!b || b.disabled) return;
+    acctSetMode(b.dataset.mode);
+  };
+}
+if ($('abStart')) $('abStart').onclick = acctLoginStart;
+if ($('abRestart')) $('abRestart').onclick = acctLoginStart; // start 可重入（旧会话自动 cancel）
+if ($('abCancelLogin')) $('abCancelLogin').onclick = acctLoginCancel;
+if ($('abSendCode')) $('abSendCode').onclick = acctSmsSendOrResend; // 首发=start；重发=sms/send（60s 限频）
+if ($('abSubmit')) $('abSubmit').onclick = acctSmsVerify;
+if ($('abCopyBtn')) $('abCopyBtn').onclick = acctCopyLoginUrl;

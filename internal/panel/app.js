@@ -13,6 +13,11 @@ const TITLES = { 'accounts-center': '账号中心', usage: '用量', packages: '
    平台页签与渠道设置抽屉 = view-acctcenter。go() 对它做组级显隐（acct.js 管页签内切换）。 */
 const ACCT_CENTER_SECTIONS = ['view-accounts', 'view-acctcenter'];
 function go(v) {
+  /* 离开账号中心时提示进行中的浏览器登录会话（v1.7.0；不阻塞导航，
+     会话在后端仍有效，回到账号中心可继续查看）。 */
+  if (view === 'accounts-center' && v !== 'accounts-center' && typeof acctLeaveCenterNotify === 'function') {
+    acctLeaveCenterNotify();
+  }
   /* 老锚点重定向（架构 §7.1，hash 同步到 #accounts-center）：
      #accounts → 账号中心 CodeBuddy 页签；#extchan → 账号中心 + 渠道设置抽屉展开。 */
   if (v === 'accounts' || v === 'extchan') {
