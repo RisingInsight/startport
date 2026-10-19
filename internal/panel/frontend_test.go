@@ -1540,40 +1540,67 @@ func TestExtChannelWizardDOM(t *testing.T) {
 	}
 }
 
-// 添加账号弹窗的多平台引导（v1.5.1）：hint 存在 + 内联按钮接线到 extchan 视图。
-// 「添加账号」只服务 CodeBuddy 账号池，多平台入口在「外部渠道」——这条引导防止
-// 用户在错误入口找 Loomy / AutoClaw / Qoder 等平台的接入方式。
-func TestAddAccountModalExtchanGuide(t *testing.T) {
-	// v1.6.0：外部渠道降级为账号中心的「渠道设置」抽屉（PRD §6），引导文案与
-	// 跳转目标同步改为「账号中心」→ 通用平台页签（按钮 id=addGoExtchan 保留，
-	// 避免无谓的 DOM churn；语义由本测试钉住）。
+// 添加账号弹窗的入口归属断言（v1.7.2）：全局「添加账号」按钮在账号中心视图
+// 分流到平台添加向导，CodeBuddy 登录弹窗只由页签内按钮打开——弹窗内保留一句
+// 中性说明即可，「前往账号中心」跳转兜底按钮随之删除（入口唯一化，不再歧义）。
+func TestAddAccountModalScope(t *testing.T) {
 	htmlBytes, err := os.ReadFile("index.html")
 	if err != nil {
 		t.Fatal(err)
 	}
 	html := string(htmlBytes)
-	if !strings.Contains(html, `id="addGoExtchan"`) {
-		t.Error("添加账号弹窗缺「前往账号中心」按钮（id=addGoExtchan）")
+	// 中性说明：只说清"这个弹窗管 CodeBuddy"，其它平台去账号中心页签旁的按钮。
+	if !strings.Contains(html, "此弹窗用于登录 CodeBuddy（WorkBuddy）账号池账号") {
+		t.Error("添加账号弹窗缺中性归属说明")
 	}
-	if !strings.Contains(html, "添加账号仅用于 CodeBuddy（WorkBuddy）账号池") {
-		t.Error("添加账号弹窗缺多平台引导文案")
+	if !strings.Contains(html, "对应平台页签旁的「添加账号」") {
+		t.Error("说明应指到平台页签旁的「添加账号」按钮")
 	}
-	if !strings.Contains(html, "请到左侧「账号中心」") {
-		t.Error("引导文案应指到「账号中心」对应平台页签")
+	// 跳转兜底按钮已删（入口唯一化）：DOM 与 app.js 接线都不应再有。
+	if strings.Contains(html, `id="addGoExtchan"`) {
+		t.Error("addGoExtchan 按钮应已删除（v1.7.2 入口唯一化）")
 	}
-	if strings.Contains(html, "外部渠道」→「新建渠道」") {
-		t.Error("引导文案仍指向外部渠道（v1.6.0 已迁移）")
+	if strings.Contains(html, "请到左侧「账号中心」") {
+		t.Error("弹窗说明不应再让用户跳转（全局按钮已分流）")
 	}
-	// app.js：按钮点击 = 关弹窗 + 进账号中心 + 落到通用平台页签。
+	// 向导首屏明确「选择要添加的平台」。
+	if !strings.Contains(html, "选择要添加的平台") {
+		t.Error("向导首屏缺「选择要添加的平台」文案")
+	}
 	appJS, err := os.ReadFile("app.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := string(appJS)
-	for _, want := range []string{`$('addGoExtchan')`, "closeAdd()", "go('accounts-center')", "selectAcctTab('custom')"} {
+	// 全局按钮分流：账号中心视图 → 平台向导；否则 → CodeBuddy 登录弹窗。
+	for _, want := range []string{
+		"$('btnAdd').onclick", "view === 'accounts-center'", "acctGlobalAddAccount", "openAdd()",
+	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("app.js 缺引导接线 %q", want)
+			t.Errorf("app.js 缺全局按钮分流接线 %q", want)
 		}
+	}
+	// 跳转兜底接线已删。
+	if strings.Contains(s, "$('addGoExtchan')") {
+		t.Error("app.js 仍保留 addGoExtchan 接线（应随按钮一起删除）")
+	}
+	// acct.js：全局入口（默认当前页签平台）+ 页签内按钮分流 + CodeBuddy 按钮文案。
+	acctJS, err := os.ReadFile("acct.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := string(acctJS)
+	for _, want := range []string{
+		"function acctGlobalAddAccount",
+		"'添加 CodeBuddy 账号'",
+	} {
+		if !strings.Contains(a, want) {
+			t.Errorf("acct.js 缺入口唯一化接线 %q", want)
+		}
+	}
+	// acct.js 页签内按钮：codebuddy → openAdd()（弹窗唯一直达入口）。
+	if !strings.Contains(a, "openAdd(); // CodeBuddy 登录弹窗的唯一直达入口") {
+		t.Error("acct.js 的 btnAcctAdd 应在 codebuddy 页签打开 CodeBuddy 登录弹窗")
 	}
 }
 
@@ -1634,12 +1661,10 @@ func TestAccountCenterDOM(t *testing.T) {
 		}
 	}
 
-	// v1.5.1 引导文案指向账号中心（按钮 id 保留，跳转目标改为通用平台页签）。
-	if strings.Contains(html, "请到左侧「外部渠道」") {
-		t.Error("添加账号弹窗引导仍指向「外部渠道」")
-	}
-	if !strings.Contains(html, "请到左侧「账号中心」") || !strings.Contains(html, `id="addGoExtchan"`) {
-		t.Error("添加账号弹窗缺「前往账号中心」引导")
+	// v1.7.2 入口唯一化：全局按钮分流 + CodeBuddy 弹窗中性说明（详见
+	// TestAddAccountModalScope，这里只防 DOM 层面的旧文案/旧按钮回归）。
+	if strings.Contains(html, `id="addGoExtchan"`) || strings.Contains(html, "请到左侧「") {
+		t.Error("添加账号弹窗残留旧引导/跳转按钮（v1.7.2 已入口唯一化）")
 	}
 
 	// 脚本加载顺序：acct.js 必须在 extwiz.js 之后（运行时调用其同域函数）。

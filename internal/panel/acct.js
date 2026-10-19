@@ -142,9 +142,18 @@ function applyAcctTab() {
   if ($('btnExtDrawer')) $('btnExtDrawer').textContent = acctDrawerOpen ? '收起渠道设置 ▴' : '渠道设置 ▾';
 }
 
-/* 顶部「添加账号」按钮只对 CodeBuddy 页签有意义（其它页签用页签内按钮）。 */
+/* v1.7.2：全局「添加账号」在账号中心 = 平台添加向导（所有页签可见，不再隐藏）；
+   CodeBuddy 登录弹窗只由页签内按钮（btnAcctAdd，文案随页签切换）打开——两条
+   入口各有明确归属，消除"右上角按钮 = 唯一添加入口"的歧义。 */
 function syncAcctTopbar() {
-  if ($('btnAdd')) $('btnAdd').hidden = (view === 'accounts-center' && acctTab !== 'codebuddy');
+  if ($('btnAcctAdd')) $('btnAcctAdd').textContent = acctTab === 'codebuddy' ? '添加 CodeBuddy 账号' : '添加账号';
+}
+
+/* 全局「添加账号」按钮（顶栏）在账号中心视图的入口（app.js 分流到这里）：
+   默认定位到当前页签的平台；CodeBuddy 页签没有向导平台，回落首个平台 loomy。 */
+function acctGlobalAddAccount() {
+  const p = (acctTab !== 'codebuddy' && ACCT_PLATFORMS[acctTab]) ? acctTab : 'loomy';
+  openAcctAdd(p);
 }
 
 /* go('accounts-center') 的入口（app.js 调用）。 */
@@ -502,7 +511,13 @@ if ($('acctTabs')) {
   };
 }
 if ($('btnAcctAdd')) {
-  $('btnAcctAdd').onclick = () => openAcctAdd(acctTab !== 'codebuddy' ? acctTab : 'loomy');
+  $('btnAcctAdd').onclick = () => {
+    if (acctTab === 'codebuddy') {
+      openAdd(); // CodeBuddy 登录弹窗的唯一直达入口（v1.7.2 入口唯一化）
+      return;
+    }
+    openAcctAdd(acctTab); // 平台页签：预选当前平台直接进向导
+  };
 }
 if ($('btnCheckinAll')) $('btnCheckinAll').onclick = () => acctCheckinAll($('btnCheckinAll'));
 if ($('btnExtDrawer')) $('btnExtDrawer').onclick = () => openAcctDrawer(!acctDrawerOpen);

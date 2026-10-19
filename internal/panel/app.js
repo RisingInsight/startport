@@ -1302,15 +1302,18 @@ $('importFile').onchange = async () => {
 };
 
 /* ── 顶部动作 ─────────────────────────────────────────────────────── */
-$('btnAdd').onclick = openAdd;
-/* 「前往外部渠道」引导（v1.5.1）：添加账号弹窗里的多平台入口提示。
-   复用导航同一套视图切换（go() + hash），先关弹窗（closeAdd 会停掉登录轮询）。 */
-if ($('addGoExtchan')) $('addGoExtchan').onclick = () => {
-  closeAdd();
-  go('accounts-center');
-  if (typeof selectAcctTab === 'function') selectAcctTab('custom');
-  history.replaceState(null, '', '#accounts-center');
+/* 顶部全局「添加账号」（v1.7.2 分流）：账号中心视图 = 平台添加向导
+   （acct.js 的 acctGlobalAddAccount，默认当前页签的平台）；其它视图保持原
+   CodeBuddy 登录弹窗。CodeBuddy 弹窗的唯一直达入口是账号中心 CodeBuddy 页签
+   内的「添加 CodeBuddy 账号」按钮。 */
+$('btnAdd').onclick = () => {
+  if (view === 'accounts-center' && typeof acctGlobalAddAccount === 'function') {
+    acctGlobalAddAccount();
+    return;
+  }
+  openAdd();
 };
+
 $('btnRefresh').onclick = async () => {
   const b = $('btnRefresh');
   b.disabled = true; b.textContent = '刷新中…';
