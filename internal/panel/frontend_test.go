@@ -423,13 +423,15 @@ const modePaste = makeEl('modePaste'); modePaste.dataset.mode = 'paste';
 els.accAddMode = makeEl('accAddMode');
 els.accAddMode.querySelectorAll = sel => sel.indexOf('button') >= 0 ? [modeBrowser, modePaste] : [];
 els.accAddPlatform = makeEl('accAddPlatform');
-els.accAddPlatform.options = ['loomy', 'autoclaw', 'autoclaw-intl', 'qoder', 'qoder-intl', 'custom']
+els.accAddPlatform.options = ['codebuddy', 'loomy', 'autoclaw', 'autoclaw-intl', 'qoder', 'qoder-intl', 'custom']
   .map(v => { const o = makeEl('opt-' + v); o.value = v; return o; });
+let ctxOpenedCodeBuddy = false;
 const ctx = {
   $,
   document: { addEventListener() {}, createElement: () => makeEl('tmp'), body: { appendChild() {} } },
   api: () => Promise.reject(new Error('no api in test')),
   confirm: () => true,
+  openAdd: () => { ctxOpenedCodeBuddy = true; }, // CodeBuddy 登录弹窗（app.js 提供）
   Date, Number, String, Math, isNaN, JSON, Promise, Array, Object, RegExp, Error,
   setTimeout, clearTimeout, setInterval, clearInterval, console,
 };
@@ -447,7 +449,9 @@ function snap() {
     browserDisabled: !!modeBrowser.disabled,
     hint: els.accAddModeHint ? els.accAddModeHint.textContent : '',
     browserPanel: !els.accAddBrowserPanel.hidden,
-    pastePanel: !els.accAddPastePanel.hidden
+    pastePanel: !els.accAddPastePanel.hidden,
+    segHidden: !!(els.accAddMode && els.accAddMode.hidden),
+    abStartText: els.abStart ? els.abStart.textContent : ''
   };
 }
 const seq = [];
@@ -455,6 +459,19 @@ switchTo('loomy');  seq.push({ step: 'loomy', ...snap() });
 switchTo('qoder');  seq.push({ step: 'qoder', ...snap() });
 switchTo('loomy');  seq.push({ step: 'loomy2', ...snap() });
 switchTo('custom'); seq.push({ step: 'custom', ...snap() });
+// v1.7.5：CodeBuddy 并入统一下拉——选中后主按钮应关向导并打开 CodeBuddy 弹窗。
+switchTo('codebuddy'); seq.push({ step: 'codebuddy', ...snap() });
+els.accAddVeil.classList.add('on'); // 模拟向导打开态
+if (typeof els.abStart.onclick !== 'function') throw new Error('abStart onclick not bound');
+els.abStart.onclick();
+seq.push({
+  step: 'codebuddy_confirm',
+  mode: '', browserDisabled: false, hint: '',
+  browserPanel: false, pastePanel: false,
+  segHidden: false, abStartText: '',
+  openedCodeBuddy: ctxOpenedCodeBuddy,
+  veilClosed: !els.accAddVeil.classList.contains('on')
+});
 process.stdout.write(JSON.stringify(seq));`
 	f, err := os.CreateTemp(t.TempDir(), "acct-switch-*.cjs")
 	if err != nil {
@@ -479,6 +496,10 @@ process.stdout.write(JSON.stringify(seq));`
 		Hint            string `json:"hint"`
 		BrowserPanel    bool   `json:"browserPanel"`
 		PastePanel      bool   `json:"pastePanel"`
+		SegHidden       bool   `json:"segHidden"`
+		AbStartText     string `json:"abStartText"`
+		OpenedCodeBuddy bool   `json:"openedCodeBuddy"`
+		VeilClosed      bool   `json:"veilClosed"`
 	}
 	if err := json.Unmarshal(out, &seq); err != nil {
 		t.Fatalf("parse node output: %v\n%s", err, out)
@@ -497,11 +518,16 @@ process.stdout.write(JSON.stringify(seq));`
 		"loomy2": {mode: "paste", hintContains: "Loomy 无登录流程", browserDisabled: true, browserPanel: false, pastePanel: true},
 		// custom：兜底文案（无平台专属原因）。
 		"custom": {mode: "paste", hintContains: "通用平台无统一登录", browserDisabled: true, browserPanel: false, pastePanel: true},
+		// codebuddy（v1.7.5）：模式 Tab 区隐藏、无原因文案、主按钮 = 打开 CodeBuddy 弹窗。
+		"codebuddy": {mode: "browser", hintContains: "", browserDisabled: false, browserPanel: true, pastePanel: false},
 	}
-	if len(seq) != len(want) {
-		t.Fatalf("切换序列长度 = %d, want %d: %+v", len(seq), len(want), seq)
+	if len(seq) != 6 { // loomy / qoder / loomy2 / custom / codebuddy / codebuddy_confirm
+		t.Fatalf("切换序列长度 = %d, want 6: %+v", len(seq), seq)
 	}
 	for _, st := range seq {
+		if st.Step == "codebuddy_confirm" {
+			continue // 合成步骤：click 后的分流断言在循环外做
+		}
 		w, ok := want[st.Step]
 		if !ok {
 			t.Fatalf("未知步骤 %q", st.Step)
@@ -521,6 +547,27 @@ process.stdout.write(JSON.stringify(seq));`
 		if !strings.Contains(st.Hint, w.hintContains) {
 			t.Errorf("%s: hint = %q, want 含 %q", st.Step, st.Hint, w.hintContains)
 		}
+	}
+	// codebuddy 步骤的专属断言：模式 Tab 区隐藏 + 主按钮文案 + 点击分流。
+	cb := seq[len(seq)-2]
+	if cb.Step != "codebuddy" {
+		t.Fatalf("倒数第二步应为 codebuddy, got %q", cb.Step)
+	}
+	if !cb.SegHidden {
+		t.Error("codebuddy: 模式 Tab 区应隐藏（无粘贴形态，防灰 Tab 困惑）")
+	}
+	if cb.AbStartText != "打开 CodeBuddy 登录窗口" {
+		t.Errorf("codebuddy: 主按钮文案 = %q", cb.AbStartText)
+	}
+	cc := seq[len(seq)-1]
+	if cc.Step != "codebuddy_confirm" {
+		t.Fatalf("最后一步应为 codebuddy_confirm, got %q", cc.Step)
+	}
+	if !cc.OpenedCodeBuddy {
+		t.Error("codebuddy: 主按钮应打开 CodeBuddy 登录弹窗（openAdd）")
+	}
+	if !cc.VeilClosed {
+		t.Error("codebuddy: 确认后应先关闭平台向导")
 	}
 }
 
@@ -1772,6 +1819,31 @@ func TestAddAccountModalScope(t *testing.T) {
 	// acct.js 页签内按钮：codebuddy → openAdd()（弹窗唯一直达入口）。
 	if !strings.Contains(a, "openAdd(); // CodeBuddy 登录弹窗的唯一直达入口") {
 		t.Error("acct.js 的 btnAcctAdd 应在 codebuddy 页签打开 CodeBuddy 登录弹窗")
+	}
+	// v1.7.5：CodeBuddy 并入统一平台下拉——首项 + ✓ 标记同款 + 选中走专用弹窗
+	// （不走 acclogin，capabilities 不含它，前端内置）。
+	if selStart := strings.Index(html, `id="accAddPlatform"`); selStart >= 0 {
+		selEnd := strings.Index(html[selStart:], "</select>")
+		if selEnd < 0 {
+			t.Fatal("accAddPlatform select 未闭合")
+		}
+		sel := html[selStart : selStart+selEnd]
+		firstOpt := strings.Index(sel, `<option value="codebuddy">CodeBuddy（WorkBuddy）</option>`)
+		if firstOpt < 0 {
+			t.Error("平台下拉缺 CodeBuddy 首项")
+		} else if strings.Index(sel, "<option ") != firstOpt {
+			t.Error("CodeBuddy 应是平台下拉的第一项")
+		}
+	}
+	for _, want := range []string{
+		"acctBrowserPrimaryAction",
+		"打开 CodeBuddy 登录窗口",
+		"不走 acclogin", // CodeBuddy 特判注释（capabilities 不含它）
+		"codebuddy: 'CodeBuddy（WorkBuddy）'",
+	} {
+		if !strings.Contains(a, want) {
+			t.Errorf("acct.js 缺 CodeBuddy 并入接线 %q", want)
+		}
 	}
 }
 

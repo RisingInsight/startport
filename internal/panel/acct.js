@@ -568,6 +568,7 @@ const ACCT_BROWSER_BLOCKED_FALLBACK =
 
 /* 平台下拉选项的基础文案（acctSyncPlatformOptions 据此追加能力标记）。 */
 const ACCT_PLATFORM_OPTION_LABELS = {
+  codebuddy: 'CodeBuddy（WorkBuddy）',
   loomy: 'Loomy（讯飞 · 双头 session）',
   autoclaw: 'AutoClaw 国内（智谱）',
   'autoclaw-intl': 'AutoClaw 国际（智谱）',
@@ -627,6 +628,9 @@ async function acctLoadCapabilities() {
 }
 
 function acctBrowserSupported(p) {
+  // CodeBuddy 走专用登录弹窗（openAdd），不走 acclogin——服务端 capabilities
+  // 清单不含它，这里恒视为支持（前端内置，v1.7.5）。
+  if (p === 'codebuddy') return true;
   if (acctLoginCaps) return !!acctLoginCaps[p];
   return !!ACCT_BROWSER_PLATFORMS[p]; // 回退：与服务端 SupportedPlatforms 同清单
 }
@@ -643,6 +647,12 @@ function acctSetMode(mode) {
     mode = 'paste'; // 智能默认：不支持的平台不落在灰 Tab 上
   }
   accAddMode = mode;
+  // v1.7.5：CodeBuddy 没有粘贴凭证形态——选中它时隐藏模式 Tab 区与原因文案区，
+  // 只留一句「将打开 CodeBuddy 登录窗口」的说明（见 acctBrowserUIReset），
+  // 避免再出现"没有解释的灰 Tab"。
+  const isCodeBuddy = platform === 'codebuddy';
+  if ($('accAddMode')) $('accAddMode').hidden = isCodeBuddy;
+  if (hint) { hint.hidden = supported || isCodeBuddy; }
   if ($('accAddMode')) {
     $('accAddMode').querySelectorAll('button[data-mode]').forEach(b => {
       b.classList.toggle('on', b.dataset.mode === mode);
@@ -656,8 +666,8 @@ function acctSetMode(mode) {
     });
   }
   if (hint) {
-    hint.hidden = supported;
-    hint.textContent = supported ? '' : blockedMsg;
+    hint.hidden = supported || isCodeBuddy;
+    hint.textContent = supported || isCodeBuddy ? '' : blockedMsg;
   }
   if ($('accAddBrowserPanel')) $('accAddBrowserPanel').hidden = mode !== 'browser';
   if ($('accAddPastePanel')) $('accAddPastePanel').hidden = mode !== 'paste';
@@ -669,16 +679,24 @@ function acctSetMode(mode) {
 function acctBrowserUIReset() {
   const platform = $('accAddPlatform').value;
   const isSms = platform === 'autoclaw';
+  const isCodeBuddy = platform === 'codebuddy';
   if ($('abHint')) {
-    $('abHint').textContent = isSms
-      ? '输入 AutoClaw 国内版绑定的手机号获取短信验证码；登录成功后账号自动入池并投影为托管渠道。'
-      : '点击「获取授权链接」，在浏览器完成 ' + (ACCT_BROWSER_PLATFORMS[platform] || platform)
-        + ' 登录；本窗口会自动检测登录结果（最长约 5 分钟）。';
+    $('abHint').textContent = isCodeBuddy
+      ? '将打开 CodeBuddy 登录窗口（国内 / 国际版可在其中选择）；完成登录后账号自动入池并投影为托管渠道。'
+      : isSms
+        ? '输入 AutoClaw 国内版绑定的手机号获取短信验证码；登录成功后账号自动入池并投影为托管渠道。'
+        : '点击「获取授权链接」，在浏览器完成 ' + (ACCT_BROWSER_PLATFORMS[platform] || platform)
+          + ' 登录；本窗口会自动检测登录结果（最长约 5 分钟）。';
   }
   if ($('abSmsRow')) $('abSmsRow').hidden = !isSms;
   if ($('abUrlRow')) $('abUrlRow').hidden = true;
   if ($('abStatus')) { $('abStatus').hidden = true; $('abStatus').textContent = ''; $('abStatus').style.color = ''; }
-  if ($('abStart')) { $('abStart').hidden = false; $('abStart').textContent = isSms ? '发送验证码并开始登录' : '获取授权链接'; $('abStart').disabled = false; }
+  if ($('abStart')) {
+    $('abStart').hidden = false;
+    $('abStart').textContent = isCodeBuddy ? '打开 CodeBuddy 登录窗口'
+      : (isSms ? '发送验证码并开始登录' : '获取授权链接');
+    $('abStart').disabled = false;
+  }
   if ($('abRestart')) $('abRestart').hidden = true;
   if ($('abCancelLogin')) $('abCancelLogin').hidden = true;
   if ($('abCode')) $('abCode').value = '';
@@ -986,7 +1004,19 @@ if ($('accAddMode')) {
     acctSetMode(b.dataset.mode);
   };
 }
-if ($('abStart')) $('abStart').onclick = acctLoginStart;
+/* 浏览器面板主按钮（v1.7.5 分流）：CodeBuddy → 关闭平台向导并打开 CodeBuddy
+   登录弹窗（openAdd，与 CodeBuddy 页签内按钮行为完全一致）；其它平台 → 登录
+   会话启动（acctLoginStart）。 */
+function acctBrowserPrimaryAction() {
+  const platform = $('accAddPlatform') ? $('accAddPlatform').value : '';
+  if (platform === 'codebuddy') {
+    closeAcctAdd(); // 关闭平台向导
+    openAdd();      // 打开 CodeBuddy 登录弹窗（app.js，国内/国际版）
+    return;
+  }
+  acctLoginStart();
+}
+if ($('abStart')) $('abStart').onclick = acctBrowserPrimaryAction;
 if ($('abRestart')) $('abRestart').onclick = acctLoginStart; // start 可重入（旧会话自动 cancel）
 if ($('abCancelLogin')) $('abCancelLogin').onclick = acctLoginCancel;
 if ($('abSendCode')) $('abSendCode').onclick = acctSmsSendOrResend; // 首发=start；重发=sms/send（60s 限频）
