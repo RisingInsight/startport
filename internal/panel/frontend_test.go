@@ -1598,6 +1598,24 @@ func TestAddAccountModalScope(t *testing.T) {
 			t.Errorf("acct.js 缺入口唯一化接线 %q", want)
 		}
 	}
+	// v1.7.3 灰 Tab 修复：按平台原因文案（三条 + 兜底）、置灰 title 双保险、
+	// 智能默认（不支持的平台不落在灰 Tab）、下拉能力标记。
+	for _, want := range []string{
+		"ACCT_BROWSER_BLOCKED_REASON",
+		"Loomy 无登录流程——请从客户端登录态复制 session 后用粘贴凭证",
+		"通用平台无统一登录——粘贴 API 凭证",
+		"国际版需风控验证码，暂不支持浏览器登录",
+		"该平台暂不支持浏览器登录（当前支持：Qoder 国内/国际、AutoClaw 国内）",
+		"b.title = supported ? '' : blockedMsg", // 置灰 + title 双保险
+		"mode = 'paste'; // 智能默认：不支持的平台不落在灰 Tab 上",
+		"acctSyncPlatformOptions",
+		"✓ 浏览器登录",
+		"· 粘贴凭证",
+	} {
+		if !strings.Contains(a, want) {
+			t.Errorf("acct.js 缺灰 Tab 修复接线 %q", want)
+		}
+	}
 	// acct.js 页签内按钮：codebuddy → openAdd()（弹窗唯一直达入口）。
 	if !strings.Contains(a, "openAdd(); // CodeBuddy 登录弹窗的唯一直达入口") {
 		t.Error("acct.js 的 btnAcctAdd 应在 codebuddy 页签打开 CodeBuddy 登录弹窗")

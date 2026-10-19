@@ -362,9 +362,12 @@ function openAcctAdd(platform) {
   const plat = $('accAddPlatform').value;
   const capsBefore = acctBrowserSupported(plat);
   acctSetMode(capsBefore ? 'browser' : 'paste');
-  // 服务端能力开关异步到位后：仅当支持面判定翻转时才重跑模式（不打断进行中会话）。
+  acctSyncPlatformOptions();
+  // 服务端能力开关异步到位后：仅当支持面判定翻转时才重跑模式（不打断进行中会话），
+  // 并同步下拉的能力标记。
   acctLoadCapabilities().then(caps => {
     if (!caps) return;
+    acctSyncPlatformOptions();
     if (acctBrowserSupported(plat) !== capsBefore
       && $('accAddVeil') && $('accAddVeil').classList.contains('on')) {
       acctSetMode(acctAddMode);
@@ -560,6 +563,41 @@ const ACCT_BROWSER_PLATFORMS = {
 const ACCT_LOGIN_POLL_MS = 2000;   // wait 轮询间隔（规格 §3.1）
 const ACCT_SMS_RESEND_SEC = 60;    // 发码倒计时（规格 R3 频控对策）
 
+/* 灰 Tab 的按平台原因文案（v1.7.3 用户实测反馈：落在灰 Tab 上不知道为什么选不了）。
+   未收录平台走兜底文案。 */
+const ACCT_BROWSER_BLOCKED_REASON = {
+  loomy: 'Loomy 无登录流程——请从客户端登录态复制 session 后用粘贴凭证',
+  custom: '通用平台无统一登录——粘贴 API 凭证',
+  'autoclaw-intl': '国际版需风控验证码，暂不支持浏览器登录'
+};
+const ACCT_BROWSER_BLOCKED_FALLBACK =
+  '该平台暂不支持浏览器登录（当前支持：Qoder 国内/国际、AutoClaw 国内）';
+
+/* 平台下拉选项的基础文案（acctSyncPlatformOptions 据此追加能力标记）。 */
+const ACCT_PLATFORM_OPTION_LABELS = {
+  loomy: 'Loomy（讯飞 · 双头 session）',
+  autoclaw: 'AutoClaw 国内（智谱）',
+  'autoclaw-intl': 'AutoClaw 国际（智谱）',
+  qoder: 'Qoder 国内（阿里）',
+  'qoder-intl': 'Qoder 国际（阿里）',
+  custom: '通用平台（OpenAI / Anthropic / Gemini 兼容）'
+};
+
+/* acctSyncPlatformOptions 平台下拉追加能力标记（v1.7.3）：
+   支持 → " · ✓ 浏览器登录"；不支持 → " · 粘贴凭证"。服务端 capabilities
+   到位后重跑一次，标记随之更新（幂等：基名取自常量表，不叠加重后缀）。 */
+function acctSyncPlatformOptions() {
+  const sel = $('accAddPlatform');
+  if (!sel) return;
+  Array.from(sel.options).forEach(o => {
+    const base = ACCT_PLATFORM_OPTION_LABELS[o.value];
+    if (!base) return;
+    o.textContent = acctBrowserSupported(o.value)
+      ? base + ' · ✓ 浏览器登录'
+      : base + ' · 粘贴凭证';
+  });
+}
+
 let accAddMode = 'paste';
 let accLogin = null; // {session, platform, timer, smsTimer, smsLeft, startedAt, lastStatusText}
 
@@ -585,27 +623,33 @@ function acctBrowserSupported(p) {
   return !!ACCT_BROWSER_PLATFORMS[p]; // 回退：与服务端 SupportedPlatforms 同清单
 }
 
-/* 模式切换：browser 页签对不支持的平台置灰并提示（不静默吞）。 */
+/* 模式切换（v1.7.3）：不支持浏览器登录的平台自动落「粘贴」Tab，且**始终**在
+   页签下方显示按平台的原因文案 + 置灰 Tab 的 title 双保险——用户不再面对一个
+   没有解释的灰 Tab（用户实测反馈 #2）。 */
 function acctSetMode(mode) {
   const platform = $('accAddPlatform') ? $('accAddPlatform').value : 'loomy';
+  const supported = acctBrowserSupported(platform);
+  const blockedMsg = ACCT_BROWSER_BLOCKED_REASON[platform] || ACCT_BROWSER_BLOCKED_FALLBACK;
   const hint = $('accAddModeHint');
-  if (mode === 'browser' && !acctBrowserSupported(platform)) {
-    mode = 'paste';
-    if (hint) {
-      hint.hidden = false;
-      hint.textContent = (ACCT_BROWSER_PLATFORMS[platform] ? '' :
-        '该平台暂不支持浏览器登录（v1.7.0 支持：Qoder 国内/国际、AutoClaw 国内）；请使用粘贴凭证导入。');
-    }
-  } else if (hint) {
-    hint.hidden = true;
-    hint.textContent = '';
+  if (mode === 'browser' && !supported) {
+    mode = 'paste'; // 智能默认：不支持的平台不落在灰 Tab 上
   }
   accAddMode = mode;
   if ($('accAddMode')) {
     $('accAddMode').querySelectorAll('button[data-mode]').forEach(b => {
       b.classList.toggle('on', b.dataset.mode === mode);
-      b.disabled = mode === 'paste' && b.dataset.mode === 'browser' && !acctBrowserSupported(platform);
+      if (b.dataset.mode === 'browser') {
+        b.disabled = !supported;
+        b.title = supported ? '' : blockedMsg; // 双保险：置灰 + 悬停原因
+      } else {
+        b.disabled = false;
+        b.title = '';
+      }
     });
+  }
+  if (hint) {
+    hint.hidden = supported;
+    hint.textContent = supported ? '' : blockedMsg;
   }
   if ($('accAddBrowserPanel')) $('accAddBrowserPanel').hidden = mode !== 'browser';
   if ($('accAddPastePanel')) $('accAddPastePanel').hidden = mode !== 'paste';
