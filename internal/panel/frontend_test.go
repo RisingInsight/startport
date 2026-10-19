@@ -2,6 +2,8 @@ package panel
 
 import (
 	"bytes"
+	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -252,6 +254,131 @@ process.stdout.write(JSON.stringify({
 	const want = `{"rate":"预计 2026-09-28 16:00 解封（剩余 2时00分） · 网关最快 1时00分 后重试","unavailable":"预计 1时00分 后重试","unknown":"预计解封时间未知"}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("rate-limit formatting=%s want %s", out, want)
+	}
+}
+
+// TestAppJSTTFBVisualization v1.7.1 首字延迟可视化：自适应格式、p50 聚合与
+// 请求流水表的「首字」列。
+//
+// 为什么钉这些：TTFB 列的用户诉求是"一眼看出慢在上游还是网关"——格式必须自适应
+// （秒级一位小数 / 毫秒）、无样本必须显示"—"（非流式与错误路径没有该维度），
+// p50 只统计窗口内且 ttfb>0 的条目（旧条目/非流式混入会拉歪结论）。
+func TestAppJSTTFBVisualization(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; TTFB formatting test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function fmtTTFB');
+const end = src.indexOf('function trimFixed');
+if (start < 0 || end < 0 || end <= start) throw new Error('ttfb helpers not found');
+const ctx = { Date, Number, String, Math, isNaN };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.fmtTTFB=fmtTTFB;this.reqTTFBP50=reqTTFBP50;', ctx);
+const now = Date.now();
+const iso = ms => new Date(now - ms).toISOString();
+const rows = [
+  { ttfb_ms: 850, time: iso(30 * 60000) },    // 30 分钟前
+  { ttfb_ms: 3000, time: iso(30 * 60000) },
+  { ttfb_ms: 900, time: iso(10 * 60000) },    // 10 分钟前
+  { ttfb_ms: 5000, time: iso(2 * 3600000) },  // 2 小时前（1h 窗口外）
+  { ttfb_ms: 6000, time: iso(3 * 3600000) },  // 3 小时前（1h 窗口外）
+  { ttfb_ms: 0, time: iso(5 * 60000) },       // 非流式：无样本
+];
+process.stdout.write(JSON.stringify({
+  ms: ctx.fmtTTFB(850),
+  s: ctx.fmtTTFB(3000),
+  zero: ctx.fmtTTFB(0),
+  missing: ctx.fmtTTFB(undefined),
+  p50_1h: ctx.reqTTFBP50(rows, 60 * 60 * 1000),
+  p50_24h: ctx.reqTTFBP50(rows, 24 * 60 * 60 * 1000),
+  p50_all: ctx.reqTTFBP50(rows, 0),
+  p50_empty: ctx.reqTTFBP50([], 3600000),
+  p50_nosample: ctx.reqTTFBP50([{ ttfb_ms: 0, time: iso(60000) }], 3600000),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "ttfb-format-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ttfb formatting node test failed: %v\n%s", err, out)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("parse node output: %v\n%s", err, out)
+	}
+	cases := map[string]any{
+		"ms": "850ms", "s": "3.0s", "zero": "—", "missing": "—",
+		"p50_1h":    900,  // 窗口内 [850,3000,900] → 900
+		"p50_24h":   3000, // 加上 2h 前的 50000 → 中位 3000
+		"p50_all":   3000,
+		"p50_empty": 0, "p50_nosample": 0,
+	}
+	for k, want := range cases {
+		// JSON 反序列化后数值一律是 float64；want 可能是 int/string，统一走文本比较。
+		gotStr := ""
+		switch v := got[k].(type) {
+		case float64:
+			gotStr = strconv.FormatFloat(v, 'f', -1, 64)
+		case string:
+			gotStr = v
+		default:
+			gotStr = fmt.Sprint(v)
+		}
+		wantStr := ""
+		switch v := want.(type) {
+		case float64:
+			wantStr = strconv.FormatFloat(v, 'f', -1, 64)
+		case string:
+			wantStr = v
+		default:
+			wantStr = fmt.Sprint(v)
+		}
+		if gotStr != wantStr {
+			t.Errorf("%s = %v, want %v", k, got[k], want)
+		}
+	}
+
+	// 请求流水表：表头「首字」列（耗时之后）+ app.js 接线。
+	htmlBytes, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(htmlBytes)
+	if !strings.Contains(html, `<th class="num">首字</th>`) {
+		t.Error("请求流水表缺「首字」列")
+	}
+	// 「首字」在用量视图等处也有出现：列序断言限定在请求流水表的表头段内。
+	theadStart := strings.Index(html, `id="reqFilter"`)
+	theadEnd := strings.Index(html, `id="reqBody"`)
+	if theadStart < 0 || theadEnd < 0 || theadEnd <= theadStart {
+		t.Fatal("index.html 缺请求流水表结构")
+	}
+	thead := html[theadStart:theadEnd]
+	first, second := strings.Index(thead, "耗时"), strings.Index(thead, "首字")
+	if first < 0 || second < 0 || second < first {
+		t.Error("「首字」列应紧跟「耗时」列之后")
+	}
+	appJS, err := os.ReadFile("app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"fmtTTFB", "reqTTFBP50", "首字p50", "ttfb_samples"} {
+		if !strings.Contains(string(appJS), want) {
+			t.Errorf("app.js 缺 TTFB 接线片段 %q", want)
+		}
+	}
+	// tooltip 的首字/总时长对比只在 ttfb>0 时出现（既有 requestLogText 逐字节断言
+	// 已覆盖无 ttfb 的形态，这里确认有 ttfb 的形态存在）。
+	if !strings.Contains(string(appJS), "占总时长") {
+		t.Error("requestLogText 缺首字 vs 总时长对比")
 	}
 }
 

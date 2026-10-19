@@ -80,10 +80,10 @@ type Event struct {
 	HasCredit        bool      `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
-	CacheHitTokens  int64 `json:"cache_hit_tokens,omitempty"`
-	CacheMissTokens int64 `json:"cache_miss_tokens,omitempty"`
-	ClientIP         string    `json:"client_ip,omitempty"`
-	UserAgent        string    `json:"user_agent,omitempty"`
+	CacheHitTokens  int64  `json:"cache_hit_tokens,omitempty"`
+	CacheMissTokens int64  `json:"cache_miss_tokens,omitempty"`
+	ClientIP        string `json:"client_ip,omitempty"`
+	UserAgent       string `json:"user_agent,omitempty"`
 }
 
 // Filter 用于从归档中筛选最近记录。字符串字段一律「包含」匹配（大小写不敏感），
@@ -111,16 +111,23 @@ type ArchiveStats struct {
 
 // Snapshot 一次面板读取的完整指标快照。
 type Snapshot struct {
-	StartedAt       time.Time    `json:"started_at"`
-	Completed       int64        `json:"completed"`
-	InFlight        int64        `json:"in_flight"`
-	Succeeded       int64        `json:"succeeded"`
-	Failed          int64        `json:"failed"`
-	SuccessRate     float64      `json:"success_rate"`
-	HTTPSuccessRate float64      `json:"http_success_rate"`
-	AvgDurationMs   float64      `json:"avg_duration_ms"`
-	Recent          []Event      `json:"recent"`
-	Archive         ArchiveStats `json:"archive"`
+	StartedAt       time.Time `json:"started_at"`
+	Completed       int64     `json:"completed"`
+	InFlight        int64     `json:"in_flight"`
+	Succeeded       int64     `json:"succeeded"`
+	Failed          int64     `json:"failed"`
+	SuccessRate     float64   `json:"success_rate"`
+	HTTPSuccessRate float64   `json:"http_success_rate"`
+	AvgDurationMs   float64   `json:"avg_duration_ms"`
+	// AvgTTFBMs 进程生命周期内的平均首字延迟（仅统计 ttfb_ms>0 的事件——非流式
+	// 与错误路径没有该维度）。面板「运行日志」汇总条与 TTFB 列共用该口径；
+	// 事件 schema（JSONL）零改动，只是把已记录的 ttfb_ms 聚合出来。
+	AvgTTFBMs float64 `json:"avg_ttfb_ms,omitempty"`
+	// TTFBSamples 参与 TTFB 平均的事件数（0 = 该部署没有流式 TTFB 样本，
+	// 前端据此显示"—"而不是误导性的 0）。
+	TTFBSamples int64        `json:"ttfb_samples,omitempty"`
+	Recent      []Event      `json:"recent"`
+	Archive     ArchiveStats `json:"archive"`
 }
 
 // Recorder 并发安全的有界请求指标与归档记录器。
@@ -132,6 +139,8 @@ type Recorder struct {
 	succeeded   int64
 	httpSuccess int64
 	durationSum int64
+	ttfbSum     int64
+	ttfbCount   int64
 	recent      []Event
 	archive     *archiveWriter
 }
@@ -186,6 +195,10 @@ func (r *Recorder) Record(e Event) {
 		r.httpSuccess++
 	}
 	r.durationSum += e.DurationMs
+	if e.TTFBMs > 0 {
+		r.ttfbSum += e.TTFBMs
+		r.ttfbCount++
+	}
 	r.recent = append([]Event{e}, r.recent...)
 	if len(r.recent) > recentLimit {
 		r.recent = r.recent[:recentLimit]
@@ -214,6 +227,10 @@ func (r *Recorder) Snapshot() Snapshot {
 		s.SuccessRate = round1(float64(r.succeeded) / float64(r.completed) * 100)
 		s.HTTPSuccessRate = round1(float64(r.httpSuccess) / float64(r.completed) * 100)
 		s.AvgDurationMs = float64(r.durationSum) / float64(r.completed)
+		if r.ttfbCount > 0 {
+			s.AvgTTFBMs = float64(r.ttfbSum) / float64(r.ttfbCount)
+			s.TTFBSamples = r.ttfbCount
+		}
 	}
 	r.mu.Unlock()
 	if r.archive != nil {
