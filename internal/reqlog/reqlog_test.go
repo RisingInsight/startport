@@ -261,3 +261,39 @@ func TestArchivePruneHonorsSize(t *testing.T) {
 		t.Fatalf("remaining = %+v, want newest file only", entries)
 	}
 }
+
+// Snapshot 的 TTFB 聚合：只统计 ttfb_ms>0 的事件，样本数与平均值可复算。
+func TestSnapshotTTFBAggregation(t *testing.T) {
+	r := New(Config{})
+	defer r.Close()
+	// 三条带 TTFB（300/1000/5000 → 均值 2100）+ 两条不带（非流式/错误路径，不计入）。
+	ttfs := []struct {
+		ttfb   int64
+		dur    int64
+		tokens int64
+	}{
+		{ttfb: 300, dur: 1500, tokens: 10},
+		{ttfb: 1000, dur: 3000, tokens: 20},
+		{ttfb: 5000, dur: 9000, tokens: 30},
+		{ttfb: 0, dur: 500, tokens: 1},
+		{ttfb: 0, dur: 800, tokens: 2},
+	}
+	for _, tc := range ttfs {
+		r.Record(Event{Status: 200, OK: true, DurationMs: tc.dur, TTFBMs: tc.ttfb, TotalTokens: tc.tokens})
+	}
+	s := r.Snapshot()
+	if s.TTFBSamples != 3 {
+		t.Errorf("TTFBSamples = %d, want 3", s.TTFBSamples)
+	}
+	if got, want := s.AvgTTFBMs, 2100.0; got != want {
+		t.Errorf("AvgTTFBMs = %v, want %v", got, want)
+	}
+	// 全部无 TTFB 的部署：字段缺席（omitempty 零值），前端显示"—"而不是 0。
+	r2 := New(Config{})
+	defer r2.Close()
+	r2.Record(Event{Status: 200, OK: true, DurationMs: 100})
+	s2 := r2.Snapshot()
+	if s2.AvgTTFBMs != 0 || s2.TTFBSamples != 0 {
+		t.Errorf("无样本时 TTFB 聚合应为零值, got avg=%v samples=%d", s2.AvgTTFBMs, s2.TTFBSamples)
+	}
+}

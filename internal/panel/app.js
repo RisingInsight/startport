@@ -893,11 +893,24 @@ async function loadLogs() {
 function renderRequestMetrics(m, entries) {
   m = m || {};
   const a = m.archive || {};
+  // 首字延迟汇总（v1.7.1）：均值取进程生命周期口径（reqlog Snapshot），
+  // p50 取当前拉取窗口内的条目（1h/24h）——数据源就是已拉到的 ttfb_ms 字段，
+  // 无样本（非流式为主/旧条目）时不显示，避免误导性的 0。
+  let ttfbSummary = '';
+  if (Number(m.ttfb_samples || 0) > 0) {
+    ttfbSummary += ' · 首字 ' + fmtTTFB(m.avg_ttfb_ms);
+  }
+  const p50h = reqTTFBP50(entries, 60 * 60 * 1000);
+  const p50d = reqTTFBP50(entries, 24 * 60 * 60 * 1000);
+  if (p50d > 0) {
+    ttfbSummary += ' · 首字p50 ' + fmtTTFB(p50h) + '（1h）/ ' + fmtTTFB(p50d) + '（24h）';
+  }
   $('reqSummary').textContent =
     '已完成 ' + fmtTok(m.completed) +
     ' · 成功 ' + (m.success_rate == null ? '—' : Number(m.success_rate).toFixed(1) + '%') +
     ' · HTTP ' + (m.http_success_rate == null ? '—' : Number(m.http_success_rate).toFixed(1) + '%') +
     ' · 平均 ' + fmtMs(m.avg_duration_ms) +
+    ttfbSummary +
     ' · 进行中 ' + String(m.in_flight || 0);
   $('reqNote').textContent = a.enabled
     ? 'JSONL 归档 ' + fmtBytes(a.bytes) + (a.dropped_writes ? ' · 丢弃 ' + a.dropped_writes + ' 条' : '') +
@@ -963,11 +976,12 @@ function renderRequestTable() {
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td class="num">' + fmtMs(e && e.duration_ms) + '</td>' +
+      '<td class="num">' + fmtTTFB(e && e.ttfb_ms) + '</td>' +
       '<td class="num">' + reqTokenCell(e) + '</td>' +
       '<td class="num">' + reqCreditCell(e) + '</td>' +
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="10" class="empty">' +
+  }).join('') || '<tr><td colspan="11" class="empty">' +
       (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;
@@ -1016,6 +1030,10 @@ function requestLogText(e) {
     e && e.client_ip || '—',
     e && e.user_agent || '—',
     fmtMs(e && e.duration_ms),
+    e && Number(e.ttfb_ms || 0) > 0
+      ? '首字 ' + fmtTTFB(e.ttfb_ms) + '（占总时长 '
+        + Math.round(Number(e.ttfb_ms) / Math.max(1, Number(e.duration_ms || 0)) * 100) + '%）'
+      : '',
     fmtTok(token) + ' tok',
     credit,
     cacheRateText(e && e.cache_hit_tokens, e && e.cache_miss_tokens) === '—' ? '' : '命中 ' + cacheRateText(e && e.cache_hit_tokens, e && e.cache_miss_tokens),
@@ -1896,6 +1914,35 @@ function fmtMs(ms) {
   return Math.round(ms) + 'ms';
 }
 function fmtRate(r) { return r ? Number(r).toFixed(1) + ' tok/s' : '—'; }
+
+/* fmtTTFB 首字延迟自适应格式（v1.7.1）：<1s 用毫秒（"850ms"），≥1s 用一位小数秒
+   （"3.0s"——上游首字典型在秒级，一位小数已够分辨"慢在上游还是网关"）。
+   缺失/零值 → "—"（非流式与错误路径没有该维度，不能显示误导性的 0ms）。 */
+function fmtTTFB(ms) {
+  ms = Number(ms || 0);
+  if (!ms) return '—';
+  if (ms >= 1000) return (ms / 1000).toFixed(1) + 's';
+  return Math.round(ms) + 'ms';
+}
+
+/* reqTTFBP50 首字延迟 p50（纯函数）：只统计 sinceMs 窗口内（0 = 不限窗口）
+   且 ttfb_ms>0 的条目；n 取最近邻秩 ceil(n/2)-1。返回 0 = 窗口内无样本。 */
+function reqTTFBP50(entries, sinceMs) {
+  const cutoff = sinceMs > 0 ? Date.now() - sinceMs : 0;
+  const vals = [];
+  for (const e of (entries || [])) {
+    const v = Number(e && e.ttfb_ms || 0);
+    if (!v) continue;
+    if (cutoff && e && e.time) {
+      const t = new Date(e.time).getTime();
+      if (!Number.isFinite(t) || t < cutoff) continue;
+    }
+    vals.push(v);
+  }
+  if (!vals.length) return 0;
+  vals.sort((a, b) => a - b);
+  return vals[Math.ceil(vals.length / 2) - 1];
+}
 function trimFixed(s) {
   if (!String(s).includes('.')) return String(s);
   return String(s).replace(/0+$/, '').replace(/\.$/, '');
