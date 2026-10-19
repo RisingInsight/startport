@@ -382,6 +382,148 @@ process.stdout.write(JSON.stringify({
 	}
 }
 
+// TestAcctPlatformChangeSequence v1.7.4 平台切换序列回归（用户实测 bug）：
+// 向导内切平台必须完整重算——Tab 置灰/原因文案/智能默认，绝不残留上一平台的
+// 状态（"loomy → qoder 后浏览器 Tab 仍置灰、原因文案还是 Loomy"的复现路径）。
+//
+// 做法：node + 功能性 DOM 桩执行 acct.js 全文（顶层绑定把 onchange 挂到桩上），
+// 然后按真实用户路径驱动下拉切换序列，断言每个状态的四个可观测量。
+func TestAcctPlatformChangeSequence(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; platform change sequence test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+function makeEl(id) {
+  return {
+    id, value: '', textContent: '', hidden: false, disabled: false, title: '',
+    placeholder: '', innerHTML: '', className: '', href: '', dataset: {}, style: {},
+    options: [],
+    classList: {
+      _s: new Set(),
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      toggle(c, f) {
+        if (f === undefined) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); }
+        else if (f) { this._s.add(c); } else { this._s.delete(c); }
+      },
+      contains(c) { return this._s.has(c); }
+    },
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+    focus() {}, appendChild() {}, remove() {}, select() {}
+  };
+}
+const els = {};
+const $ = id => els[id] || (els[id] = makeEl(id));
+const modeBrowser = makeEl('modeBrowser'); modeBrowser.dataset.mode = 'browser';
+const modePaste = makeEl('modePaste'); modePaste.dataset.mode = 'paste';
+els.accAddMode = makeEl('accAddMode');
+els.accAddMode.querySelectorAll = sel => sel.indexOf('button') >= 0 ? [modeBrowser, modePaste] : [];
+els.accAddPlatform = makeEl('accAddPlatform');
+els.accAddPlatform.options = ['loomy', 'autoclaw', 'autoclaw-intl', 'qoder', 'qoder-intl', 'custom']
+  .map(v => { const o = makeEl('opt-' + v); o.value = v; return o; });
+const ctx = {
+  $,
+  document: { addEventListener() {}, createElement: () => makeEl('tmp'), body: { appendChild() {} } },
+  api: () => Promise.reject(new Error('no api in test')),
+  confirm: () => true,
+  Date, Number, String, Math, isNaN, JSON, Promise, Array, Object, RegExp, Error,
+  setTimeout, clearTimeout, setInterval, clearInterval, console,
+};
+ctx.window = ctx;
+vm.createContext(ctx);
+vm.runInContext(src, ctx, { filename: 'acct.js' });
+if (typeof els.accAddPlatform.onchange !== 'function') throw new Error('platform onchange not bound');
+
+function switchTo(p) { els.accAddPlatform.value = p; els.accAddPlatform.onchange(); }
+function snap() {
+  const on = els.accAddMode.querySelectorAll('button').filter(b => b.classList.contains('on'))
+    .map(b => b.dataset.mode)[0] || '';
+  return {
+    mode: on,
+    browserDisabled: !!modeBrowser.disabled,
+    hint: els.accAddModeHint ? els.accAddModeHint.textContent : '',
+    browserPanel: !els.accAddBrowserPanel.hidden,
+    pastePanel: !els.accAddPastePanel.hidden
+  };
+}
+const seq = [];
+switchTo('loomy');  seq.push({ step: 'loomy', ...snap() });
+switchTo('qoder');  seq.push({ step: 'qoder', ...snap() });
+switchTo('loomy');  seq.push({ step: 'loomy2', ...snap() });
+switchTo('custom'); seq.push({ step: 'custom', ...snap() });
+process.stdout.write(JSON.stringify(seq));`
+	f, err := os.CreateTemp(t.TempDir(), "acct-switch-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	acctPath, err := filepath.Abs("acct.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(node, f.Name(), acctPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("platform change sequence test failed: %v\n%s", err, out)
+	}
+	var seq []struct {
+		Step            string `json:"step"`
+		Mode            string `json:"mode"`
+		BrowserDisabled bool   `json:"browserDisabled"`
+		Hint            string `json:"hint"`
+		BrowserPanel    bool   `json:"browserPanel"`
+		PastePanel      bool   `json:"pastePanel"`
+	}
+	if err := json.Unmarshal(out, &seq); err != nil {
+		t.Fatalf("parse node output: %v\n%s", err, out)
+	}
+	type wantState struct {
+		mode                                      string
+		hintContains                              string
+		browserDisabled, browserPanel, pastePanel bool
+	}
+	want := map[string]wantState{
+		// loomy：不支持 → 粘贴 Tab + Loomy 原因 + 浏览器置灰。
+		"loomy": {mode: "paste", hintContains: "Loomy 无登录流程", browserDisabled: true, browserPanel: false, pastePanel: true},
+		// qoder：支持 → 智能默认切到浏览器登录 Tab，原因文案清空。
+		"qoder": {mode: "browser", hintContains: "", browserDisabled: false, browserPanel: true, pastePanel: false},
+		// 再切回 loomy：重新落粘贴 + Loomy 原因（双向都要正确）。
+		"loomy2": {mode: "paste", hintContains: "Loomy 无登录流程", browserDisabled: true, browserPanel: false, pastePanel: true},
+		// custom：兜底文案（无平台专属原因）。
+		"custom": {mode: "paste", hintContains: "通用平台无统一登录", browserDisabled: true, browserPanel: false, pastePanel: true},
+	}
+	if len(seq) != len(want) {
+		t.Fatalf("切换序列长度 = %d, want %d: %+v", len(seq), len(want), seq)
+	}
+	for _, st := range seq {
+		w, ok := want[st.Step]
+		if !ok {
+			t.Fatalf("未知步骤 %q", st.Step)
+		}
+		if st.Mode != w.mode {
+			t.Errorf("%s: mode = %q, want %q", st.Step, st.Mode, w.mode)
+		}
+		if st.BrowserDisabled != w.browserDisabled {
+			t.Errorf("%s: browserDisabled = %v, want %v", st.Step, st.BrowserDisabled, w.browserDisabled)
+		}
+		if st.BrowserPanel != w.browserPanel {
+			t.Errorf("%s: browserPanel = %v, want %v", st.Step, st.BrowserPanel, w.browserPanel)
+		}
+		if st.PastePanel != w.pastePanel {
+			t.Errorf("%s: pastePanel = %v, want %v", st.Step, st.PastePanel, w.pastePanel)
+		}
+		if !strings.Contains(st.Hint, w.hintContains) {
+			t.Errorf("%s: hint = %q, want 含 %q", st.Step, st.Hint, w.hintContains)
+		}
+	}
+}
+
 // 请求记录行必须紧凑、可读，并带上调用来源（IP / UA）；来源缺失时以 — 兜底。
 func TestAppJSRequestLogFormatting(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -1600,6 +1742,17 @@ func TestAddAccountModalScope(t *testing.T) {
 	}
 	// v1.7.3 灰 Tab 修复：按平台原因文案（三条 + 兜底）、置灰 title 双保险、
 	// 智能默认（不支持的平台不落在灰 Tab）、下拉能力标记。
+	// v1.7.4：平台切换统一入口——onchange 与向导打开都必须走 acctOnPlatformChange
+	// （完整重算 Tab 置灰/原因文案/智能默认，杜绝"切平台后状态不刷新"）。
+	for _, want := range []string{
+		"function acctOnPlatformChange",
+		"$('accAddPlatform').onchange = acctOnPlatformChange",
+		"acctOnPlatformChange();", // 向导打开与能力翻转都走统一入口
+	} {
+		if !strings.Contains(a, want) {
+			t.Errorf("acct.js 缺平台切换统一入口接线 %q", want)
+		}
+	}
 	for _, want := range []string{
 		"ACCT_BROWSER_BLOCKED_REASON",
 		"Loomy 无登录流程——请从客户端登录态复制 session 后用粘贴凭证",

@@ -361,16 +361,14 @@ function openAcctAdd(platform) {
   // v1.7.0：首屏默认「浏览器登录」（支持平台）；不支持的平台上「粘贴」页签并提示。
   const plat = $('accAddPlatform').value;
   const capsBefore = acctBrowserSupported(plat);
-  acctSetMode(capsBefore ? 'browser' : 'paste');
-  acctSyncPlatformOptions();
-  // 服务端能力开关异步到位后：仅当支持面判定翻转时才重跑模式（不打断进行中会话），
-  // 并同步下拉的能力标记。
+  acctOnPlatformChange();
+  // 服务端能力开关异步到位后：仅当支持面判定翻转时才重跑（不打断进行中会话），
+  // 重跑同样走统一入口——智能默认按真实支持面重新生效。
   acctLoadCapabilities().then(caps => {
     if (!caps) return;
-    acctSyncPlatformOptions();
     if (acctBrowserSupported(plat) !== capsBefore
       && $('accAddVeil') && $('accAddVeil').classList.contains('on')) {
-      acctSetMode(acctAddMode);
+      acctOnPlatformChange();
     }
   });
   veil.classList.add('on');
@@ -526,12 +524,7 @@ if ($('btnCheckinAll')) $('btnCheckinAll').onclick = () => acctCheckinAll($('btn
 if ($('btnExtDrawer')) $('btnExtDrawer').onclick = () => openAcctDrawer(!acctDrawerOpen);
 if ($('btnExtDrawerClose')) $('btnExtDrawerClose').onclick = () => openAcctDrawer(false);
 if ($('btnAcctConsistency')) $('btnAcctConsistency').onclick = acctConsistency;
-if ($('accAddPlatform')) $('accAddPlatform').onchange = () => {
-  acctAddSchemaUI();
-  // 平台切换后重跑当前模式判定：切到不支持浏览器登录的平台自动落回「粘贴」
-  // 并提示；切回来则解除置灰。会话随 UI 重置一并取消（防跨平台串会话）。
-  acctSetMode(acctAddMode);
-};
+if ($('accAddPlatform')) $('accAddPlatform').onchange = acctOnPlatformChange;
 if ($('accAddSave')) $('accAddSave').onclick = acctAddSave;
 if ($('accAddCancel')) $('accAddCancel').onclick = closeAcctAdd;
 if ($('accAddVeil')) {
@@ -596,6 +589,21 @@ function acctSyncPlatformOptions() {
       ? base + ' · ✓ 浏览器登录'
       : base + ' · 粘贴凭证';
   });
+}
+
+/* acctOnPlatformChange 平台切换的**统一入口**（v1.7.4：向导打开与下拉 change
+   都走它，杜绝两处逻辑漂移导致的"切平台后状态不刷新/原因文案张冠李戴"）。
+   完整重算：下拉能力标记 → Tab 置灰 → 原因文案（支持平台=清空，绝不残留
+   其它平台的文案）→ 智能默认 Tab（支持→浏览器登录；不支持→粘贴凭证）。
+
+   语义约定：**平台切换视为重新开始**——用户在旧平台手动选的「粘贴凭证」Tab
+   不被继承（新平台支持面不同，继承只会复刻"灰 Tab / 错误 Tab"的困惑）；
+   同一平台内手动切 Tab 的选择仍被尊重（切 Tab 不经过本函数）。 */
+function acctOnPlatformChange() {
+  acctAddSchemaUI();
+  acctSyncPlatformOptions();
+  const platform = $('accAddPlatform') ? $('accAddPlatform').value : 'loomy';
+  acctSetMode(acctBrowserSupported(platform) ? 'browser' : 'paste');
 }
 
 let accAddMode = 'paste';
