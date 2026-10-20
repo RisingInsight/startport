@@ -320,12 +320,6 @@ func (c *autoclawChecker) refreshToken(ctx context.Context, oldToken string, blo
 	return newToken, nil
 }
 
-// updateAutoClawToken 把新 access token 写进 blob 的 map 形态（序列化由
-// 调用方完成——scheduler.refreshAndWriteback 经 Store.UpdateCred 落盘）。
-func updateAutoClawToken(m map[string]any, newToken string) {
-	m["token"] = newToken
-}
-
 func autoclawIsAuthExpired(code int64) bool {
 	for _, c := range autoclawAuthExpiredCodes {
 		if c == code {

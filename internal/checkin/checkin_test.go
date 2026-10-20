@@ -565,6 +565,100 @@ func TestQoderRealShapeAltKeys(t *testing.T) {
 }
 
 // 业务码先行：非成功业务码 → 业务错误（含码与 msg），不误报形状变更。
+// 已领取归一（v1.7.5 用户实测 bug 的回归钉）：
+// claim 已签过时上游返回业务码 CLAIMED，网关曾把它判成 failed → 面板标红、
+// 调度器 30 分钟一次重试直到耗尽当日额度。归一为 already（幂等成功态）。
+func TestQoderCheckinClaimedIsAlready(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			// 列表说"可领取"（claimStatus 缺失），但 claim 侧才发现已领过——
+			// 这正是真实账号踩到的路径：列表缓存口径与 claim 实时口径不一致。
+			_, _ = w.Write([]byte(`{"data":[{"id":"c-2","actionType":"CLAIM_BENEFIT"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":"CLAIMED"}`))
+	}))
+	defer srv.Close()
+	res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil {
+		t.Fatalf("CheckIn: %v", err)
+	}
+	if res.Status != StatusAlready {
+		t.Fatalf("业务码 CLAIMED 应归一为 already，得到 %s（%s）——旧行为会标红并触发重试", res.Status, res.Message)
+	}
+	if !strings.Contains(res.Message, "已领取") {
+		t.Errorf("文案应说明已领取: %q", res.Message)
+	}
+}
+
+// 列表层就返回已领取码（CLAIMED / ALREADY_CLAIMED / 文案型）同样归一，
+// 不进跳 2。
+func TestQoderCheckinAlreadyVariants(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"claim_claimed", `{"code":"CLAIMED"}`},
+		{"claim_upper_snake", `{"code":"ALREADY_CLAIMED"}`},
+		{"claim_msg_only", `{"code":"4099","message":"benefit already claimed"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+			if err != nil {
+				t.Fatalf("CheckIn: %v", err)
+			}
+			if res.Status != StatusAlready {
+				t.Errorf("%s：应 already，得到 %s（%s）", tc.name, res.Status, res.Message)
+			}
+		})
+	}
+}
+
+// 成功/失败边界不被"已领取"归一吃掉：真实业务错误仍按 failed 报。
+func TestQoderCheckinRealErrorStillFailed(t *testing.T) {
+	for _, body := range []string{
+		`{"code":"CAMPAIGN_ENDED","message":"activity has ended"}`,
+		`{"code":"RISK_CONTROL","msg":"forbidden"}`,
+		`{"code":"500"}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s：不应返回错误: %v", body, err)
+		}
+		if res.Status != StatusFailed {
+			t.Errorf("%s：应仍是 failed（不被误洗成已签到），得到 %s（%s）", body, res.Status, res.Message)
+		}
+	}
+}
+
+// success:false + 已领取文案（部分上游不用 code 表达）→ already。
+func TestQoderCheckinSuccessFalseAlready(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"data":[{"id":"c-2","actionType":"CLAIM_BENEFIT"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":false,"errorMessage":"已领取过该奖励"}`))
+	}))
+	defer srv.Close()
+	res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil {
+		t.Fatalf("CheckIn: %v", err)
+	}
+	if res.Status != StatusAlready {
+		t.Errorf("success:false + 已领取文案应 already，得到 %s（%s）", res.Status, res.Message)
+	}
+}
+
 func TestQoderBizCodeFirst(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"code":"500","msg":"server busy"}`))
@@ -626,5 +720,87 @@ func TestQoderShapeDiagnosis(t *testing.T) {
 	res, _ = newQoderCheckerAt(srv2.URL).CheckIn(context.Background(), newQoderAccount())
 	if !strings.Contains(res.Message, "data=缺失") {
 		t.Errorf("data 缺失诊断异常: %s", res.Message)
+	}
+}
+
+// CLAIMED 家族 → already（v1.7.6 真实联调修复；用户累计点 6 次全标红）。
+func TestQoderClaimedIsAlready(t *testing.T) {
+	// 列表跳 CLAIMED（无数据）→ already。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"CLAIMED"}`))
+	}))
+	defer srv.Close()
+	res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusAlready {
+		t.Errorf("列表跳 CLAIMED 应 already: %+v", res)
+	}
+	if strings.Contains(res.Message, "失败") {
+		t.Errorf("already 不应带失败字样: %+v", res)
+	}
+
+	// claim 跳 CLAIMED：列表可领 → claim 返回已领取 → already。
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`{"code":0,"data":[{"id":"c-1","actionType":"CLAIM_BENEFIT","claimStatus":"pending"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"code":"CLAIMED"}`))
+	}))
+	defer srv2.Close()
+	res, err = newQoderCheckerAt(srv2.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusAlready {
+		t.Errorf("claim 跳 CLAIMED 应 already: %+v", res)
+	}
+}
+
+// CLAIMED 但响应带活动列表/奖励信息 → Message 丰富化（数据保留利用）。
+func TestQoderClaimedWithRewardData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"CLAIMED","rewardPoints":100,
+		  "data":{"list":[{"id":"c-1","actionType":"CLAIM_BENEFIT","claimStatus":"claimed","rewardName":"100 credits"}]}}`))
+	}))
+	defer srv.Close()
+	res, err := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != StatusAlready {
+		t.Fatalf("带数据的 CLAIMED 应 already: %+v", res)
+	}
+	if !strings.Contains(res.Message, "100") || !strings.Contains(res.Message, "credits") {
+		t.Errorf("Message 应含奖励信息: %+v", res)
+	}
+}
+
+// 其余非成功码仍 failed（不回归）；CLAIMED 家族变体同样 already。
+func TestQoderBizCodesNoRegression(t *testing.T) {
+	// 真实失败码（活动结束）仍 failed。
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"code":"ACTIVITY_ENDED","msg":"activity ended"}`))
+	}))
+	defer srv.Close()
+	res, _ := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+	if res.Status != StatusFailed {
+		t.Errorf("ACTIVITY_ENDED 应 failed: %+v", res)
+	}
+	if !strings.Contains(res.Message, "活动已结束") && !strings.Contains(res.Message, "activity ended") {
+		t.Errorf("失败文案应含上游原因: %+v", res)
+	}
+	// 变体大小写/同族码 → already。
+	for _, code := range []string{"claimed_today", "already_claim", "ALREADY_CLAIMED", "Received"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(`{"code":"` + code + `"}`))
+		}))
+		res, _ := newQoderCheckerAt(srv.URL).CheckIn(context.Background(), newQoderAccount())
+		srv.Close()
+		if res.Status != StatusAlready {
+			t.Errorf("变体码 %s 应 already: %+v", code, res)
+		}
 	}
 }
