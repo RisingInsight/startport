@@ -1,11 +1,14 @@
 // exthropic.go 外部渠道的 Anthropic Messages 出口（POST /v1/messages）。
 //
-// 目的：Claude Code / Anthropic SDK 客户端直连本网关使用外部渠道。转换是
-// **协议级**的：请求 Anthropic Messages → OpenAI Chat Completions 发往 ext
-// 渠道（由 extchan.Do 按协议适配器决定最终上游形态）；响应按原方向折回。
+// 目的：Claude Code / Anthropic SDK 客户端直连本网关。转换是**协议级**的：
+// 请求 Anthropic Messages → OpenAI Chat Completions，响应按原方向折回。
+// 路由判定（v1.7.6 主池回退）：ext 渠道可服务的模型走 extchan.Do（由协议适配
+// 器决定最终上游形态）；非 ext 模型（extchan.ErrModelNotExt）回退 CodeBuddy
+// 主池——复用 chatCompletions 全套治理（选号/粘性/轮转/记账），响应经
+// poolAnthropicBridge 实时折回 Anthropic 形态。
 // 只覆盖 /v1/messages 主干（system / messages / tools / max_tokens /
 // temperature / stream）；thinking 块、cache_control、citations 等 Anthropic
-// 专有特性不透传（ext 渠道侧无对应语义）。
+// 专有特性不透传（ext 渠道侧无对应语义）；image 块两条路径都 400。
 //
 // 阶段三变化（语义未变）：
 //   - 转发改走 extchan.Do（凭证池选证/换证 + 协议适配）；
@@ -16,7 +19,10 @@ package server
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +31,7 @@ import (
 
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/provider"
+	"github.com/RisingInsight/startport/internal/reqlog"
 	"github.com/RisingInsight/startport/internal/usage"
 )
 
@@ -70,7 +77,15 @@ func writeAnthropicError(w http.ResponseWriter, status int, errType, msg string)
 	writeJSON(w, status, e)
 }
 
-// handleExtMessages /v1/messages 入口（仅外部渠道）。
+// handleExtMessages /v1/messages 入口（外部渠道优先，CodeBuddy 池回退）。
+//
+// 路由判定（v1.7.6 主池回退）：
+//   - ext 渠道可服务（"ext:<渠道>/<模型>" 前缀，或裸名在渠道间唯一命中）→ ext 链路；
+//   - 裸名不属于任何渠道（extchan.ErrModelNotExt）→ 回退 CodeBuddy 池——
+//     Claude Code 用裸名模型即可直连主池额度，无需任何 ext 渠道配置；
+//   - ext: 前缀指向不存在/停用渠道、裸名多渠道同名 → 400（路由协议错误，
+//     回主池会掩盖配置问题，不回退）；
+//   - 未配置任何 ext 渠道 → 全部模型走池回退（Ext==nil 不再是 501）。
 func (h *Handler) handleExtMessages(w http.ResponseWriter, r *http.Request) {
 	// 鉴权与 /v1/chat/completions 同通道（chatAuth 已在外层完成）。
 	apiKeyName, _ := r.Context().Value(apiKeyNameKey{}).(string)
@@ -84,18 +99,29 @@ func (h *Handler) handleExtMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "parse body: "+err.Error())
 		return
 	}
-	if h.cfg.Ext == nil {
-		writeAnthropicError(w, http.StatusNotImplemented, "api_error", "no ext channels configured; /v1/messages serves ext channels only")
-		return
+	if h.cfg.Ext != nil {
+		ch2, upstream, display, rerr := h.cfg.Ext.RouteModel(areq.Model)
+		switch {
+		case rerr == nil:
+			h.extMessagesRoute(w, r, apiKeyName, &areq, ch2, upstream, display)
+			return
+		case errors.Is(rerr, extchan.ErrModelNotExt):
+			// 裸名不属于任何外部渠道 → 落主池（下方）。
+		default:
+			writeAnthropicError(w, http.StatusBadRequest, "not_found_error", rerr.Error())
+			return
+		}
 	}
-	ch2, upstream, display, rerr := h.cfg.Ext.RouteModel(areq.Model)
-	if rerr != nil {
-		writeAnthropicError(w, http.StatusBadRequest, "not_found_error", rerr.Error())
-		return
-	}
+	h.handleMessagesPoolFallback(w, r, &areq)
+}
+
+// extMessagesRoute 外部渠道分支（原 handleExtMessages 主体，语义未改）：
+// Anthropic → OpenAI 转换后交 extchan.Do，响应按原方向折回。
+func (h *Handler) extMessagesRoute(w http.ResponseWriter, r *http.Request, apiKeyName string,
+	areq *anthropicReq, ch2 *extchan.Channel, upstream, display string) {
 
 	// Anthropic → OpenAI 请求转换（上游模型名：别名已解析）。
-	oaiBody, convErr := anthropicToOpenAI(&areq, upstream)
+	oaiBody, convErr := anthropicToOpenAI(areq, upstream)
 	if convErr != nil {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", convErr.Error())
 		return
@@ -371,11 +397,17 @@ func marshalCompact(v any) string {
 	return string(b)
 }
 
-// extMessagesSync 非流式：OpenAI 响应 → Anthropic Messages 形态。
-// display 为客户端可见模型名（"ext:<渠道>/<模型或别名>"）。
-func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel,
-	cred *extchan.Credential, display string, respBody []byte,
-	attemptStarted time.Time, apiKeyName string) {
+// oa2aUsage OpenAI usage 中转形态（非流式折回与流式累计共用）。
+type oa2aUsage struct {
+	prompt     int64
+	completion int64
+	total      int64
+}
+
+// openAIRespToAnthropic 非流式 OpenAI Chat Completions 响应 → Anthropic Messages
+// 形态（纯转换，不含记账——ext 与主池回退两条路径的记账口径不同）。model 为
+// 客户端可见模型名。ok=false 表示 body 不可解析（调用方回 502）。
+func openAIRespToAnthropic(respBody []byte, model string) (map[string]any, *oa2aUsage, bool) {
 	var oaiResp struct {
 		Choices []struct {
 			Message struct {
@@ -392,8 +424,7 @@ func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel,
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &oaiResp); err != nil || len(oaiResp.Choices) == 0 {
-		writeAnthropicError(w, http.StatusBadGateway, "api_error", "ext channel returned unparseable response")
-		return
+		return nil, nil, false
 	}
 	choice := oaiResp.Choices[0]
 	// content blocks：text 块 + tool_use 块。
@@ -413,24 +444,39 @@ func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel,
 			"input": input,
 		})
 	}
-	stopReason := mapAnthropicStop(choice.FinishReason)
 	resp := map[string]any{
 		"id":            "msg_" + fmt.Sprintf("%d", time.Now().UnixNano()),
 		"type":          "message",
 		"role":          "assistant",
-		"model":         display,
+		"model":         model,
 		"content":       blocks,
-		"stop_reason":   stopReason,
+		"stop_reason":   mapAnthropicStop(choice.FinishReason),
 		"stop_sequence": nil,
 	}
+	var u *oa2aUsage
 	if oaiResp.Usage != nil {
+		u = &oa2aUsage{prompt: oaiResp.Usage.PromptTokens, completion: oaiResp.Usage.CompletionTokens, total: oaiResp.Usage.TotalTokens}
 		resp["usage"] = map[string]any{
-			"input_tokens":  oaiResp.Usage.PromptTokens,
-			"output_tokens": oaiResp.Usage.CompletionTokens,
+			"input_tokens":  u.prompt,
+			"output_tokens": u.completion,
 		}
+	}
+	return resp, u, true
+}
+
+// extMessagesSync 非流式：OpenAI 响应 → Anthropic Messages 形态。
+// display 为客户端可见模型名（"ext:<渠道>/<模型或别名>"）。
+func (h *Handler) extMessagesSync(w http.ResponseWriter, ch2 *extchan.Channel,
+	cred *extchan.Credential, display string, respBody []byte,
+	attemptStarted time.Time, apiKeyName string) {
+	resp, u, ok := openAIRespToAnthropic(respBody, display)
+	if !ok {
+		writeAnthropicError(w, http.StatusBadGateway, "api_error", "ext channel returned unparseable response")
+		return
+	}
+	if u != nil {
 		// 用量记账（realm=ext，与 chat 路径同口径）+ 凭证级进程内计数。
-		h.recordExtMessagesUsage(apiKeyName, ch2, cred, display, oaiResp.Usage.PromptTokens,
-			oaiResp.Usage.CompletionTokens, oaiResp.Usage.TotalTokens, attemptStarted)
+		h.recordExtMessagesUsage(apiKeyName, ch2, cred, display, u.prompt, u.completion, u.total, attemptStarted)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -458,11 +504,191 @@ func mapAnthropicStop(openaiFinish string) string {
 	}
 }
 
-// extMessagesStream 流式：OpenAI SSE → Anthropic SSE 事件序列。
+// anthropicEventWriter 构造 SSE 事件写出闭包（ext 流式与主池回退桥共用）。
+func anthropicEventWriter(w http.ResponseWriter, fl http.Flusher) func(string, any) {
+	return func(event string, payload any) {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
+		if fl != nil {
+			fl.Flush()
+		}
+	}
+}
+
+// anthropicStreamXlator OpenAI chunk 流 → Anthropic 事件流的共用翻译状态机。
 // 事件骨架：message_start → (content_block_start + content_block_delta* +
 // content_block_stop)* → message_delta(stop_reason, usage) → message_stop。
-// 工具调用流式拼装不做（OpenAI 侧 arguments 分片在第一刀直接聚合成完整
+// 工具调用流式拼装不做（OpenAI 侧 arguments 分片在 finish 阶段聚合成完整
 // tool_use 块后一次性下发 content_block_start+input_delta+stop）。
+type anthropicStreamXlator struct {
+	sendEvent    func(event string, payload any)
+	model        string
+	started      bool
+	textOpen     bool
+	textIdx      int
+	outTokens    int64
+	inTokens     int64
+	hasUsage     bool
+	finishReason string
+	// 工具调用聚合：OpenAI 流式 tool_calls 按 index 分片给 arguments。
+	toolAgg map[int]*openAIToolCall
+	toolSeq []int
+}
+
+func newAnthropicStreamXlator(model string, sendEvent func(string, any)) *anthropicStreamXlator {
+	return &anthropicStreamXlator{sendEvent: sendEvent, model: model, toolAgg: map[int]*openAIToolCall{}}
+}
+
+// start 发出 message_start + ping（幂等）。
+func (x *anthropicStreamXlator) start() {
+	if x.started {
+		return
+	}
+	x.started = true
+	x.sendEvent("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id": "msg_" + fmt.Sprintf("%d", time.Now().UnixNano()), "type": "message",
+			"role": "assistant", "model": x.model, "content": []any{},
+			"stop_reason": nil, "stop_sequence": nil,
+			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
+		},
+	})
+	x.sendEvent("ping", map[string]any{"type": "ping"})
+}
+
+// ingest 处理一个 OpenAI chunk payload（"data: " 后、"[DONE]" 前的 JSON）。
+// 返回 false = 流中错误帧已按 Anthropic error 事件透出，调用方立即终止
+//（不再 finish——error 之后补收尾骨架是畸形流）。
+func (x *anthropicStreamXlator) ingest(payload string) bool {
+	x.start()
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Type     string `json:"type"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+		Usage *struct {
+			PromptTokens     int64 `json:"prompt_tokens"`
+			CompletionTokens int64 `json:"completion_tokens"`
+			TotalTokens      int64 `json:"total_tokens"`
+		} `json:"usage"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(payload), &chunk) != nil {
+		return true // 非法帧跳过（与既有扫描器语义一致）
+	}
+	if chunk.Error != nil {
+		// 流中错误帧：按 Anthropic 形态补发 error 事件并终止。
+		x.sendEvent("error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": chunk.Error.Message},
+		})
+		return false
+	}
+	for _, c := range chunk.Choices {
+		if c.Delta.Content != "" {
+			x.emitTextDelta(c.Delta.Content)
+		}
+		for _, tc := range c.Delta.ToolCalls {
+			agg := x.toolAgg[tc.Index]
+			if agg == nil {
+				agg = &openAIToolCall{ID: tc.ID}
+				agg.Function.Name = tc.Function.Name
+				x.toolAgg[tc.Index] = agg
+				x.toolSeq = append(x.toolSeq, tc.Index)
+			}
+			if tc.Function.Name != "" {
+				agg.Function.Name = tc.Function.Name
+			}
+			if tc.ID != "" {
+				agg.ID = tc.ID
+			}
+			agg.Function.Arguments += tc.Function.Arguments
+		}
+		if c.FinishReason != "" {
+			x.finishReason = c.FinishReason
+		}
+	}
+	if chunk.Usage != nil {
+		x.hasUsage = true
+		x.inTokens = chunk.Usage.PromptTokens
+		x.outTokens = chunk.Usage.CompletionTokens
+	}
+	return true
+}
+
+// emitTextDelta 文本块懒开 + delta 下发。
+func (x *anthropicStreamXlator) emitTextDelta(s string) {
+	if !x.textOpen {
+		x.sendEvent("content_block_start", map[string]any{
+			"type": "content_block_start", "index": x.textIdx,
+			"content_block": map[string]any{"type": "text", "text": ""},
+		})
+		x.textOpen = true
+	}
+	x.sendEvent("content_block_delta", map[string]any{
+		"type": "content_block_delta", "index": x.textIdx,
+		"delta": map[string]any{"type": "text_delta", "text": s},
+	})
+}
+
+// closeText 关闭打开中的文本块（index 前进）。
+func (x *anthropicStreamXlator) closeText() {
+	if x.textOpen {
+		x.sendEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": x.textIdx})
+		x.textOpen = false
+		x.textIdx++
+	}
+}
+
+// finish 收尾：关文本块 + 聚合下发工具块 + message_delta + message_stop。
+// 空流（一帧未到）也会补齐骨架，客户端拿到空 message 而非悬挂连接。
+func (x *anthropicStreamXlator) finish() {
+	x.start()
+	x.closeText()
+	// 工具块：整体下发（聚合一刀）。
+	for _, idx := range x.toolSeq {
+		tc := x.toolAgg[idx]
+		var input json.RawMessage = json.RawMessage(tc.Function.Arguments)
+		if len(input) == 0 {
+			input = json.RawMessage("{}")
+		}
+		x.sendEvent("content_block_start", map[string]any{
+			"type": "content_block_start", "index": x.textIdx,
+			"content_block": map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": map[string]any{}},
+		})
+		x.sendEvent("content_block_delta", map[string]any{
+			"type": "content_block_delta", "index": x.textIdx,
+			"delta": map[string]any{"type": "input_json_delta", "partial_json": string(input)},
+		})
+		x.sendEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": x.textIdx})
+		x.textIdx++
+	}
+	x.sendEvent("message_delta", map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": mapAnthropicStop(x.finishReason), "stop_sequence": nil},
+		"usage": map[string]any{"output_tokens": x.outTokens},
+	})
+	x.sendEvent("message_stop", map[string]any{"type": "message_stop"})
+}
+
+// extMessagesStream 流式：OpenAI SSE → Anthropic SSE 事件序列（翻译状态机见上）。
 func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 	cred *extchan.Credential, display string, rc io.ReadCloser,
 	attemptStarted time.Time, apiKeyName string) {
@@ -471,59 +697,8 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	sendEvent := func(event string, payload any) {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return
-		}
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, b)
-		if flusher != nil {
-			flusher.Flush()
-		}
-	}
-	sendEvent("message_start", map[string]any{
-		"type": "message_start",
-		"message": map[string]any{
-			"id": "msg_" + fmt.Sprintf("%d", time.Now().UnixNano()), "type": "message",
-			"role": "assistant", "model": display, "content": []any{},
-			"stop_reason": nil, "stop_sequence": nil,
-			"usage": map[string]any{"input_tokens": 0, "output_tokens": 0},
-		},
-	})
-	sendEvent("ping", map[string]any{"type": "ping"})
-
-	var (
-		textOpen     bool
-		textIdx      int
-		outTokens    int64
-		inTokens     int64
-		hasUsage     bool
-		finishReason string
-		// 工具调用聚合：OpenAI 流式 tool_calls 按 index 分片给 arguments。
-		toolAgg = map[int]*openAIToolCall{}
-		toolSeq []int
-	)
-	// text 块从 index 0 开始；工具块在文本块之后顺序编号。
-	emitTextDelta := func(s string) {
-		if !textOpen {
-			sendEvent("content_block_start", map[string]any{
-				"type": "content_block_start", "index": textIdx,
-				"content_block": map[string]any{"type": "text", "text": ""},
-			})
-			textOpen = true
-		}
-		sendEvent("content_block_delta", map[string]any{
-			"type": "content_block_delta", "index": textIdx,
-			"delta": map[string]any{"type": "text_delta", "text": s},
-		})
-	}
-	closeText := func() {
-		if textOpen {
-			sendEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": textIdx})
-			textOpen = false
-			textIdx++
-		}
-	}
+	x := newAnthropicStreamXlator(display, anthropicEventWriter(w, flusher))
+	x.start()
 
 	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
@@ -536,100 +711,14 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 		if payload == "[DONE]" {
 			break
 		}
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
-						Index    int    `json:"index"`
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-				FinishReason string `json:"finish_reason"`
-			} `json:"choices"`
-			Usage *struct {
-				PromptTokens     int64 `json:"prompt_tokens"`
-				CompletionTokens int64 `json:"completion_tokens"`
-				TotalTokens      int64 `json:"total_tokens"`
-			} `json:"usage"`
-			Error *struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
-		if json.Unmarshal([]byte(payload), &chunk) != nil {
-			continue
-		}
-		if chunk.Error != nil {
-			// 流中错误帧：按 Anthropic 形态补发 error 事件并终止。
-			sendEvent("error", map[string]any{
-				"type":  "error",
-				"error": map[string]any{"type": "api_error", "message": chunk.Error.Message},
-			})
-			return
-		}
-		for _, c := range chunk.Choices {
-			if c.Delta.Content != "" {
-				emitTextDelta(c.Delta.Content)
-			}
-			for _, tc := range c.Delta.ToolCalls {
-				agg := toolAgg[tc.Index]
-				if agg == nil {
-					agg = &openAIToolCall{ID: tc.ID}
-					agg.Function.Name = tc.Function.Name
-					toolAgg[tc.Index] = agg
-					toolSeq = append(toolSeq, tc.Index)
-				}
-				if tc.Function.Name != "" {
-					agg.Function.Name = tc.Function.Name
-				}
-				if tc.ID != "" {
-					agg.ID = tc.ID
-				}
-				agg.Function.Arguments += tc.Function.Arguments
-			}
-			if c.FinishReason != "" {
-				finishReason = c.FinishReason
-			}
-		}
-		if chunk.Usage != nil {
-			hasUsage = true
-			inTokens = chunk.Usage.PromptTokens
-			outTokens = chunk.Usage.CompletionTokens
+		if !x.ingest(payload) {
+			return // 流中错误帧：error 事件已透出，不补收尾骨架
 		}
 	}
-	closeText()
-	// 工具块：整体下发（聚合一刀）。
-	for _, idx := range toolSeq {
-		tc := toolAgg[idx]
-		var input json.RawMessage = json.RawMessage(tc.Function.Arguments)
-		if len(input) == 0 {
-			input = json.RawMessage("{}")
-		}
-		sendEvent("content_block_start", map[string]any{
-			"type": "content_block_start", "index": textIdx,
-			"content_block": map[string]any{"type": "tool_use", "id": tc.ID, "name": tc.Function.Name, "input": map[string]any{}},
-		})
-		sendEvent("content_block_delta", map[string]any{
-			"type": "content_block_delta", "index": textIdx,
-			"delta": map[string]any{"type": "input_json_delta", "partial_json": string(input)},
-		})
-		sendEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": textIdx})
-		textIdx++
-	}
-	sendEvent("message_delta", map[string]any{
-		"type":  "message_delta",
-		"delta": map[string]any{"stop_reason": mapAnthropicStop(finishReason), "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": outTokens},
-	})
-	sendEvent("message_stop", map[string]any{"type": "message_stop"})
+	x.finish()
 
-	if hasUsage {
-		h.recordExtMessagesUsage(apiKeyName, ch2, cred, display, inTokens, outTokens, inTokens+outTokens, attemptStarted)
+	if x.hasUsage {
+		h.recordExtMessagesUsage(apiKeyName, ch2, cred, display, x.inTokens, x.outTokens, x.inTokens+x.outTokens, attemptStarted)
 	}
 }
 
@@ -662,4 +751,172 @@ func (h *Handler) recordExtMessagesUsage(apiKeyName string, ch2 *extchan.Channel
 		LatencyMs:        latencyMs,
 		HasLatency:       true,
 	}, true)
+}
+
+// ---------------------------------------------------------------------------
+// 主池回退（v1.7.6）：/v1/messages 的非 ext 模型 → CodeBuddy 账号池
+// ---------------------------------------------------------------------------
+
+// handleMessagesPoolFallback 主池回退：Anthropic 请求先折成 OpenAI wire，交给
+// 既有 chatCompletions 主链路——选号/粘性/轮转/冷却/错误处置/提示词模式/记账
+// 全部复用，不新增第二套池语义。响应经 poolAnthropicBridge 实时折回 Anthropic
+// 形态（流式逐帧翻译，不牺牲首字延迟）；JSONL 请求归档与 chat 路径同一套包装
+//（Path 记 /v1/messages）。主池路径自带的用量记账已生效，本函数不重复记账。
+func (h *Handler) handleMessagesPoolFallback(w http.ResponseWriter, r *http.Request, areq *anthropicReq) {
+	if h.cfg.Pool == nil {
+		writeAnthropicError(w, http.StatusNotImplemented, "api_error",
+			"no account pool configured; /v1/messages serves ext channels or a configured pool")
+		return
+	}
+	// 模型名保留原样（裸名 / cn: / global: 前缀）——chatCompletions 自己解析
+	// realm 前缀；image 块沿用 anthropicToOpenAI 的 400（与 ext 路径同一边界）。
+	oaiBody, convErr := anthropicToOpenAI(areq, areq.Model)
+	if convErr != nil {
+		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", convErr.Error())
+		return
+	}
+	r2 := r.Clone(r.Context())
+	r2.Body = io.NopCloser(bytes.NewReader(oaiBody))
+	r2.ContentLength = int64(len(oaiBody))
+	r2.Header.Set("Content-Type", "application/json")
+
+	bridge := &poolAnthropicBridge{ResponseWriter: w, display: areq.Model}
+	if h.cfg.RequestLog != nil {
+		// 与 ServeHTTP 的 chat 路径同一套归档包装（requestTrace + responseObserver），
+		// 面板请求流水不缺 /v1/messages 的主池流量。
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: "/v1/messages"}
+		if h.loadLive().RecordClientInfo {
+			trace.captureClientInfo(r)
+		}
+		r2 = r2.WithContext(context.WithValue(r2.Context(), requestTraceKey{}, trace))
+		w.Header().Set("X-Request-Id", trace.id)
+		h.cfg.RequestLog.Begin()
+		obs := &responseObserver{ResponseWriter: bridge}
+		defer func() {
+			status := obs.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			h.cfg.RequestLog.Record(trace.event(status))
+		}()
+		h.chatCompletions(obs, r2)
+	} else {
+		h.chatCompletions(bridge, r2)
+	}
+	bridge.finish()
+}
+
+// poolAnthropicBridge /v1/messages 主池回退的响应桥：chatCompletions 以 OpenAI
+// 形态写响应（流式逐帧、非流式整包、错误信封三种形态都可能），本桥把它翻译成
+// Anthropic 形态写给真实客户端：
+//   - 流式：首写时按 Content-Type 探测 SSE，逐帧翻译（message_start 起手，
+//     [DONE] 后停止；OpenAI 原始帧绝不透传）；
+//   - 非流式 200：整包缓冲，finish 时折回 Anthropic message；
+//   - 非 200：整包缓冲，finish 时折回 Anthropic 错误信封（type 按状态映射）。
+type poolAnthropicBridge struct {
+	http.ResponseWriter // Header() 直通真实 w：流式头（event-stream 等）由 sse.go 正常落位
+	display  string
+	x        *anthropicStreamXlator
+	mode     int // 0=未定 1=SSE 逐帧翻译 2=整包缓冲
+	status   int // WriteHeader 记录（非 200 时 finish 折回错误形态）
+	sseBuf   []byte // SSE 帧缓冲（每帧以 \\n\\n 结束后复用）
+	bodyBuf  []byte // 非流式/错误体缓冲
+	sseDone  bool   // [DONE] 或流中错误帧之后不再翻译
+	errored  bool   // 流中错误帧已透出（finish 不再补收尾骨架——error 事件后接 message_stop 是畸形流）
+	finished bool
+}
+
+// WriteHeader 拦截：200 不转发（SSE 靠首写隐式 200，头已经 Header() 直通落位；
+// 非流式由 finish 以折回后的形态统一写出）；非 200 进入缓冲模式。
+func (b *poolAnthropicBridge) WriteHeader(code int) {
+	b.status = code
+	if code != http.StatusOK {
+		b.mode = 2
+	}
+}
+
+func (b *poolAnthropicBridge) Write(p []byte) (int, error) {
+	if b.mode == 0 {
+		if strings.Contains(b.Header().Get("Content-Type"), "text/event-stream") {
+			b.mode = 1
+			fl, _ := b.ResponseWriter.(http.Flusher)
+			b.x = newAnthropicStreamXlator(b.display, anthropicEventWriter(b.ResponseWriter, fl))
+		} else {
+			b.mode = 2
+		}
+	}
+	if b.mode == 1 {
+		// 追加而非 [:0] 复用：跨 Write 的半帧必须保留前缀（若用 [:0] 复用底层数组，
+		// 下一次 Write 会覆盖未消费的半帧前缀——当前管线每 Write 恰好一整帧不会
+		// 触发，但这是正确性地雷；追加写内存有界：消费过的前缀随 realloc 丢弃）。
+		b.sseBuf = append(b.sseBuf, p...)
+		for {
+			idx := bytes.Index(b.sseBuf, []byte("\n\n"))
+			if idx < 0 {
+				break // 半帧留缓冲，等下一次 Write 拼齐
+			}
+			frame := string(b.sseBuf[:idx])
+			b.sseBuf = b.sseBuf[idx+2:]
+			if !strings.HasPrefix(frame, "data: ") {
+				continue // 注释行/空行
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(frame, "data: "))
+			if payload == "" {
+				continue
+			}
+			if payload == "[DONE]" {
+				b.sseDone = true
+				continue
+			}
+			if b.sseDone {
+				continue
+			}
+			if !b.x.ingest(payload) {
+				b.sseDone = true
+				b.errored = true // 流中错误帧已透出，停止翻译且不再补收尾骨架
+			}
+		}
+		return len(p), nil
+	}
+	b.bodyBuf = append(b.bodyBuf, p...)
+	return len(p), nil
+}
+
+// Flush 实现 http.Flusher：sse.go 逐帧 flush 打到真实 w（翻译事件内部已各自 flush）。
+func (b *poolAnthropicBridge) Flush() {
+	if fl, ok := b.ResponseWriter.(http.Flusher); ok {
+		fl.Flush()
+	}
+}
+
+// finish chatCompletions 返回后收尾：流式补齐 Anthropic 收尾骨架（错误帧已透出
+// 时不再补）；缓冲态把 OpenAI 整包/错误体折回 Anthropic 形态。
+func (b *poolAnthropicBridge) finish() {
+	if b.finished {
+		return
+	}
+	b.finished = true
+	switch b.mode {
+	case 1:
+		if !b.errored {
+			b.x.finish() // 正常/[DONE] 收尾；流中错误帧后不再补骨架（与 ext 路径同语义）
+		}
+	case 2:
+		status := b.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		if status >= 400 {
+			writeAnthropicError(b.ResponseWriter, status, anthropicErrTypeFor(status), upstreamErrorMsg(b.bodyBuf))
+			return
+		}
+		resp, _, ok := openAIRespToAnthropic(b.bodyBuf, b.display)
+		if !ok {
+			writeAnthropicError(b.ResponseWriter, http.StatusBadGateway, "api_error", "pool path returned unparseable response")
+			return
+		}
+		writeJSON(b.ResponseWriter, http.StatusOK, resp)
+	default:
+		writeAnthropicError(b.ResponseWriter, http.StatusBadGateway, "api_error", "pool path returned no response")
+	}
 }
