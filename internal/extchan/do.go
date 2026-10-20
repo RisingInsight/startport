@@ -65,6 +65,55 @@ var ErrNoCredential = &Error{
 	Message: "all credentials of this channel are unavailable (cooling / invalid / disabled / expired)",
 }
 
+// noCredentialError 生成带具体原因的 503：冷却时给出最早恢复秒数，
+// 其余状态给出 invalid/disabled/expired 计数，客户端不用再猜“为什么没号”。
+func (ch *Channel) noCredentialError() *Error {
+	now := time.Now()
+	var minCool time.Duration
+	var cooling, invalid, disabled, expired int
+	for _, c := range ch.credentials() {
+		c.mu.Lock()
+		state := c.stateLocked()
+		coolUntil := c.coolUntil
+		exp := c.ExpiresAt
+		c.mu.Unlock()
+		if state == CredCooling && now.Before(coolUntil) {
+			cooling++
+			if d := coolUntil.Sub(now); minCool == 0 || d < minCool {
+				minCool = d
+			}
+			continue
+		}
+		switch {
+		case state == CredInvalid:
+			invalid++
+		case state == CredDisabled:
+			disabled++
+		case !exp.IsZero() && !now.Before(exp):
+			expired++
+		}
+	}
+	msg := "all credentials of this channel are unavailable"
+	if cooling > 0 && minCool > 0 {
+		secs := int((minCool + time.Second - 1) / time.Second)
+		msg += fmt.Sprintf("; cooling, retry in %ds", secs)
+	}
+	var parts []string
+	if invalid > 0 {
+		parts = append(parts, fmt.Sprintf("invalid %d", invalid))
+	}
+	if disabled > 0 {
+		parts = append(parts, fmt.Sprintf("disabled %d", disabled))
+	}
+	if expired > 0 {
+		parts = append(parts, fmt.Sprintf("expired %d", expired))
+	}
+	if len(parts) > 0 {
+		msg += " (" + strings.Join(parts, ", ") + ")"
+	}
+	return &Error{Status: http.StatusServiceUnavailable, Code: "all_credentials_unavailable", Message: msg}
+}
+
 // IsCode 报告 err 是否为指定错误码的出站错误（server 侧分支用，不依赖文案）。
 func IsCode(err error, code string) bool {
 	var he *Error
@@ -200,7 +249,7 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 		// 渠道冷却且已无可用凭证 → 报"凭证全不可用"（PRD P0-2 的错误码口径）；
 		// 渠道冷却但凭证健康（5xx/传输熔断）→ 报渠道冷却（语义不同，客户端处置相同）。
 		if ch.pickCredential(nil) == nil {
-			return nil, ErrNoCredential
+			return nil, ch.noCredentialError()
 		}
 		return nil, &Error{
 			Status:  http.StatusServiceUnavailable,
@@ -231,7 +280,7 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 		}
 		if cred == nil {
 			if attempts == 0 {
-				return nil, ErrNoCredential
+				return nil, ch.noCredentialError()
 			}
 			break // 换证后没有其它可用凭证：把上一次的上游结果交给客户端
 		}
@@ -430,7 +479,7 @@ func (m *Manager) Do(ctx context.Context, ch *Channel, req *OutRequest) (*DoResu
 	if last != nil {
 		return last, nil
 	}
-	return nil, ErrNoCredential
+	return nil, ch.noCredentialError()
 }
 
 // invalidReasonFor 401/403 失败的细分判据（账号中心 v1.6.0 · 架构 §4.3）：

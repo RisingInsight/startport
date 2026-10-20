@@ -83,12 +83,15 @@ var presetList = []Preset{
 			"凭证与签名同中国版（账号 JSON），但两站令牌不通用；模型未知名硬失败。",
 	},
 	{
-		Key: "trae", Name: "TRAE（字节）", Vendor: "字节跳动",
-		Aliases:  []string{"trae", "trae cn"},
-		Protocol: ProtocolOpenAI, Auth: AuthSpec{Mode: AuthBearer},
-		NativeRequired: true,
-		Note:           "需要客户端有状态转发/自定义头；静态 key 无法直连（P2）。",
-		DocsURL:        "https://www.trae.ai/",
+		Key: "trae", Name: "TRAE（字节 · SOLO 国内）", Vendor: "字节跳动",
+		Aliases:  []string{"trae", "trae cn", "trae solo"},
+		Protocol: ProtocolOpenAI, Adapter: TraeAdapterName,
+		NativeRequired: false,
+		Note: "原生适配器（adapter=trae，国内 SOLO 通道）：base 建议 https://trae-api-cn.mchost.guru（以官方为准）；" +
+			"凭证填 Trae 登录态（accessToken 必填；uid/machineId/deviceId 建议一并填写，上游按设备绑定）；" +
+			"模型目录自动从 /api/ide/v1/get_detail_param 拉取，广告名不带后缀；" +
+			"本批先支持粘贴凭据转发，登录/签到/刷新在下一批接入；国际版是另一套协议，暂不支持。",
+		DocsURL: "https://www.trae.cn/",
 	},
 	{
 		Key: "autoclaw", Name: "AutoClaw（智谱 · 国内版）", Vendor: "智谱 AI",

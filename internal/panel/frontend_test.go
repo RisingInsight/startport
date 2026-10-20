@@ -24,7 +24,7 @@ import (
 // 它导出的 openExtWizard，故必须排在 ext.js 之后加载）。
 // 2026-10-18 增补 acct.js（账号中心视图 v1.6.0；依赖 core.js 的 $/esc/ago/api/toast，
 // 并在运行时调用 app.js 的 go / ext.js 的 loadExt——排在两者之后加载）。
-var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js", "extwiz.js", "acct.js"}
+var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js", "extwiz.js", "captcha.js", "acct.js"}
 
 // mergedAppJSPath 拼接全部面板 JS 为临时文件并返回路径（供 node harness 读取）。
 // 这样所有按函数名切片 app.js 的既有测试在拆分后无需改动切法。
@@ -571,6 +571,160 @@ process.stdout.write(JSON.stringify(seq));`
 	}
 }
 
+// TestAcctSingleRegionPools v1.7.6：Loomy / TRAE / 通用平台收成同构池入口。
+//
+// 钉住三件事：
+//   - 单区域池不显示「全部/国内/国际」页签，Qoder / AutoClaw 仍显示；
+//   - 通用平台逐账号渠道 c-<id> 的模型键 ext:c-<id>/<model> 能被匹配与剥前缀，
+//     且不会误吞固定前缀平台（ext:qoder/...）；
+//   - 旧锚点/行点击（loomy / trae / custom）仍映射到对应 *-pool 入口。
+func TestAcctSingleRegionPools(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; single-region pool test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+function makeEl(id) {
+  return {
+    id, value: '', textContent: '', hidden: false, disabled: false, title: '',
+    placeholder: '', innerHTML: '', className: '', href: '', dataset: {}, style: {},
+    options: [],
+    classList: {
+      _s: new Set(),
+      add(c) { this._s.add(c); },
+      remove(c) { this._s.delete(c); },
+      toggle(c, f) {
+        if (f === undefined) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); }
+        else if (f) { this._s.add(c); } else { this._s.delete(c); }
+      },
+      contains(c) { return this._s.has(c); }
+    },
+    querySelectorAll() { return []; },
+    querySelector() { return null; },
+    focus() {}, appendChild() {}, remove() {}, select() {}
+  };
+}
+const els = {};
+const $ = id => els[id] || (els[id] = makeEl(id));
+const ctx = {
+  $, view: 'accounts-center',
+  history: { replaceState() {} },
+  document: { addEventListener() {}, createElement: () => makeEl('tmp'), body: { appendChild() {} } },
+  api: () => Promise.reject(new Error('no api in test')),
+  confirm: () => true,
+  esc: s => String(s == null ? '' : s),
+  fmtTok: n => String(n), fmtCredit: n => String(n), ago: () => '—',
+  toast: () => {},
+  Date, Number, String, Math, isNaN, JSON, Promise, Array, Object, RegExp, Error,
+  setTimeout, clearTimeout, setInterval, clearInterval, console,
+};
+ctx.window = ctx;
+vm.createContext(ctx);
+vm.runInContext(src, ctx, { filename: 'acct.js' });
+function pick(step) {
+  return {
+    step,
+    tabsHidden: !!els.acctRegionTabs.hidden,
+    title: els.acctAllTitle.textContent,
+    add: els.btnAcctAdd.textContent,
+  };
+}
+const out = [];
+ctx.selectAcctTab('loomy-pool');
+out.push({ ...pick('loomy-pool'),
+  loomy: ctx.acctQoderModelMatch('ext:loomy/session-a', 'all'),
+  qoderLeak: ctx.acctQoderModelMatch('ext:qoder/qwen', 'all'),
+  name: ctx.acctQoderModelName('ext:loomy/session-a') });
+ctx.selectAcctTab('trae-pool');
+out.push({ ...pick('trae-pool'),
+  trae: ctx.acctQoderModelMatch('ext:trae/solo-1', 'all'),
+  name: ctx.acctQoderModelName('ext:trae/solo-1') });
+ctx.selectAcctTab('custom-pool');
+out.push({ ...pick('custom-pool'),
+  custom: ctx.acctQoderModelMatch('ext:c-abc123/gpt-4o', 'all'),
+  emptyChannel: ctx.acctQoderModelMatch('ext:c-/gpt-4o', 'all'),
+  name: ctx.acctQoderModelName('ext:c-abc123/gpt-4o') });
+ctx.selectAcctTab('qoder-pool');
+out.push({ ...pick('qoder-pool'),
+  cn: ctx.acctQoderModelMatch('ext:qoder/qwen', 'all'),
+  intl: ctx.acctQoderModelMatch('ext:qoder-intl/claude', 'all'),
+  name: ctx.acctQoderModelName('ext:qoder-intl/claude') });
+ctx.selectAcctTab('autoclaw-pool');
+out.push({ ...pick('autoclaw-pool'),
+  cn: ctx.acctQoderModelMatch('ext:autoclaw/glm-5.3', 'all') });
+// 旧入口映射：行点击 / 旧 hash 传平台 key，最终落到同构池。
+ctx.selectAcctTab('custom');
+out.push({ ...pick('custom-legacy'), mappedToPool: els.acctAllTitle.textContent === '通用平台账号池' });
+process.stdout.write(JSON.stringify(out));`
+	f, err := os.CreateTemp(t.TempDir(), "acct-pools-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	acctPath, err := filepath.Abs("acct.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := exec.Command(node, f.Name(), acctPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("single-region pool test failed: %v\n%s", err, raw)
+	}
+	var got []struct {
+		Step         string `json:"step"`
+		TabsHidden   bool   `json:"tabsHidden"`
+		Title        string `json:"title"`
+		Add          string `json:"add"`
+		Loomy        bool   `json:"loomy"`
+		Trae         bool   `json:"trae"`
+		Custom       bool   `json:"custom"`
+		EmptyChannel bool   `json:"emptyChannel"`
+		QoderLeak    bool   `json:"qoderLeak"`
+		Cn           bool   `json:"cn"`
+		Intl         bool   `json:"intl"`
+		Name         string `json:"name"`
+		MappedToPool bool   `json:"mappedToPool"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("parse node output: %v\n%s", err, raw)
+	}
+	if len(got) != 6 {
+		t.Fatalf("steps = %d, want 6: %+v", len(got), got)
+	}
+	byStep := map[string]int{}
+	for i, s := range got {
+		byStep[s.Step] = i
+	}
+	for _, step := range []string{"loomy-pool", "trae-pool", "custom-pool"} {
+		s := got[byStep[step]]
+		if !s.TabsHidden {
+			t.Errorf("%s: 单区域池不应显示国内/国际页签", step)
+		}
+	}
+	if s := got[byStep["loomy-pool"]]; !s.Loomy || s.QoderLeak || s.Name != "session-a" || s.Title != "Loomy 账号池" || s.Add != "添加 Loomy 账号" {
+		t.Errorf("loomy-pool 状态不对: %+v", s)
+	}
+	if s := got[byStep["trae-pool"]]; !s.Trae || s.Name != "solo-1" || s.Title != "TRAE 账号池" {
+		t.Errorf("trae-pool 状态不对: %+v", s)
+	}
+	if s := got[byStep["custom-pool"]]; !s.Custom || s.EmptyChannel || s.QoderLeak || s.Name != "gpt-4o" || s.Title != "通用平台账号池" || s.Add != "添加通用平台账号" {
+		t.Errorf("custom-pool 状态不对: %+v", s)
+	}
+	if s := got[byStep["qoder-pool"]]; s.TabsHidden || !s.Cn || !s.Intl || s.Name != "claude" {
+		t.Errorf("qoder-pool 应保留区域页签且匹配双区: %+v", s)
+	}
+	if s := got[byStep["autoclaw-pool"]]; s.TabsHidden || !s.Cn {
+		t.Errorf("autoclaw-pool 应保留区域页签: %+v", s)
+	}
+	if s := got[byStep["custom-legacy"]]; !s.TabsHidden || !s.MappedToPool || s.Title != "通用平台账号池" {
+		t.Errorf("旧入口 custom 未映射到 custom-pool: %+v", s)
+	}
+}
+
 // 请求记录行必须紧凑、可读，并带上调用来源（IP / UA）；来源缺失时以 — 兜底。
 func TestAppJSRequestLogFormatting(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -748,6 +902,54 @@ process.stdout.write(JSON.stringify({
 		`"rateFree":0,"rateMissing":null}`
 	if strings.TrimSpace(string(out)) != want {
 		t.Fatalf("model filter=%s\nwant %s", out, want)
+	}
+}
+
+// 外部渠道模型：realm=ext 只看 ext: 条目；关键词能匹配平台/适配器。
+func TestAppJSModelFilterExt(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; model filter test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function mdRateValue');
+const end = src.indexOf('function mdRowHtml');
+if (start < 0 || end < 0) throw new Error('model filter helpers not found');
+const ctx = { Number, String, Array, Object, isFinite, parseFloat };
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.mdMatch=mdMatch;', ctx);
+const models = [
+  { id: 'ext:qoder/Qwen3.8-Max', source: 'ext', provider: 'qoder', platform_name: 'Qoder 国内', adapter: 'qoder' },
+  { id: 'ext:trae/glm-5.2', source: 'ext', provider: 'trae', platform_name: 'TRAE', adapter: 'trae' },
+  { id: 'cn:glm-5.2', name: 'GLM-5.2', vendor: 'Zhipu' },
+];
+const ids = f => models.filter(m => ctx.mdMatch(m, f)).map(m => m.id);
+process.stdout.write(JSON.stringify({
+  ext: ids({ realm: 'ext' }),
+  qoder: ids({ realm: 'ext:qoder' }),
+  trae: ids({ realm: 'ext:trae' }),
+  q: ids({ q: 'qoder' }),
+  cn: ids({ realm: 'cn' }),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "model-ext-filter-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ext model filter node test failed: %v\n%s", err, out)
+	}
+	const want = `{"ext":["ext:qoder/Qwen3.8-Max","ext:trae/glm-5.2"],` +
+		`"qoder":["ext:qoder/Qwen3.8-Max"],"trae":["ext:trae/glm-5.2"],` +
+		`"q":["ext:qoder/Qwen3.8-Max"],"cn":["cn:glm-5.2"]}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("ext model filter=%s\nwant %s", out, want)
 	}
 }
 
@@ -1635,6 +1837,110 @@ process.exit(0);`
 	}
 }
 
+// TestAcctCheckinTodayOnly 签到状态必须按自然日展示：昨天的“已领取”不能当作今天已签。
+func TestAcctCheckinTodayOnly(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; checkin display test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const mk = () => ({ innerHTML: '', textContent: '', value: '', hidden: false, dataset: {}, style: {},
+  classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+  addEventListener() {}, removeEventListener() {}, focus() {}, blur() {}, click() {},
+  querySelector: () => null, querySelectorAll: () => [], appendChild() {}, setAttribute() {}, removeAttribute() {} });
+const inert = new Proxy(function () {}, {
+  get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
+  set() { return true; }, apply() { return inert; }, construct() { return inert; }, has() { return true; },
+});
+const sandbox = new Proxy({
+  location: { hash: '#accounts-center' }, history: { replaceState() {} },
+  localStorage: { getItem: () => null, setItem() {} },
+  navigator: { clipboard: { writeText: () => Promise.resolve() } },
+  document: { querySelectorAll: () => [], querySelector: () => inert,
+    getElementById: () => mk(), addEventListener() {}, documentElement: inert, head: inert, body: inert,
+    createElement: () => inert, cookie: '', visibilityState: 'visible' },
+  fetch: () => new Promise(() => {}),
+  addEventListener() {}, removeEventListener() {},
+  matchMedia: () => ({ matches: false, addEventListener() {} }),
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  console, JSON, Math, Date, Number, String, Boolean, Object, Array, Promise, Map, Set, RegExp, Error, TypeError, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, URL, Symbol, Proxy, Reflect,
+}, { get(t, k) { return t[k]; }, has() { return true; } });
+sandbox.window = sandbox; sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(src + '\nthis.acctCheckinText = acctCheckinText;\nthis.acctCheckinCycleStart = acctCheckinCycleStart;\nthis.acctCheckinToday = acctCheckinToday;', sandbox, { filename: 'panel.js' });
+const now = new Date();
+const at = d => new Date(now.getFullYear(), now.getMonth(), now.getDate() + d, 12, 0, 0).toISOString();
+const call = ck => sandbox.acctCheckinText({ checkin: Object.assign({ supported: true }, ck) });
+const qstart = (h, m) => sandbox.acctCheckinCycleStart('qoder', new Date(2026, 9, 20, h, m));
+const qat = (h, m) => ({ platform: 'qoder', checkin: { supported: true, last_status: 'already', last_at: new Date(2026, 9, 20, h, m).toISOString() } });
+const out = {
+  today_already: call({ last_status: 'already', last_at: at(0), last_message: '今日已领取 100 credits' }),
+  stale_already: call({ last_status: 'already', last_at: at(-1), last_message: '今日已领取 100 credits' }),
+  today_failed: call({ last_status: 'failed', last_at: at(0), last_error: 'boom' }),
+  stale_failed: call({ last_status: 'failed', last_at: at(-1), last_error: 'boom' }),
+  unsupported: call({ supported: false }),
+  qoder_before: qstart(8, 36).getTime() === new Date(2026, 9, 19, 10, 0).getTime(),
+  qoder_edge: qstart(9, 59).getTime() === new Date(2026, 9, 19, 10, 0).getTime(),
+  qoder_after: qstart(10, 1).getTime() === new Date(2026, 9, 20, 10, 0).getTime(),
+  qoder_today_before: sandbox.acctCheckinToday(qat(8, 36), new Date(2026, 9, 20, 9, 0)),
+  qoder_today_prev: sandbox.acctCheckinToday(qat(8, 36), new Date(2026, 9, 20, 10, 1)),
+  qoder_today_after: sandbox.acctCheckinToday(qat(10, 30), new Date(2026, 9, 20, 11, 0)),
+};
+process.stdout.write(JSON.stringify(out));
+process.exit(0);`
+	f, err := os.CreateTemp(t.TempDir(), "checkin-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	raw, err := exec.Command(node, f.Name(), mergedAppJSPath(t)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("checkin display node test failed: %v\n%s", err, raw)
+	}
+	var out struct {
+		TodayAlready     string `json:"today_already"`
+		StaleAlready     string `json:"stale_already"`
+		TodayFailed      string `json:"today_failed"`
+		StaleFailed      string `json:"stale_failed"`
+		Unsupported      string `json:"unsupported"`
+		QoderBefore      bool   `json:"qoder_before"`
+		QoderEdge        bool   `json:"qoder_edge"`
+		QoderAfter       bool   `json:"qoder_after"`
+		QoderTodayBefore bool   `json:"qoder_today_before"`
+		QoderTodayPrev   bool   `json:"qoder_today_prev"`
+		QoderTodayAfter  bool   `json:"qoder_today_after"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
+	}
+	if !strings.Contains(out.TodayAlready, "已签过") || !strings.Contains(out.TodayAlready, "今日已领取") {
+		t.Errorf("今日 already = %q", out.TodayAlready)
+	}
+	if !strings.Contains(out.StaleAlready, "今日未签") || strings.Contains(out.StaleAlready, "今日已领取") || !strings.Contains(out.StaleAlready, "上次") {
+		t.Errorf("昨日 already 不应冒充今日: %q", out.StaleAlready)
+	}
+	if !strings.Contains(out.TodayFailed, "失败") || !strings.Contains(out.TodayFailed, "boom") {
+		t.Errorf("今日 failed = %q", out.TodayFailed)
+	}
+	if !strings.Contains(out.StaleFailed, "今日未签") || strings.Contains(out.StaleFailed, "boom") {
+		t.Errorf("昨日 failed 不应显示为今日失败: %q", out.StaleFailed)
+	}
+	if !strings.Contains(out.Unsupported, "平台无此活动") {
+		t.Errorf("unsupported = %q", out.Unsupported)
+	}
+	if !out.QoderBefore || !out.QoderEdge || !out.QoderAfter {
+		t.Errorf("Qoder 周期边界错误: before=%v edge=%v after=%v", out.QoderBefore, out.QoderEdge, out.QoderAfter)
+	}
+	if out.QoderTodayBefore || out.QoderTodayPrev || !out.QoderTodayAfter {
+		t.Errorf("Qoder 自然日判断错误: before=%v prev=%v after=%v", out.QoderTodayBefore, out.QoderTodayPrev, out.QoderTodayAfter)
+	}
+}
+
 // TestPanelTrangeCalFlexBasis .tr-cal 的 flex-basis 必须为 0。
 // auto 基准 = 内容宽（双月 ≈500px），与快捷列表（132px）相加超过 withcal 的
 // 660px 时 flex-wrap 把日历挤到第二行并拉满全宽——弹层暴涨 ~230px，「飘」在
@@ -1691,8 +1997,8 @@ func TestExtChannelWizardDOM(t *testing.T) {
 		t.Error("情报空态 colspan 未同步为 9")
 	}
 	// extwiz.js 必须被 index.html 引入且排在 ext.js 之后。
-	extIdx := strings.Index(html, `<script src="ext.js"></script>`)
-	wizIdx := strings.Index(html, `<script src="extwiz.js"></script>`)
+	extIdx := strings.Index(html, `src="ext.js`)
+	wizIdx := strings.Index(html, `src="extwiz.js`)
 	if extIdx < 0 || wizIdx < 0 || wizIdx < extIdx {
 		t.Error("index.html 必须按 ext.js → extwiz.js 顺序引入脚本")
 	}
@@ -1804,16 +2110,39 @@ func TestAddAccountModalScope(t *testing.T) {
 		"ACCT_BROWSER_BLOCKED_REASON",
 		"Loomy 无登录流程——请从客户端登录态复制 session 后用粘贴凭证",
 		"通用平台无统一登录——粘贴 API 凭证",
-		"国际版需风控验证码，暂不支持浏览器登录",
-		"该平台暂不支持浏览器登录（当前支持：Qoder 国内/国际、AutoClaw 国内）",
+		"该平台暂不支持浏览器登录（当前支持：Qoder 国内/国际、AutoClaw 国内/国际、TRAE）",
 		"b.title = supported ? '' : blockedMsg", // 置灰 + title 双保险
 		"mode = 'paste'; // 智能默认：不支持的平台不落在灰 Tab 上",
 		"acctSyncPlatformOptions",
 		"✓ 浏览器登录",
 		"· 粘贴凭证",
+		// AutoClaw 国际版：滑块 + 回环 OAuth（不再是"仅粘贴"灰 Tab）。
+		"'autoclaw-intl': 'AutoClaw 国际'",
+		"accounts/login/captcha?platform=autoclaw-intl",
+		"AliyunCaptcha.solve",
+		"请完成阿里云滑块验证",
+		// TRAE（v1.7.6）：浏览器登录接入（PKCE + 回环回调），不再灰 Tab。
+		"trae: 'TRAE（SOLO 国内）'",
 	} {
 		if !strings.Contains(a, want) {
 			t.Errorf("acct.js 缺灰 Tab 修复接线 %q", want)
+		}
+	}
+	if strings.Contains(a, "TRAE 浏览器登录下一批接入") {
+		t.Error("TRAE 已接入浏览器登录，灰 Tab 原因文案不应残留")
+	}
+	// captcha.js（v1.7.6）：业务失败不得谎报滑块失败——否则阿里云 SDK 弹
+	// "验证失败，请刷新"死循环，掩盖后端真实错误（实测 qZTAw7vhEb 闭环）。
+	captchaJS, err := os.ReadFile("captcha.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"captchaResult: true, bizResult: false", // 业务失败 → bizResult=false
+		"业务失败 ≠ 滑块失败",
+	} {
+		if !strings.Contains(string(captchaJS), want) {
+			t.Errorf("captcha.js 缺回调语义修复 %q", want)
 		}
 	}
 	// acct.js 页签内按钮：codebuddy → openAdd()（弹窗唯一直达入口）。
@@ -1869,18 +2198,56 @@ func TestAccountCenterDOM(t *testing.T) {
 		t.Error("主导航不应再有 账号池 / 外部渠道 直达项（已迁移/降级）")
 	}
 
-	// 视图骨架：双 section 组合 + 分页签 + 平台面板 + 抽屉。
-	for _, id := range []string{"view-accounts", "view-acctcenter", "acctTabs", "acctPanels",
+	// 视图骨架：双 section 组合 + 顶栏平台下拉 + 平台面板 + Hero + 抽屉。
+	for _, id := range []string{"view-accounts", "view-acctcenter", "acctPlatformSelect", "acctHeroWrap",
+		"acctHeroAccounts", "acctPanels",
 		"btnAcctAdd", "btnCheckinAll", "btnExtDrawer", "btnExtDrawerClose", "btnAcctConsistency",
-		"acctNote", "extDrawer"} {
+		"extDrawer"} {
 		if !strings.Contains(html, `id="`+id+`"`) {
 			t.Errorf("index.html 缺账号中心元素 id=%q", id)
 		}
 	}
-	// 7 个页签（CodeBuddy + 6 平台）与对应面板/表体。
-	for _, k := range []string{"codebuddy", "loomy", "autoclaw", "autoclaw-intl", "qoder", "qoder-intl", "custom"} {
-		if !strings.Contains(html, `data-acct="`+k+`"`) {
-			t.Errorf("缺平台页签 data-acct=%q", k)
+	// 平台下拉选项（CodeBuddy + 5 个同构池：Loomy / AutoClaw / Qoder / TRAE /
+	// 通用平台）。Qoder / AutoClaw 的国内/国际是池内区域，单区域池不重复成项。
+	selStart := strings.Index(html, `id="acctPlatformSelect"`)
+	if selStart < 0 {
+		t.Fatal("index.html 缺 acctPlatformSelect")
+	}
+	selEnd := strings.Index(html[selStart:], "</select>")
+	if selEnd < 0 {
+		t.Fatal("acctPlatformSelect 未闭合")
+	}
+	sel := html[selStart : selStart+selEnd]
+	for _, want := range []string{
+		`<option value="qoder-pool">Qoder 账号池</option>`,
+		`<option value="autoclaw-pool">AutoClaw 账号池</option>`,
+		`<option value="loomy-pool">Loomy 账号池</option>`,
+		`<option value="trae-pool">TRAE 账号池</option>`,
+		`<option value="custom-pool">通用平台账号池</option>`,
+	} {
+		if !strings.Contains(sel, want) {
+			t.Errorf("平台下拉缺同构池选项 %q", want)
+		}
+	}
+	for _, old := range []string{`<option value="loomy">`, `<option value="trae">`, `<option value="custom">`} {
+		if strings.Contains(sel, old) {
+			t.Errorf("单区域平台不应再作为独立下拉项 %q（应并入 *-pool 入口）", old)
+		}
+	}
+	if !strings.Contains(html, `id="acctRegionTabs"`) {
+		t.Error("缺账号池区域切换 acctRegionTabs")
+	}
+	// Qoder 池分析区：负载趋势 / 在途与最近请求 / 模型锁池。
+	for _, id := range []string{"acctPoolViz", "qoderLoadBox", "qoderLoadChart", "qoderLoadRange",
+		"qoderLiveBox", "qoderLiveLanes", "qoderMlBox", "qoderMlBody",
+		"qoderHero", "qoderHsCredits", "qoderHsReq7d", "qoderHsExpiryVal"} {
+		if !strings.Contains(html, `id="`+id+`"`) {
+			t.Errorf("缺 Qoder 池分析元素 id=%q", id)
+		}
+	}
+	for _, k := range []string{"codebuddy", "loomy", "autoclaw", "autoclaw-intl", "qoder", "qoder-intl", "trae", "custom"} {
+		if !strings.Contains(html, `<option value="`+k+`">`) {
+			t.Errorf("缺平台下拉选项 %q", k)
 		}
 		if k != "codebuddy" {
 			if !strings.Contains(html, `id="acctPanel-`+k+`"`) || !strings.Contains(html, `id="acBody-`+k+`"`) {
@@ -1911,8 +2278,8 @@ func TestAccountCenterDOM(t *testing.T) {
 	}
 
 	// 脚本加载顺序：acct.js 必须在 extwiz.js 之后（运行时调用其同域函数）。
-	acctIdx := strings.Index(html, `<script src="acct.js"></script>`)
-	wizIdx := strings.Index(html, `<script src="extwiz.js"></script>`)
+	acctIdx := strings.Index(html, `src="acct.js`)
+	wizIdx := strings.Index(html, `src="extwiz.js`)
 	if acctIdx < 0 || wizIdx < 0 || acctIdx < wizIdx {
 		t.Error("index.html 必须按 … extwiz.js → acct.js 顺序引入脚本")
 	}

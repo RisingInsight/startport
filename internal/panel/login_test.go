@@ -176,9 +176,9 @@ func TestLoginQoderStartShape(t *testing.T) {
 // 不支持平台 / 未启用 / 错误验证码的边界。
 func TestLoginBoundaries(t *testing.T) {
 	e := newLoginEnv(t)
-	// 不支持平台。
-	if rec := e.do("POST", "/startport/api/accounts/login/start", `{"platform":"trae"}`); rec.Code != http.StatusBadRequest {
-		t.Errorf("trae 应 400: %d", rec.Code)
+	// 不支持平台（trae v1.7.6 起走浏览器登录，用无登录流程的 loomy 验边界）。
+	if rec := e.do("POST", "/startport/api/accounts/login/start", `{"platform":"loomy"}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("loomy 应 400: %d", rec.Code)
 	}
 	// 错误验证码 → 400 + 码表文案。
 	rec := e.do("POST", "/startport/api/accounts/login/start", `{"platform":"autoclaw","phone":"13800008000"}`)
@@ -215,8 +215,8 @@ func TestLoginPathAliasContract(t *testing.T) {
 		Platforms []string `json:"platforms"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &caps)
-	want := map[string]bool{"qoder": true, "qoder-intl": true, "autoclaw": true}
-	if len(caps.Platforms) != 3 {
+	want := map[string]bool{"qoder": true, "qoder-intl": true, "autoclaw": true, "autoclaw-intl": true, "trae": true}
+	if len(caps.Platforms) != 5 {
 		t.Fatalf("capabilities = %v", caps.Platforms)
 	}
 	for _, p := range caps.Platforms {

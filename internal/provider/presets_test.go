@@ -52,9 +52,9 @@ func TestPresetsCatalog(t *testing.T) {
 			t.Errorf("缺关键预设 %q", k)
 		}
 	}
-	// native_required 至少覆盖 TRAE/CatPaw/华为云码道。
-	// Qoder 已由原生适配器（adapter=qoder / qoder-intl）覆盖，故不再标注。
-	for _, k := range []string{"trae", "catpaw", "huawei-codearts"} {
+	// native_required 至少覆盖 CatPaw/华为云码道。
+	// Qoder / TRAE 已由原生适配器覆盖，故不再标注。
+	for _, k := range []string{"catpaw", "huawei-codearts"} {
 		found := false
 		for _, p := range list {
 			if p.Key == k {
@@ -66,6 +66,14 @@ func TestPresetsCatalog(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("缺预设 %q", k)
+		}
+	}
+	// TRAE 已挂原生适配器（第一批只做转发）。
+	for _, p := range list {
+		if p.Key == "trae" {
+			if p.Adapter != TraeAdapterName || p.NativeRequired {
+				t.Errorf("trae 预设应挂 adapter=trae 且 native_required=false: %+v", p)
+			}
 		}
 	}
 	// Qoder 两条（国内/国际）同样挂各自的适配器（模型清单用静态表条目）。

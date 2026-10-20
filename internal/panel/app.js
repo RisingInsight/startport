@@ -19,9 +19,9 @@ function go(v) {
     acctLeaveCenterNotify();
   }
   /* 老锚点重定向（架构 §7.1，hash 同步到 #accounts-center）：
-     #accounts → 账号中心 CodeBuddy 页签；#extchan → 账号中心 + 渠道设置抽屉展开。 */
+     #accounts → 账号中心「全部平台账号」（统一清单）；#extchan → 账号中心 + 渠道设置抽屉展开。 */
   if (v === 'accounts' || v === 'extchan') {
-    const redirectTab = v === 'accounts' ? 'codebuddy' : null;
+    const redirectTab = v === 'accounts' ? 'all' : null;
     v = 'accounts-center';
     view = v; // 先落位：selectAcctTab/openAcctDrawer 里的 inCenter 判定依赖它
     if (typeof selectAcctTab === 'function') {
@@ -35,6 +35,8 @@ function go(v) {
     ? !ACCT_CENTER_SECTIONS.includes(s.id) : s.id !== 'view-' + v);
   document.querySelectorAll('.nav a').forEach(a => a.classList.toggle('on', a.dataset.view === v));
   $('ttl').textContent = TITLES[v] || v;
+  // 账号中心的平台切换下拉只在账号中心显示（CodeBuddy/平台视图共用）。
+  if ($('acctPlatformSelect')) $('acctPlatformSelect').hidden = v !== 'accounts-center';
   if (v === 'models' && !$('mdBody').children.length) loadModels();
   if (v === 'config') loadConfig();
   if (v === 'logs') loadLogs();
@@ -48,16 +50,30 @@ function go(v) {
   if (v === 'taskscenter') reattachQueueView();
 }
 document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDefault(); go(a.dataset.view); history.replaceState(null, '', '#' + a.dataset.view); });
+/* hash 路由：#accounts-center/<platform> 是账号中心内的平台视图；
+   其余 hash 仍是顶层视图。手动改地址栏或前进/后退都走这里。 */
+function goHash(hash) {
+  const [base, sub] = String(hash || '').split('/');
+  const target = base in TITLES ? base : 'accounts-center';
+  go(target);
+  if (target === 'accounts-center' && sub && typeof selectAcctTab === 'function') {
+    selectAcctTab(sub);
+  }
+}
+window.addEventListener('hashchange', () => {
+  goHash((location.hash || '#accounts-center').slice(1));
+});
 /* 首次进入延到本轮脚本求值之后再 go()。
    原因：go() 会同步触发视图的数据加载（loadUsage/loadLogs/loadPackages…），而这些
    函数读到的模块级 let/const（usageRateWarmAt、PK_* 等）在文件后半段才初始化——
    直接深链 #usage / #packages 打开页面时会踩 TDZ（"Cannot access 'x' before
    initialization"），表现为该页永远显示"读取失败"，而点导航进去一切正常。
    延迟 0ms 让整份脚本先求值完，是修这一类问题最省事也最不容易再犯的办法。 */
-setTimeout(() => {
-  const hash = (location.hash || '#accounts').slice(1);
-  go(hash in TITLES ? hash : 'accounts');
-}, 0);
+/* 初始路由由 acct.js 末尾调用：acctTab/loadAcctCenter/selectAcctTab 都在那份脚本里，
+   必须等它求值完成；setTimeout(0) 不保证后续 script 已执行，慢网络下会漏掉默认视图。 */
+function initialRoute() {
+  goHash((location.hash || '#accounts-center').slice(1));
+}
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 function renderAccounts(list) {
@@ -709,6 +725,7 @@ async function loadModels() {
     const [d, pr] = await Promise.all([api('models'), api('model_probes').catch(() => ({}))]);
     mdAll = d.models || [];
     mdProbes = pr.probes || {};
+    mdSyncRealmOptions();
     if (!mdAll.length) {
       tb.innerHTML = '<tr><td colspan="7"><div class="empty">上游未返回模型</div></td></tr>';
       $('mdCount').textContent = '';
@@ -719,7 +736,10 @@ async function loadModels() {
     const probeKeys = Object.keys(mdProbes);
     mdProbeOf = id => mdProbes[id] || mdProbes[probeKeys.find(k => k.endsWith(':' + id))];
     const hit = mdAll.filter(m => mdProbeOf(m.id)).length;
-    $('mdNote').textContent = mdAll.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
+    const extCount = mdAll.filter(m => m.source === 'ext' || String(m.id || '').startsWith('ext:')).length;
+    $('mdNote').textContent = mdAll.length + ' 个模型'
+      + (extCount ? ' · ' + extCount + ' 个外部渠道' : '')
+      + ' · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
     renderModels();
   } catch (e) {
     mdAll = [];
@@ -742,8 +762,35 @@ function mdRateValue(m) {
 
 // mdSearchText 参与关键字搜索的字段（ID / 展示名 / 厂商 / 描述 / 标签）。
 function mdSearchText(m) {
-  return [m.id, m.name, m.vendor, m.description, (m.tags || []).join(' ')]
+  return [m.id, m.name, m.vendor, m.description, (m.tags || []).join(' '),
+    m.provider, m.platform_name, m.adapter, m.alias_of]
     .filter(Boolean).join(' ').toLowerCase();
+}
+
+// mdSyncRealmOptions 把实际存在的外部平台追加到「域」下拉（Qoder 国内 / TRAE…），
+// 而不是只给一个笼统的「外部渠道」。每次重新获取模型后按当前清单重算。
+function mdSyncRealmOptions() {
+  const sel = $('mdRealm');
+  if (!sel) return;
+  const current = sel.value;
+  sel.querySelectorAll('option[data-ext-provider]').forEach(o => o.remove());
+  const providers = new Map();
+  mdAll.forEach(m => {
+    if (!(m.source === 'ext' || String(m.id || '').startsWith('ext:'))) return;
+    const p = m.provider || '';
+    if (p && !providers.has(p)) providers.set(p, m.platform_name || p);
+  });
+  [...providers.entries()]
+    .sort((a, b) => String(a[1]).localeCompare(String(b[1]), 'zh-CN'))
+    .forEach(([p, name]) => {
+      const o = document.createElement('option');
+      o.value = 'ext:' + p;
+      o.textContent = name;
+      o.dataset.extProvider = '1';
+      sel.appendChild(o);
+    });
+  if (Array.from(sel.options).some(o => o.value === current)) sel.value = current;
+  else if (String(current).startsWith('ext:') && !providers.has(current.slice(4))) sel.value = 'ext';
 }
 
 // mdMatch 单个模型是否满足全部筛选条件。
@@ -756,7 +803,13 @@ function mdMatch(m, f) {
       if (!text.includes(kw)) return false;
     }
   }
-  if (f.realm && !String(m.id || '').startsWith(f.realm + ':')) return false;
+  if (f.realm === 'ext') {
+    if (!(m.source === 'ext' || String(m.id || '').startsWith('ext:'))) return false;
+  } else if (String(f.realm || '').startsWith('ext:')) {
+    if ((m.provider || '') !== f.realm.slice(4)) return false;
+  } else if (f.realm && !String(m.id || '').startsWith(f.realm + ':')) {
+    return false;
+  }
   if (f.cap === 'tool' && !m.supports_tool_call) return false;
   if (f.cap === 'vision' && !m.supports_images) return false;
   if (f.cap === 'reasoning' && !m.supports_reasoning) return false;
@@ -787,6 +840,7 @@ function mdSortList(list, f) {
 
 // mdRowHtml 单个模型行（纯渲染，便于独立测试）。
 function mdRowHtml(m, pr) {
+  const isExt = m.source === 'ext' || String(m.id || '').startsWith('ext:');
   const eff = (m.supported_efforts || []).slice();
   if (m.can_disable_thinking && eff.length && !eff.includes('off')) eff.push('off（可关）');
   const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
@@ -797,9 +851,18 @@ function mdRowHtml(m, pr) {
   if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
   if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
   if (m.supports_reasoning && !m.can_disable_thinking) caps.push('<span class="tag warn">思考常开</span>');
+  if (isExt) caps.push('<span class="tag mute">' + esc(m.platform_name || m.provider || '外部渠道') + '</span>');
+  if (isExt && m.name_collision) caps.push('<span class="tag warn">同名 · 用完整前缀</span>');
   const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
+  const prov = isExt
+    ? '<div class="id">' + esc(m.platform_name || m.provider || '外部渠道')
+      + (m.adapter ? ' · ' + esc(m.adapter) : '') + (m.alias_of ? ' · 别名 → ' + esc(m.alias_of) : '') + '</div>'
+    : '';
+  const copy = isExt
+    ? ' <button type="button" class="xs ghost" data-copy-model="' + esc(m.id) + '" title="复制完整接入名">复制</button>'
+    : '';
   const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
-  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+  return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + copy + '</div><div class="id">' + esc(m.name || '') + '</div>' + prov + capHtml + '</td>' +
     '<td class="num">' + rateCell(m) + '</td>' +
     '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
     '<td class="efs" style="white-space:normal">' + effs + '</td>' +
@@ -842,6 +905,18 @@ for (const [id, key] of [['mdRealm', 'realm'], ['mdCap', 'cap'], ['mdEffort', 'e
 }
 $('mdReset').onclick = resetModelFilter;
 $('btnModels').onclick = loadModels;
+// 外部渠道模型的完整接入名复制（ZCode / DeepSeek-Harness 等客户端直接粘贴）。
+if ($('mdBody')) {
+  $('mdBody').onclick = e => {
+    const b = e.target.closest('button[data-copy-model]');
+    if (!b) return;
+    const text = b.dataset.copyModel || '';
+    if (!navigator.clipboard) { toast('请手动复制：' + text, 'mute'); return; }
+    navigator.clipboard.writeText(text)
+      .then(() => toast('已复制接入名：' + text, 'ok'))
+      .catch(() => toast('复制失败，请手动选择模型名', 'bad'));
+  };
+}
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';
@@ -927,7 +1002,8 @@ function reqMatch(e, f) {
   f = f || reqFilter;
   if (f.outcome && String(e && e.outcome || '') !== f.outcome) return false;
   if (f.q) {
-    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.request_id]
+    const text = [e && e.client_ip, e && e.user_agent, e && e.model, e && e.account, e && e.effort,
+      e && e.request_id, e && e.error, e && e.error_code]
       .filter(Boolean).join(' ').toLowerCase();
     for (const kw of f.q.toLowerCase().split(/\s+/).filter(Boolean)) {
       if (!text.includes(kw)) return false;
@@ -971,7 +1047,13 @@ function renderRequestTable() {
     return '<tr title="' + esc(requestLogText(e)) + '">' +
       '<td class="num">' + esc(when) + '</td>' +
       '<td>' + reqOutcomeTag(e) + '</td>' +
+      '<td>' + (e && e.error
+        ? '<span class="clip req-err" title="' + esc(e.error) + '">' + esc(e.error) + '</span>'
+        : '<span class="muted">—</span>') + '</td>' +
       '<td>' + esc(e && e.model || '—') + '</td>' +
+      '<td>' + (e && e.effort
+        ? '<span class="clip" title="' + esc(e.effort) + '">' + esc(e.effort) + '</span>'
+        : '<span class="muted">—</span>') + '</td>' +
       '<td>' + esc(e && e.account || '—') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
@@ -981,7 +1063,7 @@ function renderRequestTable() {
       '<td class="num">' + reqCreditCell(e) + '</td>' +
       '<td>' + (rid ? '<span class="clip rid" title="' + esc(rid) + '">' + esc(rid) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '</tr>';
-  }).join('') || '<tr><td colspan="11" class="empty">' +
+  }).join('') || '<tr><td colspan="13" class="empty">' +
       (reqEntries.length ? '没有符合当前筛选条件的请求记录' : '暂无请求记录') + '</td></tr>';
 
   const filtered = list.length !== reqEntries.length;
@@ -1025,7 +1107,9 @@ function requestLogText(e) {
   return [
     when,
     String(e && e.status || '—') + ' ' + (outcomeLabel[e && e.outcome] || (e && e.outcome) || '—'),
+    e && e.error ? '原因：' + e.error : '',
     e && e.model || '—',
+    e && e.effort ? '档位 ' + e.effort : '',
     e && e.account || '—',
     e && e.client_ip || '—',
     e && e.user_agent || '—',

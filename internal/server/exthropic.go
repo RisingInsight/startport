@@ -647,7 +647,11 @@ func (h *Handler) recordExtMessagesUsage(apiKeyName string, ch2 *extchan.Channel
 	if latencyMs < 1 {
 		latencyMs = 1
 	}
-	h.cfg.Usage.Add(time.Now(), "ext", "ext:"+ch2.Name, displayModel, usage.Delta{
+	uid := "ext:" + ch2.Name
+	if cred != nil && cred.Label != "" {
+		uid = cred.Label
+	}
+	h.cfg.Usage.Add(time.Now(), "ext", uid, displayModel, usage.Delta{
 		KeyName:          apiKeyName,
 		PromptTokens:     prompt,
 		HasPromptTokens:  prompt > 0,
@@ -657,5 +661,5 @@ func (h *Handler) recordExtMessagesUsage(apiKeyName string, ch2 *extchan.Channel
 		HasTotal:         total > 0,
 		LatencyMs:        latencyMs,
 		HasLatency:       true,
-	}, prompt > 0 || completion > 0 || total > 0)
+	}, true)
 }

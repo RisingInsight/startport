@@ -21,7 +21,7 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
-//go:embed app.js core.js keys.js ext.js extwiz.js acct.js
+//go:embed app.js core.js keys.js ext.js extwiz.js acct.js captcha.js
 var panelFS embed.FS
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
@@ -35,8 +35,15 @@ var panelFS embed.FS
 //   - form-action 'none'        页面无表单提交目标（配置页是 JS 提交）
 //   - frame-ancestors 'none'    禁止被任何站点 iframe 嵌套（点击劫持）
 //   - base-uri 'none'          禁止注入 <base> 改写相对路径
-const csp = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
-	"connect-src 'self'; img-src 'self' data:; form-action 'none'; " +
+//
+// AutoClaw 国际版登录需要阿里云无痕验证（滑块）：SDK 从 o.alicdn.com 加载，
+// 运行期再拉 g/x.alicdn.com 的动态脚本/样式，XHR/iframe 走 *.aliyuncs.com /
+// *.alicdn.com。仅放行这组验证码域，不放宽 unsafe-inline / unsafe-eval。
+const csp = "default-src 'none'; script-src 'self' https://o.alicdn.com https://*.alicdn.com https://*.aliyuncs.com; " +
+	"style-src 'self' 'unsafe-inline' https://*.alicdn.com; " +
+	"connect-src 'self' data: https://*.aliyuncs.com https://*.alicdn.com; " +
+	"img-src 'self' data: https://*.alicdn.com; font-src 'self' data: https://*.alicdn.com; " +
+	"frame-src 'self' https://*.alicdn.com https://*.aliyuncs.com; form-action 'none'; " +
 	"frame-ancestors 'none'; base-uri 'none'"
 
 // setSecurityHeaders 写入面板统一安全响应头（页面与 API 都要，API 也含 JSON 数据）。
@@ -65,8 +72,7 @@ func (p *Panel) index(w http.ResponseWriter, r *http.Request) {
 }
 
 // appScript 输出前端脚本（同源脚本，供 CSP script-src 'self' 加载）。
-// 多文件拆分后统一入口：按 URL 末段查 embed（embed 只含 app.js/core.js/keys.js，
-// 白名单外一律 404——路由亦只注册了这三个路径，双保险）。
+// 多文件拆分后统一入口：按 URL 末段查 embed；路由只注册白名单，白名单外 404。
 func (p *Panel) appScript(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")

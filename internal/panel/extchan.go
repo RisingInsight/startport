@@ -196,6 +196,9 @@ func (p *Panel) extchanProbe(w http.ResponseWriter, r *http.Request) {
 // 持有 *extchan.Manager 的写面；接口取观测快照/探测足够）。
 type ExtChanManager interface {
 	Status() []extchan.Status
+	// ModelCatalog 汇总外部渠道模型（ext:<channel>/<model>；含别名与元数据）。
+	// 供「模型与档位」视图展示外部平台模型；/v1/models 仍走 Manager.ModelList。
+	ModelCatalog(ctx context.Context) []map[string]any
 	Intel() (*extchan.IntelData, time.Time, string, bool)
 	IntelStatus() map[string]any
 	// ProbeDraft 探测未保存草稿（不落盘、不改状态）。

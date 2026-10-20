@@ -77,6 +77,33 @@ type StatusNormalizer interface {
 	NormalizeStatus(status int, body []byte) (int, []byte)
 }
 
+// ModelMeta 一条带展示元数据的模型（面板「模型与档位」用）。
+//
+// 与 StaticModels（只有 ID）不同：这里包含倍率、思考档位、上下文/输出上限
+// 与能力位。它只服务观测/展示，不参与路由决策。
+type ModelMeta struct {
+	ID                 string
+	Name               string
+	Description        string
+	Credits            string   // 展示文本，如 "x0.5 credits"
+	ContextLength      int      // 0 = 未知
+	MaxOutputTokens    int      // 0 = 未知
+	SupportedEfforts   []string // low/medium/xhigh…
+	DefaultEffort      string
+	SupportsTools      bool
+	SupportsImages     bool
+	SupportsReasoning  bool
+	CanDisableThinking bool
+}
+
+// CatalogProvider 可选能力：适配器能返回带元数据的模型目录。
+//
+// 面板「模型与档位」优先用它；/v1/models 仍走 ModelList（ID 清单），避免
+// 每次客户端拉目录都触发一次昂贵的上游元数据查询。
+type CatalogProvider interface {
+	ModelCatalog(ctx context.Context, t *Target) ([]ModelMeta, error)
+}
+
 // StaticModels 可选能力：适配器自带模型目录（不走 HTTP 发现）。
 //
 // 适用场景：上游没有可拉取的目录接口（或接口需要客户端签名），模型清单是

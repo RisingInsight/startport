@@ -42,6 +42,43 @@ func TestStatsReaderCacheTokens(t *testing.T) {
 	}
 }
 
+// Qoder 内层 usage 用复数 credits；与 CodeBuddy 的单数 credit 并存。
+func TestStatsReaderPluralCredits(t *testing.T) {
+	s := newChatStatsReaderSince(strings.NewReader(""), time.Now())
+	feedStatsLines(s,
+		`data: {"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"credits":0.25}}`,
+	)
+	if credit, ok := s.Credit(); !ok || credit != 0.25 {
+		t.Fatalf("credits plural: credit=%v ok=%v, want 0.25/true", credit, ok)
+	}
+	if v, ok := extUsageCredit(map[string]any{"usage": map[string]any{"credits": 0.5}}); !ok || v != 0.5 {
+		t.Fatalf("extUsageCredit plural = %v/%v", v, ok)
+	}
+	if v, ok := extUsageCredit(map[string]any{"usage": map[string]any{"credit": 1.5}}); !ok || v != 1.5 {
+		t.Fatalf("extUsageCredit singular = %v/%v", v, ok)
+	}
+	if _, ok := extUsageCredit(map[string]any{"usage": map[string]any{}}); ok {
+		t.Fatal("无 credit/credits 应 ok=false")
+	}
+}
+
+func TestExtErrorReason(t *testing.T) {
+	code, msg := extErrorFromBody([]byte(`{"error":{"code":"qoder_model_busy","message":"{\"code\":\"10605\"}"}}`))
+	if code != "qoder_model_busy" {
+		t.Fatalf("code = %q", code)
+	}
+	if got := extErrorLabel(code, msg); !strings.Contains(got, "资源受限/排队") {
+		t.Fatalf("label = %q", got)
+	}
+	code, msg = extErrorFromBody([]byte("plain upstream failure"))
+	if code != "upstream_error" || msg != "plain upstream failure" {
+		t.Fatalf("fallback = %q/%q", code, msg)
+	}
+	if got := extErrorLabel("", "context deadline exceeded"); !strings.Contains(got, "超时") {
+		t.Fatalf("timeout label = %q", got)
+	}
+}
+
 // WARN 信号状态机：先命中、再大前缀整段未命中 → 触发一次；冷却内重复未命中
 // 不再触发；从未命中的模型（首请求天然全 miss）与小前缀不触发。
 func TestCacheMissSignal(t *testing.T) {

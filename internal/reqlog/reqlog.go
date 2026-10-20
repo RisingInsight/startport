@@ -62,22 +62,30 @@ type Config struct {
 // 归档里不会出现来源字段）——来源信息比 token 计数敏感，运营可自行决定是否落盘。
 // 仍然不写提示词、响应正文、Authorization 或其它凭证。
 type Event struct {
-	Time             time.Time `json:"time"`
-	RequestID        string    `json:"request_id"`
-	Path             string    `json:"path"`
-	Account          string    `json:"account,omitempty"`
-	Model            string    `json:"model,omitempty"`
-	Status           int       `json:"status"`
-	OK               bool      `json:"ok"`
-	Outcome          string    `json:"outcome"`
-	DurationMs       int64     `json:"duration_ms"`
-	TTFBMs           int64     `json:"ttfb_ms,omitempty"`
-	Attempts         int       `json:"attempts,omitempty"`
-	PromptTokens     int64     `json:"prompt_tokens,omitempty"`
-	CompletionTokens int64     `json:"completion_tokens,omitempty"`
-	TotalTokens      int64     `json:"total_tokens,omitempty"`
-	Credit           float64   `json:"credit,omitempty"`
-	HasCredit        bool      `json:"credit_known"`
+	Time      time.Time `json:"time"`
+	RequestID string    `json:"request_id"`
+	Path      string    `json:"path"`
+	Account   string    `json:"account,omitempty"`
+	Model     string    `json:"model,omitempty"`
+	// Effort 客户端请求里声明的推理档位（reasoning_effort / reasoning.effort）。
+	// 只记录"客户端要了什么"——上游最终是否生效由适配器决定（如 Qoder 静态表
+	// Reasoning=false 时会丢弃档位）。未声明档位时为空并省略，旧归档不受影响。
+	Effort  string `json:"effort,omitempty"`
+	Status  int    `json:"status"`
+	OK      bool   `json:"ok"`
+	Outcome string `json:"outcome"`
+	// ErrorCode / Error 上游失败原因（已脱敏、已截断）。成功请求为空；
+	// 面板请求记录/Qoder 池据此显示“资源受限/排队”等具体原因。
+	ErrorCode        string  `json:"error_code,omitempty"`
+	Error            string  `json:"error,omitempty"`
+	DurationMs       int64   `json:"duration_ms"`
+	TTFBMs           int64   `json:"ttfb_ms,omitempty"`
+	Attempts         int     `json:"attempts,omitempty"`
+	PromptTokens     int64   `json:"prompt_tokens,omitempty"`
+	CompletionTokens int64   `json:"completion_tokens,omitempty"`
+	TotalTokens      int64   `json:"total_tokens,omitempty"`
+	Credit           float64 `json:"credit,omitempty"`
+	HasCredit        bool    `json:"credit_known"`
 	// CacheHitTokens / CacheMissTokens 上游前缀缓存命中/未命中 token（issue #92）。
 	// 上游未回该维度时两者皆零值省略；hit=0 + miss>0 即整段未命中。
 	CacheHitTokens  int64  `json:"cache_hit_tokens,omitempty"`
