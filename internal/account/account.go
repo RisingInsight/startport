@@ -30,22 +30,20 @@ const (
 	PlatformAutoClawIntl = "autoclaw-intl"
 	PlatformQoder        = "qoder"
 	PlatformQoderIntl    = "qoder-intl"
+	PlatformTrae         = "trae"
 	PlatformCustom       = "custom"
 )
 
-// ValidPlatform 报告 platform 是否受支持。
+// ValidPlatform 报告 platform 是否受支持（注册表见 platform.go）。
 func ValidPlatform(p string) bool {
-	switch p {
-	case PlatformLoomy, PlatformAutoClaw, PlatformAutoClawIntl,
-		PlatformQoder, PlatformQoderIntl, PlatformCustom:
-		return true
-	}
-	return false
+	_, ok := SpecOf(p)
+	return ok
 }
 
 // NativePlatform 报告 platform 是否有原生适配器（custom 没有，投影为普通渠道）。
 func NativePlatform(p string) bool {
-	return ValidPlatform(p) && p != PlatformCustom
+	s, ok := SpecOf(p)
+	return ok && s.Native
 }
 
 // Account 一个非 CodeBuddy 平台账号：账号主体 + 凭证 blob + 运行态。
@@ -71,10 +69,11 @@ type Account struct {
 // CheckinRecord 一次签到（对齐 internal/pool 的签到记录语义：按账号按次记，
 // 成功/已签过/失败三态可辨，失败带原因）。
 type CheckinRecord struct {
-	At     time.Time `json:"at"`               // 触发时刻
-	Status string    `json:"status"`           // ok / already / failed
-	Reward string    `json:"reward,omitempty"` // "100 credits" 等（已签过/失败为空）
-	Error  string    `json:"error,omitempty"`  // 失败原因（已脱敏）
+	At      time.Time `json:"at"`                // 触发时刻
+	Status  string    `json:"status"`            // ok / already / failed
+	Reward  string    `json:"reward,omitempty"`  // "100 credits" 等
+	Message string    `json:"message,omitempty"` // 非失败结果的人话说明（今日已领取/签到成功）
+	Error   string    `json:"error,omitempty"`   // 失败原因（已脱敏）
 }
 
 // Checkin 状态常量。
@@ -88,6 +87,7 @@ const (
 type BalanceRow struct {
 	Name      string  `json:"name"`
 	Available float64 `json:"available,omitempty"`
+	Total     float64 `json:"total,omitempty"`
 	Unit      string  `json:"unit,omitempty"`
 }
 
@@ -96,6 +96,7 @@ type BalanceRow struct {
 // available + 明细行；autoclaw 积分钱包；loomy 积分。
 type BalanceSnapshot struct {
 	Available float64      `json:"available,omitempty"`
+	Total     float64      `json:"total,omitempty"`
 	Unit      string       `json:"unit,omitempty"`
 	Rows      []BalanceRow `json:"rows,omitempty"`
 	PlanName  string       `json:"plan_name,omitempty"`

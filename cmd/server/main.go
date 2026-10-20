@@ -46,7 +46,7 @@ import (
 // 用 var 而非 const：const 无法被 `go build -ldflags -X` 注入，CI 也就无法把
 // git tag 打成二进制版本号（自动更新的「版本源」必须可注入）。默认值保留源码
 // 版本，本地裸构建（不带 -X）行为与改动前完全一致。
-var appVersion = "1.7.1"
+var appVersion = "1.7.5"
 
 // appCommit / appBuildTime 构建期元信息，由 CI 经 -ldflags -X 注入（本地构建为空）。
 // 仅用于启动日志与 /startport/api/overview 观测，不参与任何路由或出站决策。
@@ -295,6 +295,25 @@ func main() {
 	}
 	defer acctStore.Close()
 
+	// 账号投影闭包（登录入池 / 签到刷新 / 启动 Reconcile 共用同一条写路径）。
+	// saveChannels 在下方 live/sch 装配完成后赋值；闭包捕获变量，调用时已就位。
+	acctLoader := func() []extchan.ChannelDef {
+		cur, lerr := Load(*cfgPath)
+		if lerr != nil {
+			log.Printf("[acclogin] 读取当前配置失败: %v", lerr)
+			return nil
+		}
+		return extChannelDefs(cur.ExtChannels)
+	}
+	var saveChannels func(defs []extchan.ChannelDef) error
+	syncAccounts := func() error {
+		if saveChannels == nil {
+			return nil // 装配期尚未就位（启动 Reconcile 直接调 Sync 拿摘要）
+		}
+		_, serr := acctchan.Sync(acctStore, acctLoader, saveChannels, log.Printf)
+		return serr
+	}
+
 	// ── 平台签到调度器（v1.6.0 · T3）────────────────────────────
 	// 与 CodeBuddy 的 internal/scheduler 完全独立（两套语义命名强区分）：
 	// 默认每日 09:00 对表 + 失败 30m×2 重试；手动触发走面板端点绕过窗口。
@@ -309,41 +328,38 @@ func main() {
 				}
 			}
 		},
+		// 刷新回写后立即重投影：managed 渠道的 secret 必须同步更新，否则转发
+		// 仍持旧 token，下一次请求继续 401（2026-10 审查发现）。
+		OnRefresh: func(platform, accountID string) {
+			if serr := syncAccounts(); serr != nil {
+				log.Printf("[checkin] 账号 %s 刷新后投影失败（accounts.json 已更新，下次 Reconcile 修齐）: %v", accountID, serr)
+			}
+		},
 		Logf: log.Printf,
 	})
 	defer chkSched.Close()
 
 	// ── 登录式添加（v1.7.0 首批）────────────────────────────────
 	// qoder 双区 PKCE 设备授权 + autoclaw 国内短信。入池走 Accounts.Add
-	// （既有校验）；投影经 AfterPool → acctchan.Sync（saveChannels 闭包在
-	// 下方赋值——闭包捕获变量，调用时已就位）。
-	acctLoader := func() []extchan.ChannelDef {
-		cur, lerr := Load(*cfgPath)
-		if lerr != nil {
-			log.Printf("[acclogin] 读取当前配置失败: %v", lerr)
-			return nil
-		}
-		return extChannelDefs(cur.ExtChannels)
-	}
-	var saveChannels func(defs []extchan.ChannelDef) error
+	// （既有校验）；投影经 AfterPool → acctchan.Sync。
 	// 端点环境变量覆盖（v1.7.0；本地联调/镜像场景）：空值 = 官方默认（键级回落
 	// 在 acclogin.NewManager 内）。刻意不进配置文件——避免面板暴露端点改写面。
 	loginOpenAPI, loginWeb, loginAutoClaw := accloginEndpointsFromEnv()
 	acctLoginMgr, err := acclogin.NewManager(acclogin.Config{
 		Store: acctStore,
 		AfterPool: func(platform, accountID string) {
-			if saveChannels == nil {
-				return
-			}
-			if _, serr := acctchan.Sync(acctStore, acctLoader, saveChannels, log.Printf); serr != nil {
+			if serr := syncAccounts(); serr != nil {
 				log.Printf("[acclogin] 账号 %s 投影失败（入池成功，稍后 Reconcile 修齐）: %v", accountID, serr)
 			}
 		},
-		MachineIDFile:   stateSibling(cfg.StateFile, "qoder-machine-id"),
-		QoderOpenAPI:    loginOpenAPI,
-		QoderWeb:        loginWeb,
-		AutoClawUserAPI: loginAutoClaw, // 空值 → NewManager 回落官方默认
-		Logf:            log.Printf,
+		MachineIDFile:       stateSibling(cfg.StateFile, "qoder-machine-id"),
+		TraeIdentityFile:    stateSibling(cfg.StateFile, "trae-device-identity.json"),
+		QoderOpenAPI:        loginOpenAPI,
+		QoderWeb:            loginWeb,
+		AutoClawUserAPI:     loginAutoClaw, // 空值 → NewManager 回落官方默认
+		AutoClawIntlUserAPI: os.Getenv("STARPORT_ACCLOGIN_AUTOCLAW_INTL_USERAPI"),
+		AutoClawOAuthAPI:    os.Getenv("STARPORT_ACCLOGIN_AUTOCLAW_OAUTH_API"),
+		Logf:                log.Printf,
 	})
 	if err != nil {
 		log.Fatalf("config: 初始化登录式添加失败: %v", err)

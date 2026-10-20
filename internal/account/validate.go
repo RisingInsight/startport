@@ -82,6 +82,15 @@ func ValidateCred(platform string, cred json.RawMessage) error {
 			return errField("user_id", "不能为空（COSY 签名需要用户标识）")
 		}
 		return nil
+	case PlatformTrae:
+		if traeField(m, "accessToken", "access_token") == "" {
+			return errField("accessToken", "不能为空（Trae 登录态里的 Cloud-IDE-JWT）")
+		}
+		switch strings.ToLower(traeField(m, "variant")) {
+		case "intl", "solo-intl":
+			return errField("variant", "国际版暂未接入（当前仅支持国内 SOLO 通道）")
+		}
+		return nil
 	case PlatformCustom:
 		base := blobString(m, "base_url")
 		if base == "" {
@@ -157,6 +166,8 @@ func PrimarySecret(platform string, cred json.RawMessage) (string, error) {
 			return "", fmt.Errorf("序列化 Qoder 凭证失败: %w", err)
 		}
 		return string(out), nil
+	case PlatformTrae:
+		return traePrimarySecret(m)
 	case PlatformCustom:
 		if s := blobString(m, "secret"); s != "" {
 			return s, nil
@@ -165,6 +176,83 @@ func PrimarySecret(platform string, cred json.RawMessage) (string, error) {
 	default:
 		return "", fmt.Errorf("未知平台 %q", platform)
 	}
+}
+
+// traeField 读 Trae blob 字段：嵌套 auth{} 优先，其次平铺。
+func traeField(m map[string]any, keys ...string) string {
+	auth := m
+	if nested, ok := m["auth"].(map[string]any); ok {
+		auth = nested
+	}
+	if s := blobString(auth, keys...); s != "" {
+		return s
+	}
+	return blobString(m, keys...)
+}
+
+// traePrimarySecret 把 Trae 账号 blob 归一成适配器形态（平铺 camelCase）。
+// 兼容嵌套 CPA 形状 {auth:{…},account:{…}} 与手工粘贴的平铺形态；只保留
+// 已知字段，未知扩展字段不进入渠道 secret。
+func traePrimarySecret(m map[string]any) (string, error) {
+	auth := m
+	if nested, ok := m["auth"].(map[string]any); ok {
+		auth = nested
+	}
+	accountPart, _ := m["account"].(map[string]any)
+	pick := func(keys ...string) string {
+		for _, src := range []map[string]any{auth, m, accountPart} {
+			if src == nil {
+				continue
+			}
+			if s := blobString(src, keys...); s != "" {
+				return s
+			}
+		}
+		return ""
+	}
+	token := pick("accessToken", "access_token")
+	if token == "" {
+		return "", errField("accessToken", "不能为空")
+	}
+	variant := pick("variant")
+	if variant == "" {
+		variant = "solo"
+	}
+	out := map[string]any{"accessToken": token, "variant": variant}
+	for key, aliases := range map[string][]string{
+		"refreshToken":     {"refreshToken", "refresh_token"},
+		"domain":           {"domain"},
+		"apiHost":          {"apiHost", "api_host"},
+		"machineId":        {"machineId", "machine_id"},
+		"deviceId":         {"deviceId", "device_id"},
+		"uid":              {"uid", "user_id", "userId"},
+		"enterpriseId":     {"enterpriseId", "enterprise_id"},
+		"nickname":         {"nickname"},
+		"devicePublicKey":  {"devicePublicKey", "device_public_key"},
+		"devicePrivateKey": {"devicePrivateKey", "device_private_key"},
+		"authClientId":     {"authClientId", "clientId", "ClientID"},
+	} {
+		if v := pick(aliases...); v != "" {
+			out[key] = v
+		}
+	}
+	// expiresAt 可能是秒/毫秒数字或字符串——原样保留，适配器侧不依赖它。
+	for _, src := range []map[string]any{auth, m} {
+		if src == nil {
+			continue
+		}
+		for _, k := range []string{"expiresAt", "expires_at"} {
+			if v, ok := src[k]; ok && v != nil {
+				out["expiresAt"] = v
+				break
+			}
+		}
+	}
+	raw, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("序列化 Trae 凭证失败: %w", err)
+	}
+	return string(raw), nil
 }
 
 // BaseURLOf 投影用的对话基址（架构 §4.1 规则 1 的配套决策）：
@@ -180,22 +268,15 @@ func BaseURLOf(platform string, cred json.RawMessage) (string, error) {
 	if override := blobString(m, "base_url"); override != "" {
 		return strings.TrimRight(override, "/"), nil
 	}
-	switch platform {
-	case PlatformLoomy:
-		return "https://loomyad.xunfei.cn/api/v1", nil
-	case PlatformAutoClaw:
-		return "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw", nil
-	case PlatformAutoClawIntl:
-		return "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw", nil
-	case PlatformQoder:
-		return "https://gateway.qoder.com.cn", nil
-	case PlatformQoderIntl:
-		return "https://api2.qoder.sh", nil
-	case PlatformCustom:
-		return "", errField("base_url", "不能为空")
-	default:
+	spec, ok := SpecOf(platform)
+	if !ok {
 		return "", fmt.Errorf("未知平台 %q", platform)
 	}
+	if spec.DefaultBaseURL == "" {
+		// custom（及其它无默认基址的平台）：base_url 属于账号，必须由用户填写。
+		return "", errField("base_url", "不能为空")
+	}
+	return spec.DefaultBaseURL, nil
 }
 
 // AllowPrivateOf blob 显式放行内网的标记（架构 §4.1 配套：账号 blob 的
@@ -214,8 +295,9 @@ func AllowPrivateOf(platform string, cred json.RawMessage) bool {
 
 // AdapterOf 平台对应的原生适配器名（custom = 空，投影为普通渠道）。
 func AdapterOf(platform string) string {
-	if NativePlatform(platform) {
-		return platform
+	s, ok := SpecOf(platform)
+	if !ok || !s.Native {
+		return ""
 	}
-	return ""
+	return s.Adapter
 }

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -110,6 +111,9 @@ func (m *Manager) pollQoder(ctx context.Context, s *Session, pollURL, machineID 
 			return
 		}
 		if !err.retryable {
+			// 终态原因落日志：面板只显示一句话，"一直失败"时靠这条定位
+			// （HTTP 状态 / 响应形状 / 地区错误）。token 等凭证值不进日志。
+			m.cfg.Logf("[acclogin:%s] 轮询终止：%s", s.Platform, err.Message)
 			s.finish(StatusFailed, err.Message, "")
 			return
 		}
@@ -163,6 +167,12 @@ func (m *Manager) pollOnce(ctx context.Context, intl bool, pollURL, machineID st
 	}
 	token := jsonString(payload["token"])
 	if token == "" {
+		keys := make([]string, 0, len(payload))
+		for k := range payload {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		m.cfg.Logf("[acclogin:qoder] poll 响应缺 token（顶层键 %v，intl=%v）", keys, intl)
 		return nil, &pollError{Message: "Qoder 设备授权响应缺少 token"}
 	}
 	refreshToken := jsonString(payload["refresh_token"])

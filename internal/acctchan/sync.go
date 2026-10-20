@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/extchan"
@@ -44,16 +45,9 @@ type Loader func() []extchan.ChannelDef
 // Loggerf 日志注入（测试静音；生产 log.Printf）。
 type Loggerf func(format string, args ...any)
 
-// platformBaseURLs 原生平台的官方默认基址（架构 §4.1 配套决策：
-// "导入即用"要求投影给出 base_url；blob.base_url 可覆盖；已存在的 managed
-// 渠道永远保留 config 里的值——渠道级字段以 config 为准）。
-var platformBaseURLs = map[string]string{
-	account.PlatformLoomy:        "https://loomyad.xunfei.cn/api/v1",
-	account.PlatformAutoClaw:     "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
-	account.PlatformAutoClawIntl: "https://autoglm-api.autoglm.ai/autoclaw-proxy/proxy/autoclaw",
-	account.PlatformQoder:        "https://gateway.qoder.com.cn",
-	account.PlatformQoderIntl:    "https://api2.qoder.sh",
-}
+// syncMu 串行化投影读改写（登录入池 / 签到刷新 / 面板账号操作可能并发触发；
+// Sync 是"读 config → 改 ext_channels → 原子写"的复合操作，不加锁会丢更新）。
+var syncMu sync.Mutex
 
 // Sync 把账号投影进 config 的 ext_channels 并经 Saver 落盘（架构 §4.4）。
 //
@@ -66,6 +60,8 @@ var platformBaseURLs = map[string]string{
 //
 // 返回本次同步的动作摘要（测试断言用）；警告走 logf。
 func Sync(store *account.Store, loader Loader, save Saver, logf Loggerf) (string, error) {
+	syncMu.Lock()
+	defer syncMu.Unlock()
 	if logf == nil {
 		logf = func(format string, args ...any) { log.Printf("[acctchan] "+format, args...) }
 	}

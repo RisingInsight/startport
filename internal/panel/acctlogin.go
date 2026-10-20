@@ -32,6 +32,7 @@ import (
 	"strings"
 
 	"github.com/RisingInsight/startport/internal/acclogin"
+	"github.com/RisingInsight/startport/internal/account"
 )
 
 // registerLoginRoutes 注册登录式添加端点（panel.go 调用一次）。
@@ -46,6 +47,7 @@ func (p *Panel) registerLoginRoutes() {
 	p.mux.HandleFunc("POST /startport/api/accounts/login/sms/verify", p.withAuth(p.platformLoginSMSVerify))
 	p.mux.HandleFunc("POST /startport/api/accounts/login/{sid}/sms_verify", p.withAuth(p.platformLoginSMSVerifyPath))
 	p.mux.HandleFunc("GET /startport/api/accounts/login/capabilities", p.withAuth(p.platformLoginCapabilities))
+	p.mux.HandleFunc("GET /startport/api/accounts/login/captcha", p.withAuth(p.platformLoginCaptcha))
 }
 
 // loginReady Manager 是否已注入。
@@ -61,13 +63,23 @@ func (p *Panel) platformLoginStart(w http.ResponseWriter, r *http.Request) {
 		Platform string `json:"platform"`
 		Region   string `json:"region"`
 		Phone    string `json:"phone"`
+		Captcha  string `json:"captcha"`
+		Vendor   string `json:"vendor"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
 		writeErr(w, http.StatusBadRequest, "解析请求体失败: "+err.Error())
 		return
 	}
-	res, err := p.cfg.Login.Start(r.Context(), strings.TrimSpace(body.Platform),
-		strings.TrimSpace(body.Region), strings.TrimSpace(body.Phone))
+	platform := strings.TrimSpace(body.Platform)
+	var res *acclogin.StartResult
+	var err error
+	if platform == account.PlatformAutoClawIntl {
+		res, err = p.cfg.Login.StartOAuth(r.Context(), platform,
+			strings.TrimSpace(body.Captcha), strings.TrimSpace(body.Vendor))
+	} else {
+		res, err = p.cfg.Login.Start(r.Context(), platform,
+			strings.TrimSpace(body.Region), strings.TrimSpace(body.Phone))
+	}
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -84,6 +96,26 @@ func (p *Panel) platformLoginStart(w http.ResponseWriter, r *http.Request) {
 		out["phone_sent"] = true
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// platformLoginCaptcha GET /startport/api/accounts/login/captcha?platform=autoclaw-intl
+// 阿里云滑块初始化参数（scene/region/prefix）；回调地址由 Start 返回。
+func (p *Panel) platformLoginCaptcha(w http.ResponseWriter, r *http.Request) {
+	if !p.loginReady() {
+		writeErr(w, http.StatusNotImplemented, "登录式添加未启用")
+		return
+	}
+	platform := strings.TrimSpace(r.URL.Query().Get("platform"))
+	if platform != account.PlatformAutoClawIntl {
+		writeErr(w, http.StatusBadRequest, "仅 AutoClaw 国际版需要风控验证")
+		return
+	}
+	cfg, err := p.cfg.Login.AutoClawCaptchaConfig(r.Context())
+	if err != nil {
+		writeErr(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
 }
 
 // platformLoginWait POST /startport/api/accounts/login/wait（长轮询 ≤25s；body 形态）
