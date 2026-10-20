@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 
@@ -84,6 +85,18 @@ func For(platform string) (Checker, bool) {
 func Supported(platform string) bool {
 	_, ok := For(platform)
 	return ok
+}
+
+// Platforms 返回已注册签到能力的平台清单（排序；注册表一致性测试与面板用）。
+func Platforms() []string {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	out := make([]string, 0, len(registry))
+	for k := range registry {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // decodeBlob 宽松解码平台凭证 blob（account 包的同一实现）。

@@ -31,6 +31,9 @@ type SchedulerConfig struct {
 	OnSuccess func(platform, credLabel string)
 	// OnSuccess 签到成功/已签过后的钩子（账号中心用它 Revive 被额度/auth 判死
 	// 的引擎凭证——Revive 幂等且对 already 同样无害，已签过也说明登录态活着）。
+	// OnRefresh 登录态刷新并回写 accounts.json 后的钩子（main 注入 = acctchan.Sync
+	// 重投影）。必须在 UpdateCred 之后调用，否则 managed 渠道仍持旧 secret。
+	OnRefresh func(platform, accountID string)
 
 	Now  func() time.Time                 // 时钟注入（测试）
 	Logf func(format string, args ...any) // 日志注入（测试静音）
@@ -255,12 +258,12 @@ func (s *Scheduler) checkinAccount(ctx context.Context, id string, schedule bool
 	}
 
 	res, err := checker.CheckIn(ctx, a)
-	if err != nil && isAuthExpiredErr(err) && canRefreshAutoClaw(a) {
-		// AutoClaw 登录态失效 + 有刷新凭证 → **强制刷新 + 回写 + 重试一次**
+	if err != nil && isAuthExpiredErr(err) && canRefresh(a) {
+		// 登录态失效 + 有刷新凭证 → **强制刷新 + 回写 + 重试一次**
 		// （架构 §4.7 最小闭环：401 换证前 force refresh，成功则重试同一凭证
 		// 一次再进换证；自管存储回写已获授权——不回写则重启即丢）。
 		if rerr := s.refreshAndWriteback(ctx, a); rerr != nil {
-			s.cfg.Logf("[checkin:%s] 账号 %s token 刷新失败: %v", a.Platform, a.Label, rerr)
+			s.cfg.Logf("[checkin:%s] 账号 %s 登录态刷新失败: %v", a.Platform, a.Label, rerr)
 		} else {
 			res, err = checker.CheckIn(ctx, a) // 用刷新后的 blob 重试一次
 		}
@@ -272,12 +275,14 @@ func (s *Scheduler) checkinAccount(ctx context.Context, id string, schedule bool
 		s.cfg.Logf("[checkin:%s] 账号 %s 签到失败: %v", a.Platform, a.Label, err)
 		return res, err
 	}
-	s.cfg.Store.RecordCheckin(id, account.CheckinRecord{
-		At:     s.cfg.Now(),
-		Status: res.Status,
-		Reward: res.Reward,
-		Error:  res.Message,
-	})
+	rec := account.CheckinRecord{At: s.cfg.Now(), Status: res.Status, Reward: res.Reward}
+	if res.Status == StatusFailed {
+		rec.Error = res.Message
+	} else {
+		// already/ok 的文案是说明，不是错误——写进 Error 会让台账看起来像失败。
+		rec.Message = res.Message
+	}
+	s.cfg.Store.RecordCheckin(id, rec)
 	switch res.Status {
 	case StatusOK, StatusAlready:
 		// 成功/已签过都说明登录态活着：复活被额度或 auth 判死的引擎凭证
@@ -295,39 +300,30 @@ func (s *Scheduler) checkinAccount(ctx context.Context, id string, schedule bool
 	return res, nil
 }
 
-// canRefreshAutoClaw 报告账号是否具备 autoclaw 刷新闭环的前提
-// （AutoClaw 平台 + blob 带 refresh_token；没有 → 账号页提示"无法自动刷新"）。
-func canRefreshAutoClaw(a *account.Account) bool {
-	if a.Platform != account.PlatformAutoClaw && a.Platform != account.PlatformAutoClawIntl {
-		return false
-	}
-	blob, err := decodeBlob(a)
-	if err != nil {
-		return false
-	}
-	return blobString(blob, "refresh_token") != ""
+// canRefresh 报告账号是否具备刷新闭环的前提（平台注册表声明 + blob 带
+// refresh_token；没有 → 账号页提示"无法自动刷新"）。
+func canRefresh(a *account.Account) bool {
+	return account.CanRefresh(a)
 }
 
-// refreshAndWriteback 强制刷新 AutoClaw access token 并回写 accounts.json
+// refreshAndWriteback 强制刷新登录态并回写 accounts.json
 // （架构 §4.7：网关自管存储的刷新结果**回写是安全且必要的**——否则重启即丢，
 // 账号必死；ref 对桌面端文件"只读不回写"的顾虑在这里不成立）。
 func (s *Scheduler) refreshAndWriteback(ctx context.Context, a *account.Account) error {
-	newToken, err := RefreshAutoClaw(ctx, a)
+	updated, err := RefreshAccount(ctx, a)
 	if err != nil {
 		return err
 	}
-	m, err := decodeBlob(a)
-	if err != nil {
-		return err
-	}
-	updateAutoClawToken(m, newToken)
-	raw, err := json.Marshal(m)
+	raw, err := json.Marshal(updated)
 	if err != nil {
 		return err
 	}
 	if uerr := s.cfg.Store.UpdateCred(a.ID, raw); uerr != nil {
 		return uerr
 	}
-	s.cfg.Logf("[checkin:%s] 账号 %s 的 access token 已刷新并回写", a.Platform, a.Label)
+	s.cfg.Logf("[checkin:%s] 账号 %s 的登录态已刷新并回写", a.Platform, a.Label)
+	if s.cfg.OnRefresh != nil {
+		s.cfg.OnRefresh(a.Platform, a.ID)
+	}
 	return nil
 }
