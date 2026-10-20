@@ -72,9 +72,22 @@ type Config struct {
 	QoderOpenAPI    map[bool]string // false=cn / true=intl
 	QoderWeb        map[bool]string
 	AutoClawUserAPI string // 国内版（短信登录只在国内）
+	// AutoClawIntlUserAPI 国际版 userapi（余额/资料/账号数据）。
+	AutoClawIntlUserAPI string
+	// AutoClawOAuthAPI OAuth 三跳（captcha / oauth-url / oauth-login）实际在
+	// 国内加速站（2026-10-20 实测：国际站的 overseasv1 返回 405）。
+	AutoClawOAuthAPI string
+	// AutoClawIntlPorts 官方客户端登记的回环回调端口（顺序尝试）。
+	AutoClawIntlPorts []int
 	// MachineIDFile qoder machine id 持久化路径（main 注入 state 同目录文件）。
 	MachineIDFile string
-	Client        *http.Client
+	// TraeIdentityFile TRAE 网关级设备身份持久化路径（machine/device/P-256
+	// 密钥对；同安装复用同一套设备指纹，避免重复登录耗尽上游设备位 20401）。
+	TraeIdentityFile string
+	// TraeGuidanceURLs / TraeAPIOrigins TRAE 端点注入（测试/镜像；空 = 官方）。
+	TraeGuidanceURLs []string
+	TraeAPIOrigins   []string
+	Client           *http.Client
 }
 
 // Manager 登录会话管理器（账号中心 v1.7.0）。
@@ -131,11 +144,23 @@ func NewManager(cfg Config) (*Manager, error) {
 	if cfg.AutoClawUserAPI == "" {
 		cfg.AutoClawUserAPI = "https://autoglm-acceleration-api.zhipuai.cn"
 	}
+	if cfg.AutoClawIntlUserAPI == "" {
+		cfg.AutoClawIntlUserAPI = "https://autoglm-api.autoglm.ai"
+	}
+	if cfg.AutoClawOAuthAPI == "" {
+		cfg.AutoClawOAuthAPI = "https://autoglm-acceleration-api.zhipuai.cn"
+	}
+	if len(cfg.AutoClawIntlPorts) == 0 {
+		cfg.AutoClawIntlPorts = []int{18432, 19654, 19723, 53699}
+	}
 	if cfg.Client == nil {
 		cfg.Client = &http.Client{Timeout: 15 * time.Second} // ref auth.rs:13 口径
 	}
 	if cfg.MachineIDFile == "" {
 		cfg.MachineIDFile = filepath.Join(os.TempDir(), "starport-qoder-machine-id")
+	}
+	if cfg.TraeIdentityFile == "" {
+		cfg.TraeIdentityFile = filepath.Join(os.TempDir(), "starport-trae-device-identity.json")
 	}
 	m := &Manager{
 		cfg:     cfg,
@@ -177,19 +202,22 @@ type Session struct {
 	CreatedAt time.Time
 	ExpiresAt time.Time
 
-	mu         sync.Mutex
-	status     string
-	errMsg     string
-	accountID  string
-	loginURL   string     // qoder：给用户浏览器打开
-	phone      string     // autoclaw：归一化后的手机号
-	deviceID   string     // autoclaw：两跳一致
-	blob       jsonRawMap // 登录产出（入池前驻留；Never logged）
-	label      string
-	cancelled  bool
-	terminalAt time.Time          // 终态时刻（reapLoop 延迟清理，Wait 可观察 expired）
-	stopPoll   context.CancelFunc // qoder 轮询协程的独立生命周期（v1.7.0 修复）
-	done       chan struct{}
+	mu          sync.Mutex
+	status      string
+	errMsg      string
+	accountID   string
+	loginURL    string       // qoder：给用户浏览器打开
+	phone       string       // autoclaw：归一化后的手机号
+	deviceID    string       // autoclaw：两跳一致
+	vendor      string       // autoclaw-intl：zai / google
+	navigateURI string       // autoclaw-intl：OAuth 回环回调
+	httpSrv     *http.Server // autoclaw-intl：本机回环监听
+	blob        jsonRawMap   // 登录产出（入池前驻留；Never logged）
+	label       string
+	cancelled   bool
+	terminalAt  time.Time          // 终态时刻（reapLoop 延迟清理，Wait 可观察 expired）
+	stopPoll    context.CancelFunc // qoder 轮询协程的独立生命周期（v1.7.0 修复）
+	done        chan struct{}
 }
 
 // jsonRawMap blob 的宽松 map 形态（编码由入池时统一做）。
@@ -214,6 +242,18 @@ func (s *Session) cancel() {
 	case <-s.done:
 	default:
 		close(s.done)
+	}
+	s.closeHTTP()
+}
+
+// closeHTTP 关闭 autoclaw-intl 的本机回环监听（幂等；其它平台为 nil）。
+func (s *Session) closeHTTP() {
+	s.mu.Lock()
+	srv := s.httpSrv
+	s.httpSrv = nil
+	s.mu.Unlock()
+	if srv != nil {
+		_ = srv.Close()
 	}
 }
 
@@ -254,9 +294,9 @@ func (m *Manager) machineID() (string, error) {
 }
 
 // SupportedPlatforms 支持登录式添加的平台清单（面板能力开关下发用；
-// 规格 §3.4：前端不硬编码）。
+// 规格 §3.4：前端不硬编码）。平台事实唯一定义在 account.PlatformSpec。
 func SupportedPlatforms() []string {
-	return []string{account.PlatformQoder, account.PlatformQoderIntl, account.PlatformAutoClaw}
+	return account.LoginPlatforms()
 }
 
 // newSessionID "lgn-" + 8 hex。
@@ -293,16 +333,25 @@ func (m *Manager) Start(ctx context.Context, platform, region, phone string) (*S
 	if platform == account.PlatformQoder && strings.EqualFold(region, "intl") {
 		platform = account.PlatformQoderIntl
 	}
-	switch platform {
-	case account.PlatformQoder, account.PlatformQoderIntl:
+	spec, ok := account.SpecOf(platform)
+	if !ok {
+		return nil, fmt.Errorf("未知平台 %q", platform)
+	}
+	switch spec.Login {
+	case account.LoginDeviceCode:
 		return m.startQoder(ctx, platform)
-	case account.PlatformAutoClaw:
+	case account.LoginCallback:
+		return m.startTrae(ctx)
+	case account.LoginSMS:
 		if strings.TrimSpace(phone) == "" {
-			return nil, fmt.Errorf("autoclaw 登录需要手机号")
+			return nil, fmt.Errorf("%s 登录需要手机号", platform)
 		}
 		return m.startAutoClaw(ctx, phone)
+	case account.LoginOAuth:
+		return nil, fmt.Errorf("%s 登录需要滑块验证，请通过浏览器登录入口完成", platform)
 	default:
-		return nil, fmt.Errorf("平台 %q 暂不支持登录式添加（支持：qoder / qoder-intl / autoclaw）", platform)
+		return nil, fmt.Errorf("平台 %q 暂不支持登录式添加（支持：%s）",
+			platform, strings.Join(account.LoginPlatforms(), " / "))
 	}
 }
 
@@ -384,6 +433,7 @@ func (m *Manager) reapExpired(now time.Time) {
 	m.mu.Unlock()
 	for _, s := range toExpire {
 		s.finish(StatusExpired, "登录会话已超时，请重新发起", "")
+		s.closeHTTP()
 	}
 	for _, id := range toPurge {
 		m.mu.Lock()

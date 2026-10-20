@@ -176,7 +176,7 @@
       "path": "",
       "models": ["Qwen3.8-Flash", "Qwen3.8-Max", "Auto", "GLM-5.3"],
       "aliases": {},
-      "note": "示例：原生适配器（adapter=qoder，中国版）。凭证存整个账号 JSON（accessToken/userId/machineId/nickname/email）——COSY 签名需要用户与设备标识，裸 token 不够。模型未知名硬失败；排队返回 503 qoder_model_busy；401 需重新粘贴。国际版换 adapter=qoder-intl 与 base（api2.qoder.sh，jt- 作业令牌）。默认停用。",
+      "note": "示例：原生适配器（adapter=qoder，中国版）。凭证存整个账号 JSON（accessToken/userId/machineId/nickname/email）——COSY 签名需要用户与设备标识，裸 token 不够。模型未知名硬失败；排队返回 503 qoder_model_busy；401 时签到调度器会先尝试刷新（设备流/作业令牌）并回写，刷新失败才需重新粘贴。国际版换 adapter=qoder-intl 与 base（api2.qoder.sh，jt- 作业令牌）。默认停用。",
       "credentials": [
         { "label": "primary", "secret": "REPLACE_WITH_QODER_ACCOUNT_JSON", "expires_at": "" }
       ],
@@ -186,7 +186,7 @@
       "allow_private": false
     }
   ],
-      "account_center_note": "账号中心（v1.6.0）：平台账号存 data/accounts.json（0600），凭证自动投影为 config 的 managed 渠道（adapter=loomy/autoclaw/qoder 等）。blob 形态（最小字段）：loomy= session；autoclaw= token + 可选 refresh_token；qoder= access_token + user_id；custom= base_url + secret。签到默认每天 09:00（失败 30 分钟后重试最多 2 次）；managed 渠道的 credentials 请经账号中心修改，本键仅说明用，网关不读取。",
+      "account_center_note": "账号中心（v1.6.0）：平台账号存 data/accounts.json（0600），凭证自动投影为 config 的 managed 渠道（adapter=loomy/autoclaw/qoder/trae 等）。blob 形态（最小字段）：loomy= session；autoclaw= token + 可选 refresh_token；qoder= access_token + user_id；trae= accessToken + uid/machineId/deviceId（可选 refreshToken；第一批仅支持国内 SOLO 转发）；custom= base_url + secret。签到默认每天 09:00（失败 30 分钟后重试最多 2 次）；managed 渠道的 credentials 请经账号中心修改，本键仅说明用，网关不读取。",
 
   "ext_intel": {
     "enabled": true,
