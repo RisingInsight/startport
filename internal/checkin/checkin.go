@@ -126,4 +126,6 @@ func init() {
 	Register(newAutoClawChecker(false)) // 国内版
 	Register(newAutoClawChecker(true))  // 国际版（任务体系两地独立，域不同）
 	Register(newQoderChecker())
+	// TRAE Checker（newTraeChecker）已实现但暂不注册：能力接线随 platform.go
+	// TRAE 条目（Checkin/Refresh/Balance 翻 true）一次性打开，见该处注释。
 }

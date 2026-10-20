@@ -84,7 +84,10 @@ var platformSpecs = []PlatformSpec{
 		Key: PlatformTrae, Name: "TRAE（字节 · SOLO 国内）", Native: true, Adapter: PlatformTrae,
 		DefaultBaseURL: "https://trae-api-cn.mchost.guru",
 		Login:          LoginCallback,
-		// 签到/余额/刷新属第二批；本批浏览器登录产出完整设备绑定凭证。
+		// 第二批实现与契约单测已就位（checkin/trae.go、trae_balance.go；⚠ 未真实
+		// 账号验收——契约来自参考实现逆向，失败在台账显式报错不静默）。
+		// 能力接线（本三项翻 true + checkin 注册 + refresh/QueryBalance 分发）在
+		// 真实账号验收通过后一次性打开（参见 TraeChecker/RefreshTrae 注释）。
 	},
 	{
 		Key: PlatformCustom, Name: "通用平台",
