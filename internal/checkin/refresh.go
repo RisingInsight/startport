@@ -32,6 +32,7 @@ func RefreshAccount(ctx context.Context, a *account.Account) (map[string]any, er
 		return m, nil
 	case account.PlatformQoder, account.PlatformQoderIntl:
 		return RefreshQoder(ctx, a)
+	// TRAE：RefreshTrae 已实现（trae.go）暂不接线，随 platform.go 能力开关一并打开。
 	default:
 		return nil, ErrPlatformNotSupported
 	}

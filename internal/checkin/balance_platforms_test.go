@@ -17,6 +17,8 @@ func TestBalanceSupported(t *testing.T) {
 			t.Errorf("%s 应支持余额查询", p)
 		}
 	}
+	// TRAE：queryTraeBalanceAt 实现与单测已就位（trae_balance.go），能力开关随
+		// platform.go TRAE 条目接线时移入上方清单。
 	for _, p := range []string{account.PlatformTrae, account.PlatformCustom} {
 		if BalanceSupported(p) {
 			t.Errorf("%s 不应支持余额查询", p)
@@ -25,9 +27,9 @@ func TestBalanceSupported(t *testing.T) {
 }
 
 func TestLoomyBalance(t *testing.T) {
-	var sawToken, sawBearer string
+	var sawDualHead, sawBearer string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sawToken = r.Header.Get("token")
+		sawDualHead = r.Header.Get("token")
 		sawBearer = r.Header.Get("Authorization")
 		if r.URL.Path != "/api/v2/points/records" {
 			t.Errorf("path = %q", r.URL.Path)
@@ -39,8 +41,8 @@ func TestLoomyBalance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("queryLoomyBalanceAt: %v", err)
 	}
-	if sawToken != "sess-0123456789abcdef" || sawBearer != "Bearer sess-0123456789abcdef" {
-		t.Errorf("双头异常: token=%q bearer=%q", sawToken, sawBearer)
+	if sawDualHead != "sess-0123456789abcdef" || sawBearer != "Bearer sess-0123456789abcdef" {
+		t.Errorf("双头异常: dual=%q bearer=%q", sawDualHead, sawBearer)
 	}
 	if snap.Available != 8000 || snap.Unit != "积分" || len(snap.Rows) != 2 {
 		t.Errorf("snapshot = %+v", snap)
