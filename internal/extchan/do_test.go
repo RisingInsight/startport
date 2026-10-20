@@ -461,3 +461,36 @@ func TestDoErrorBodyScrubbed(t *testing.T) {
 	}
 	assertNoInFlightLeak(t, m.Get("q"))
 }
+
+// 无可用凭证的 503 必须带可执行原因：冷却给最早恢复秒数，其余状态给计数。
+func TestNoCredentialErrorReportsReason(t *testing.T) {
+	_, ch := newDoManager(t, "http://127.0.0.1:1")
+	for _, c := range ch.credentials() {
+		c.NoteRateLimited(time.Minute, 30*time.Minute, "qoder_quota_exceeded")
+	}
+	e := ch.noCredentialError()
+	if e.Status != http.StatusServiceUnavailable || e.Code != "all_credentials_unavailable" {
+		t.Fatalf("noCredentialError = %+v", e)
+	}
+	if !strings.Contains(e.Message, "cooling, retry in") {
+		t.Fatalf("冷却原因缺失: %q", e.Message)
+	}
+
+	m2 := New(Config{TimeoutSeconds: 5})
+	m2.ReplaceAll([]ChannelDef{{
+		Name: "bad", BaseURL: "http://127.0.0.1:1",
+		Credentials: []CredentialDef{
+			{Label: "inv", Secret: "s1"},
+			{Label: "off", Secret: "s2", Disabled: true},
+			{Label: "exp", Secret: "s3", ExpiresAt: "2020-01-01"},
+		},
+	}})
+	ch2 := m2.Get("bad")
+	ch2.credentials()[0].NoteInvalid("auth")
+	e2 := ch2.noCredentialError()
+	for _, want := range []string{"invalid 1", "disabled 1", "expired 1"} {
+		if !strings.Contains(e2.Message, want) {
+			t.Errorf("原因缺 %q: %q", want, e2.Message)
+		}
+	}
+}

@@ -62,10 +62,7 @@ func (p *Panel) channelMigrate(w http.ResponseWriter, r *http.Request) {
 	if platform == "" {
 		writeErr(w, http.StatusBadRequest,
 			fmt.Sprintf("渠道 %s 的适配器 %q 无法对应账号平台（支持：%s 及通用平台）",
-				name, def.Adapter, strings.Join([]string{
-					account.PlatformLoomy, account.PlatformAutoClaw, account.PlatformAutoClawIntl,
-					account.PlatformQoder, account.PlatformQoderIntl,
-				}, "/")))
+				name, def.Adapter, strings.Join(nativePlatformNames(), "/")))
 		return
 	}
 	if len(def.Credentials) == 0 {
@@ -269,6 +266,17 @@ func cleanupStaleManagedChannels(defs []extchan.ChannelDef, store *account.Store
 		}
 	}
 	return cleaned
+}
+
+// nativePlatformNames 原生平台清单（从单一注册表派生，错误文案不再手写）。
+func nativePlatformNames() []string {
+	var out []string
+	for _, s := range account.Specs() {
+		if s.Native {
+			out = append(out, s.Key)
+		}
+	}
+	return out
 }
 
 // migratePlatformOf 渠道 → 账号平台（adapter 即平台；无 adapter = custom）。

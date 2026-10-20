@@ -310,6 +310,9 @@ body, .nav, .topbar, .stat, .kpi, input, select {
 .topbar .sep { color: var(--ink-3); }
 .topbar .meta { color: var(--ink-3); font-size: var(--fs-xs); font-family: var(--mono); }
 .topbar .grow { flex: 1; }
+/* 账号中心的平台切换：替代旧分页签，顶栏常驻，CodeBuddy/平台视图都能切。 */
+.topbar-platform { min-width: 160px; max-width: 220px; }
+@media (max-width: 760px) { .topbar-platform { flex: 1 1 100%; max-width: none; } }
 /* 更新提示横幅：非模态、可关闭；仅在检出更高版本时显示（app.js 控制 hidden）。 */
 .updbanner { display: flex; align-items: center; gap: 10px; margin: 0 0 14px; padding: 9px 14px;
   background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent);
@@ -966,7 +969,7 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   .vtabs button.on .cnt { color: var(--ink-2); }
 
   /* ── 请求记录表（运行日志）────────────────────────────────────────── */
-  .acc.req { min-width: 1080px; }
+  .acc.req { min-width: 1280px; }
   .acc.req th, .acc.req td { padding: 8px 10px; }
   .acc.req tbody tr { cursor: default; }
   /* 请求记录最多可读 1000 条，不限高会把下面的「运行日志」推到很远的地方。
@@ -974,6 +977,7 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   .req-wrap { max-height: 460px; overflow: auto; }
   .req-wrap thead th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
   .clip { display: block; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .clip.req-err { max-width: 240px; color: var(--bad); }
   .clip.ip { max-width: 150px; font-family: var(--mono); font-size: var(--fs-sm); }
   .clip.rid { max-width: 150px; font-family: var(--mono); font-size: var(--fs-xs); color: var(--ink-3); }
   .acc.req .muted { color: var(--ink-3); }
@@ -1188,6 +1192,9 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 }
 .seg button:hover:not(:disabled) { border: none; color: var(--ink); }
 .seg button.on { background: var(--surface); color: var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,.22); }
+/* 账号中心平台筛选：平台数增长后允许换行，避免挤爆标题栏。 */
+#acctTabs { flex-wrap: wrap; }
+#acctTabs button { white-space: nowrap; }
 
 /* ── 5. Hero 概览带 + 进度环 ──────────────────────────────────────── */
 .hero {
@@ -1211,6 +1218,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
   box-shadow: inset 0 1px 0 rgba(255,255,255,.06), var(--glow-gold);
 }
 .hero-mark svg { width: 24px; height: 24px; display: block; animation: orbit 60s linear infinite; transform-origin: 50% 50%; }
+.hero-mark .mono { font: 800 18px/1 var(--sans); letter-spacing: -.04em; }
 .hero-h { font-size: var(--fs-md); font-weight: 700; letter-spacing: .01em; }
 .hero-h .zh { color: var(--gold); margin-left: 6px; letter-spacing: .12em; }
 .hero-sub { color: var(--ink-3); font-size: var(--fs-xs); font-family: var(--mono); margin-top: 3px; }
@@ -1269,6 +1277,61 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 .acc tbody tr:hover .mark i { box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 70%, transparent); }
 .acc .mark i { transition: box-shadow .15s ease; }
 .acc th.r, .acc td.r { text-align: right; }
+/* 统一账号表：固定列宽 + 横向滚动；平台/状态不换行，签到说明限宽两行。 */
+#acctPanel-all .acct-main { table-layout: fixed; min-width: 1740px; }
+#acctPanel-all .acct-main th:nth-child(1), #acctPanel-all .acct-main td:nth-child(1) { width: 230px; }
+#acctPanel-all .acct-main th:nth-child(2), #acctPanel-all .acct-main td:nth-child(2) { width: 140px; }
+#acctPanel-all .acct-main th:nth-child(3), #acctPanel-all .acct-main td:nth-child(3) { width: 150px; }
+#acctPanel-all .acct-main th:nth-child(4), #acctPanel-all .acct-main td:nth-child(4) { width: 140px; }
+#acctPanel-all .acct-main th:nth-child(5), #acctPanel-all .acct-main td:nth-child(5) { width: 260px; }
+#acctPanel-all .acct-main th:nth-child(6), #acctPanel-all .acct-main td:nth-child(6) { width: 80px; }
+#acctPanel-all .acct-main th:nth-child(7), #acctPanel-all .acct-main td:nth-child(7) { width: 110px; }
+#acctPanel-all .acct-main th:nth-child(8), #acctPanel-all .acct-main td:nth-child(8) { width: 160px; }
+#acctPanel-all .acct-main th:nth-child(9), #acctPanel-all .acct-main td:nth-child(9) { width: 110px; }
+#acctPanel-all .acct-main th:nth-child(10), #acctPanel-all .acct-main td:nth-child(10) { width: 360px; }
+#acctPanel-all .acct-main td:nth-child(2), #acctPanel-all .acct-main td:nth-child(3),
+#acctPanel-all .acct-main td:nth-child(4), #acctPanel-all .acct-main td:nth-child(6),
+#acctPanel-all .acct-main td:nth-child(7), #acctPanel-all .acct-main td:nth-child(8),
+#acctPanel-all .acct-main td:nth-child(9), #acctPanel-all .acct-main td:nth-child(10) { white-space: nowrap; }
+#acctPanel-all .acct-main td:nth-child(5) { white-space: normal; line-height: 1.55; }
+#acctPanel-all .acct-main td:nth-child(5) .note {
+  max-width: 250px; overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+#acctPanel-all .acct-main td:nth-child(10) .xs { margin: 2px 4px 2px 0; }
+/* 池积分到期卡：账户级余额快照（非逐批），每账号一张卡。 */
+#poolExpList { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+.pool-exp-row {
+  display: flex; flex-direction: column; gap: 6px; padding: 12px 14px;
+  border: 1px solid var(--line-soft); border-radius: 10px; background: var(--surface-2);
+  font-size: var(--fs-sm); min-width: 0;
+}
+.pool-exp-hd { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pool-exp-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.pool-exp-nm { font-weight: 700; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pool-exp-days { font: 700 var(--fs-md)/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.pool-exp-main { color: var(--ink-2, inherit); }
+.pool-exp-main b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.pool-exp-note { margin-top: 2px; font-size: var(--fs-2xs); color: var(--ink-3); line-height: 1.6; }
+/* 平台名 = 跳转入口（CodeBuddy → 账号池，其余 → 平台筛选视图）。
+   整个平台单元格都是热区，避免点在文字旁空白处反而打开详情。 */
+#acctPanel-all .acct-main td.acct-plat-cell { cursor: pointer; }
+.acct-plat {
+  background: none; border: 0; padding: 0; font: inherit; font-weight: 600;
+  color: var(--accent); cursor: pointer;
+}
+.acct-plat:hover:not(:disabled) {
+  border-color: transparent; text-decoration: underline; text-underline-offset: 3px;
+}
+#acctPanel-all .acct-main tr:hover .acct-plat {
+  text-decoration: underline; text-underline-offset: 3px;
+}
+#acctPanel-all .acct-main th.c-acts, #acctPanel-all .acct-main td.c-acts { text-align: right; }
+#acctPanel-all .acct-main td.c-acts { padding-right: 14px; }
+@media (max-width: 900px) {
+  #acctPanel-all .box > header { flex-wrap: wrap; }
+  #acctPanel-all .box > header .note { order: 5; }
+}
 /* 账号表：数值列改回左对齐。
    本表 9 列里 7 列（账号 / 状态 / 操作…）本来就是左对齐，只有数值列右对齐会让内容
    浮在列右缘、与其余列的左栅格错开；而且本表内容也不是纯数字——积分带进度条、
@@ -1525,7 +1588,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       <div class="row"><span class="pulse" id="navPulse"></span><span id="navState">连接中</span></div>
     </div>
     <div class="about">
-      <div>StarPort <span class="ver" id="aboutVer">v1.0.0</span></div>
+      <div>StarPort <span class="ver" id="aboutVer">v1.0.0</span> <span class="ver" id="aboutUI" title="前端构建号">ui</span></div>
       <div>运行 <span id="aboutUptime">—</span></div>
       <div>泊位 <span id="aboutAccounts">—</span></div>
     </div>
@@ -1536,6 +1599,15 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       <h2 id="ttl">账号池</h2>
       <span class="sep">/</span>
       <span class="meta" id="subMeta">-</span>
+      <select id="acctPlatformSelect" class="topbar-platform" hidden aria-label="切换平台账号">
+        <option value="all">全部平台账号</option>
+        <option value="codebuddy">CodeBuddy 账号池</option>
+        <option value="loomy-pool">Loomy 账号池</option>
+        <option value="autoclaw-pool">AutoClaw 账号池</option>
+        <option value="qoder-pool">Qoder 账号池</option>
+        <option value="trae-pool">TRAE 账号池</option>
+        <option value="custom-pool">通用平台账号池</option>
+      </select>
       <div class="grow"></div>
       <div class="seg" id="styleSwitch" role="group" aria-label="界面风格">
         <button type="button" data-ui="compact" title="紧凑：信息密度优先，关闭星空与重发光">紧凑</button>
@@ -1718,7 +1790,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
     <section class="view" id="view-models" hidden>
       <div class="box">
         <header>
-          <h3>模型能力 <span class="hint">max_tokens bug已修复目前可以正常透传最大输出,但是官方返回的最大输出仅为参考，不保证完全正确
+          <h3>模型能力 <span class="hint">max_tokens bug已修复目前可以正常透传最大输出,但是官方返回的最大输出仅为参考，不保证完全正确；外部渠道模型用 <code>ext:&lt;平台&gt;/&lt;模型&gt;</code> 接入，重名时用完整前缀消歧
           </span></h3>
           <span class="grow"></span>
           <span class="note" id="mdNote">实时查询上游</span>
@@ -1730,6 +1802,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             <option value="">全部域</option>
             <option value="cn">国内版 CN</option>
             <option value="global">国际版 Global</option>
+            <option value="ext">全部外部渠道</option>
           </select>
           <select id="mdCap" aria-label="按能力筛选">
             <option value="">全部能力</option>
@@ -1950,32 +2023,158 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
          原外部渠道页全部能力（渠道卡片/凭证列表/新建编辑弹层/情报草稿）。CodeBuddy
          页签复用上方 view-accounts 的既有 DOM（并表不同存储，不合并、不重写）。 -->
     <section class="view" id="view-acctcenter" hidden>
-      <div class="box">
-        <header>
-          <h3>账号中心</h3>
-          <span class="grow"></span>
-          <div class="seg" id="acctTabs" role="group" aria-label="平台分页签">
-            <button type="button" data-acct="codebuddy" class="on">CodeBuddy</button>
-            <button type="button" data-acct="loomy">Loomy</button>
-            <button type="button" data-acct="autoclaw">AutoClaw 国内</button>
-            <button type="button" data-acct="autoclaw-intl">AutoClaw 国际</button>
-            <button type="button" data-acct="qoder">Qoder 国内</button>
-            <button type="button" data-acct="qoder-intl">Qoder 国际</button>
-            <button type="button" data-acct="custom">通用平台</button>
+      <!-- Hero 置顶：星港品牌 + 平台名 + 四项核心指标 + 状态图例。 -->
+      <div id="acctHeroWrap">
+        <div class="hero" id="acctHero">
+          <div class="hero-brand">
+            <div class="hero-title">
+              <span class="hero-mark" id="acctHeroMark" aria-hidden="true"></span>
+              <div>
+                <div class="hero-h"><span class="zh">星港</span> <span id="acctHeroTitle">全部平台账号</span></div>
+                <div class="hero-sub" id="acctHeroSub">StarPort · 平台账号控制台</div>
+              </div>
+            </div>
+            <div class="hero-status"><span class="pulse" id="acctHeroPulse"></span><span id="acctHeroState">加载中</span></div>
           </div>
-          <button type="button" class="xs" id="btnAcctAdd">添加账号</button>
-          <button type="button" class="xs" id="btnCheckinAll" title="对本页签平台（或全部支持签到的平台）账号执行一次签到">全平台签到</button>
-          <button type="button" class="xs" id="btnExtDrawer" title="原「外部渠道」页的全部能力收进这里（进阶）">渠道设置 ▾</button>
-          <span class="note" id="acctNote">—</span>
-        </header>
-        <div class="hint" style="padding:12px 20px 0">
-          CodeBuddy 页签即原账号池（同页并表、存储不变）；其它平台账号以<b>凭证</b>接入，
-          由账号中心统一投影为托管渠道参与转发。账号五态：可用 / 冷却 / 失效（待重登·额度耗尽）/
-          停用 / 未投影。秘密值只落 accounts.json 与 config.json（0600），任何接口不回显。
+          <div class="hero-core">
+            <div class="hero-sec">
+              <div class="hs accent"><div class="v" id="acctHeroAvail">-</div><div class="k">可用率</div></div>
+              <div class="hs"><div class="v" id="acctHeroAccounts">-</div><div class="k">账号数</div></div>
+              <div class="hs"><div class="v" id="acctHeroInflight">-</div><div class="k">在途请求</div></div>
+              <div class="hs"><div class="v" id="acctHeroCheckin">-</div><div class="k">今日签到</div></div>
+            </div>
+          </div>
+          <ul class="hero-legend">
+            <li><i class="dot"></i>账号总数<b id="acctHeroTotal">-</b></li>
+            <li class="ok"><i class="dot"></i>可用<b id="acctHeroHealthy">-</b></li>
+            <li class="warn"><i class="dot"></i>冷却<b id="acctHeroCooling">-</b></li>
+            <li class="bad"><i class="dot"></i>失效<b id="acctHeroInvalid">-</b></li>
+            <li class="cool"><i class="dot"></i>停用<b id="acctHeroDisabled">-</b></li>
+            <li class="mute"><i class="dot"></i>暂停<b id="acctHeroPaused">-</b></li>
+            <li class="mute"><i class="dot"></i>未投影<b id="acctHeroUnprojected">-</b></li>
+          </ul>
         </div>
       </div>
 
       <div id="acctPanels">
+        <div id="acctPanel-all">
+          <div class="hero" id="qoderHero" hidden>
+            <div class="hero-brand">
+              <div class="hero-title">
+                <span class="hero-mark" aria-hidden="true"><span class="mono" id="qoderHeroMark" style="color:var(--accent);font-size:24px;font-weight:700">Q</span></span>
+                <div>
+                  <div class="hero-h"><span class="zh">星港</span> <span id="qoderHeroTitle">Qoder 账号池</span></div>
+                  <div class="hero-sub" id="qoderHeroSub">StarPort · Qoder 运行概览</div>
+                </div>
+              </div>
+              <div class="hero-status"><span class="pulse" id="qoderHeroPulse"></span><span id="qoderHeroState">加载中</span></div>
+            </div>
+            <div class="hero-core">
+              <div class="hero-sec">
+                <div class="hs accent"><div class="v" id="qoderHsAvail">-</div><div class="k">可用率</div></div>
+                <div class="hs"><div class="v" id="qoderHsCredits">-</div><div class="k">积分剩余 / 总额</div></div>
+                <div class="hs"><div class="v" id="qoderHsInflight">-</div><div class="k">在途请求</div></div>
+                <div class="hs"><div class="v" id="qoderHsReq7d">-</div><div class="k">近 7 天请求</div></div>
+                <div class="hs"><div class="v" id="qoderHsExpiryVal">-</div><div class="k" id="qoderHsExpiryK">最近到期</div></div>
+              </div>
+            </div>
+            <ul class="hero-legend">
+              <li><i class="dot"></i>账号总数<b id="qoderHsTotal">-</b></li>
+              <li class="ok"><i class="dot"></i>可用<b id="qoderHsHealthy">-</b></li>
+              <li class="warn"><i class="dot"></i>冷却<b id="qoderHsCooling">-</b></li>
+              <li class="bad"><i class="dot"></i>失效<b id="qoderHsInvalid">-</b></li>
+              <li class="cool"><i class="dot"></i>停用<b id="qoderHsDisabled">-</b></li>
+              <li class="mute"><i class="dot"></i>暂停<b id="qoderHsPaused">-</b></li>
+              <li class="mute"><i class="dot"></i>未投影<b id="qoderHsUnprojected">-</b></li>
+            </ul>
+          </div>
+          <div class="box">
+          <header>
+            <h3 id="acctAllTitle">全部平台账号</h3>
+            <span class="grow"></span>
+            <span class="note" id="acctAllNote">—</span>
+            <button type="button" class="xs" id="btnAcctAdd">添加账号</button>
+            <button type="button" class="xs" id="btnCheckinAll" title="对当前平台（或全部支持签到的平台）账号执行一次签到">全平台签到</button>
+            <button type="button" class="xs" id="btnExtDrawer" title="原「外部渠道」页的全部能力收进这里（进阶）">渠道设置 ▾</button>
+          </header>
+          <div class="attn ok" id="acctAttn" style="margin:12px 17px 0">—</div>
+          <div class="pad" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding-bottom:0">
+            <div class="seg" id="acctRegionTabs" hidden aria-label="账号池区域">
+              <button type="button" data-region="all" class="on">全部</button>
+              <button type="button" data-region="cn">国内</button>
+              <button type="button" data-region="intl">国际</button>
+            </div>
+            <input id="acctSearch" placeholder="搜索账号 / ID / 备注" style="width:220px" autocomplete="off">
+            <select id="acctStatusFilter" style="width:auto">
+              <option value="">全部状态</option>
+              <option value="healthy">可用</option>
+              <option value="cooling">冷却</option>
+              <option value="invalid">失效</option>
+              <option value="disabled">停用</option>
+              <option value="paused">暂停</option>
+              <option value="unprojected">未投影</option>
+            </select>
+            <span class="note" id="acctFilterNote"></span>
+            <span class="grow"></span>
+            <button type="button" class="xs" id="btnAcctRefreshAll">刷新全部</button>
+          </div>
+          <div class="tbl-wrap">
+            <table class="acc zebra acct-main">
+              <thead><tr><th>账号</th><th>平台</th><th>状态</th><th>余额</th><th>签到</th><th>在途</th><th>成功 / 失败</th><th>用量</th><th>最近成功</th><th class="c-acts">操作</th></tr></thead>
+              <tbody id="acBody-all"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
+            </table>
+          </div>
+          </div>
+          <div id="acctPoolViz" hidden>
+            <div class="box" id="poolExpBox" style="margin-top:14px">
+              <header>
+                <h3>积分到期提醒 <span class="hint">账户级余额快照，非逐批</span></h3>
+                <span class="grow"></span>
+                <span class="note" id="poolExpNote"></span>
+                <button type="button" class="xs" id="poolExpRefresh">刷新余额</button>
+              </header>
+              <div class="pad"><div id="poolExpList"></div></div>
+            </div>
+            <div class="box" id="qoderLoadBox" style="margin-top:14px">
+              <header>
+                <h3>负载趋势</h3>
+                <span class="lg-row"><span class="lg-swatch"></span>请求<span class="lg-swatch err"></span>失败<span class="lg-line"></span>积分消耗（右轴）</span>
+                <span class="grow"></span>
+                <span class="note" id="qoderLoadNote">—</span>
+                <select id="qoderLoadRange" class="xs" title="统计范围">
+                  <option value="24">近 24 小时</option>
+                  <option value="72">近 3 天</option>
+                  <option value="168" selected>近 7 天</option>
+                  <option value="720">近 30 天</option>
+                  <option value="0">全部历史</option>
+                </select>
+              </header>
+              <div class="pad"><div class="load-chart" id="qoderLoadChart"></div></div>
+            </div>
+            <div class="box" id="qoderLiveBox" style="margin-top:14px">
+              <header><h3>在途与最近请求</h3><span class="grow"></span><span class="note" id="qoderLiveNote">—</span></header>
+              <div class="pad">
+                <div class="live-stat" id="qoderLiveStat"></div>
+                <div class="note" id="qoderLiveWarn" style="margin-top:8px"></div>
+                <div class="live-lanes" id="qoderLiveLanes"></div>
+              </div>
+            </div>
+            <div class="box" id="qoderMlBox" style="margin-top:14px">
+              <header>
+                <h3>模型锁池 <span class="hint">外部渠道未上报逐模型锁池；按账号可用性估算</span></h3>
+                <span class="grow"></span>
+                <span class="note" id="qoderMlNote"></span>
+              </header>
+              <div class="tbl-wrap">
+                <table class="acc">
+                  <thead><tr><th>模型</th><th>域</th><th>状态</th><th>可选 / 总数</th>
+                    <th>锁定账号</th><th>最早解锁</th><th>全池解锁</th><th>原因</th></tr></thead>
+                  <tbody id="qoderMlBody"><tr><td colspan="8" class="empty">加载中…</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
         <div class="box" id="acctPanel-loomy" hidden>
           <header><h3>Loomy 账号</h3><span class="grow"></span><span class="note">签到 = 每日登录积分（loomyad.xunfei.cn）</span></header>
           <div class="tbl-wrap">
@@ -2018,6 +2217,15 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             <table class="acc zebra">
               <thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>余额</th><th>签到</th><th>添加时间</th><th class="c-acts">操作</th></tr></thead>
               <tbody id="acBody-qoder-intl"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="box" id="acctPanel-trae" hidden>
+          <header><h3>TRAE（字节 · SOLO 国内）</h3><span class="grow"></span><span class="note">本批仅转发；登录/签到下一批</span></header>
+          <div class="tbl-wrap">
+            <table class="acc zebra">
+              <thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>余额</th><th>签到</th><th>添加时间</th><th class="c-acts">操作</th></tr></thead>
+              <tbody id="acBody-trae"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
             </table>
           </div>
         </div>
@@ -2094,6 +2302,21 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       </div>
     </section>
 
+    <!-- 账号详情抽屉（统一账号视图）：平台能力/健康原因/签到历史/操作。 -->
+    <div class="veil" id="acctDetailVeil">
+      <div class="dlg" style="width:780px;max-width:94vw;max-height:88vh;display:flex;flex-direction:column">
+        <header>
+          <h3 id="acctDetailTitle">账号详情</h3>
+          <div class="hint" id="acctDetailSub">—</div>
+        </header>
+        <div class="body" id="acctDetailBody"></div>
+        <footer>
+          <span class="note" id="acctDetailNote"></span>
+          <span class="grow"></span>
+          <button type="button" class="xs" id="acctDetailClose">关闭</button>
+        </footer>
+      </div>
+    </div>
 
     <!-- 外部渠道向导/编辑弹层（表单由 extwiz.js 读写；保存只提交 ext_channels）。 -->
     <div class="veil" id="extWizVeil">
@@ -2408,7 +2631,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
         <div class="tbl-wrap req-wrap">
           <table class="acc req">
             <thead><tr>
-              <th>时间</th><th>结果</th><th>模型</th><th>账号</th>
+              <th>时间</th><th>结果</th><th>原因</th><th>模型</th><th>请求档位</th><th>账号</th>
               <th>来源 IP</th><th>User-Agent</th>
               <th class="num">耗时</th><th class="num">首字</th><th class="num">Token</th><th class="num">积分</th><th>请求 ID</th>
             </tr></thead>
@@ -2604,6 +2827,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <option value="autoclaw-intl">AutoClaw 国际（智谱）</option>
           <option value="qoder">Qoder 国内（阿里）</option>
           <option value="qoder-intl">Qoder 国际（阿里）</option>
+          <option value="trae">TRAE（字节 · SOLO 国内）</option>
           <option value="custom">通用平台（OpenAI / Anthropic / Gemini 兼容）</option>
         </select></label>
       <!-- 添加方式 Tab（v1.7.0）：浏览器登录支持 qoder 双区 / autoclaw 国内；
@@ -2671,11 +2895,13 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 
 <!-- 加载顺序即依赖顺序：core.js（基础设施）→ app.js（视图主体）→ keys.js（密钥视图）。
      classic scripts 共享全局作用域，顶层绑定只可向前引用；新增模块追加到末尾。 -->
-<script src="core.js"></script>
-<script src="app.js"></script>
-<script src="keys.js"></script>
-<script src="ext.js"></script>
-<script src="extwiz.js"></script>
-<script src="acct.js"></script>
+<!-- 前端资源改动时递增 v：页面是 no-store，但旧磁盘缓存仍可能命中；query 强制换 URL。 -->
+<script src="core.js?v=ui27"></script>
+<script src="app.js?v=ui27"></script>
+<script src="keys.js?v=ui27"></script>
+<script src="ext.js?v=ui27"></script>
+<script src="extwiz.js?v=ui27"></script>
+<script src="captcha.js?v=ui27"></script>
+<script src="acct.js?v=ui27"></script>
 </body>
 </html>

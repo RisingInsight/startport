@@ -35,6 +35,7 @@ jobs:
         with:
           go-version-file: go.mod
       # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
+      - run: go vet ./...
       - run: go test ./...
 
   build:

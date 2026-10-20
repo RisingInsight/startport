@@ -86,7 +86,7 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 - **别名与路由**：模型名 `ext:<渠道名>/<模型名或别名>` 精确路由；别名条目会出现在 `/v1/models`（带 `alias_of`）。裸名在渠道间唯一匹配时也可直达（多渠道同名 → 要求前缀消歧）。入站 `/v1/chat/completions` 只认前缀形态（裸名仍走 CodeBuddy 池，与阶段一一致）；`/v1/messages` 走完整解析（含裸名）。
 - **面板与向导**：面板「外部渠道」视图是**渠道卡片 + 凭证列表 + 新建/编辑弹层**：每张卡显示协议、派生状态（可用 / 冷却 / 全部凭证失效 / 全部凭证冷却 / 已停用）、凭证可用数、模型数、最近成功、最近错误；每条凭证显示 label / 状态 / 尝试数（上游往返次数，**含被 429/401 淘汰的失败尝试**；tokens 仍只计成功服务那次）/ token 累计 / 过期时间 / 最近错误，并可单独「测试」。**写路径只有一条**：`POST /startport/api/config` 提交 `ext_channels` 数组。
 - **连通性测试（只读）**：`POST /startport/api/ext_channels/probe` 只发模型目录请求（不发 chat、不消耗额度），独立 10s 超时、8MiB 上限、错误摘要脱敏；**不落盘、不改渠道状态、不计用量**。
-- **情报 → 草稿**：面板内置 21 个平台预设（`GET /startport/api/ext_presets`），情报表格的「生成草稿」会把渠道名、建议协议/鉴权/原生适配器、来源链接预填到向导；`base_url` **永远为空**、凭证必须你自己填（情报是第三方数据，会过期）。`native_required=true` 的平台（Qoder / TRAE / AutoClaw / CatPaw / 华为云码道 / MonkeyCode / Antigravity / WorkBuddy）按钮置灰并说明原因——它们需要客户端签名、设备指纹或有状态转发。Loomy 已由原生适配器覆盖（见下文「原生 Agent 适配器」），不再置灰。
+- **情报 → 草稿**：面板内置 23 个平台预设（`GET /startport/api/ext_presets`），情报表格的「生成草稿」会把渠道名、建议协议/鉴权/原生适配器、来源链接预填到向导；`base_url` **永远为空**、凭证必须你自己填（情报是第三方数据，会过期）。`native_required=true` 的平台（CatPaw / 华为云码道 / MonkeyCode / Antigravity / WorkBuddy）按钮置灰并说明原因——它们需要客户端签名、设备指纹或有状态转发。Loomy / AutoClaw / Qoder / TRAE 已由原生适配器覆盖（见下文「原生 Agent 适配器」），不再置灰。
 - **观测**：`/status` 新增 `ext_channels` 键（协议、派生状态、凭证计数与逐凭证运行态，**只增键**，账号池字段不变）；面板渠道卡片展示同样的数据。凭证用量为**本进程内累计**（重启清零），长期趋势请看用量视图的按渠道口径（`realm=ext`）。
 
 **能力边界（不是 bug，已刻意收窄）**
@@ -121,7 +121,7 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 }
 ```
 
-当前内置一个：**`loomy`（讯飞 Loomy）**
+当前内置：**`loomy` / `autoclaw` / `autoclaw-intl` / `qoder` / `qoder-intl` / `trae`**
 
 - **双头鉴权**：`token: <session>` 与 `Authorization: Bearer <session>` **同时**发。两个网关（模型 / 积分）对头名偏好不同，官方客户端也是两个都发；`headers` 里写 `token`/`Authorization` 覆盖不掉（平台契约由适配器独占）。
 - **鉴权与登录分离**：聊天转发**不需要 HMAC 签名**——签名只服务账号面（短信登录、签到），本项目不做登录，你只需把客户端登录态里的 session 粘进凭证。
@@ -146,7 +146,7 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 - **model 回写**：上游会回自己的路由名（`zai_auto` 等）——非流式回写客户端请求名；**流式逐帧改写 `model`**（本适配器是"逐字节透传"声明的例外，帧会被重建）。
 - **错误分类**：401 → `authentication_error`/`token_invalid`（提示重新粘贴）；403 + `pay-view`/`810001` → 明确提示"需要会员或额度不足"；406 且上游没给原因 → 附可执行提示（max_tokens 已归一 / system 指纹 / 请求形态风控三个方向）；其余照通用信封。所有文案过脱敏。
 - **平台头**：`X-Product`/`X-Client-Type`/`X-Tm`/`X-Version`(1.17.8)/`X-Lang`/`X-Channel`/`x_trace_id` 照官方客户端形态；**不发 `X-Harness-Type`**（带上会稳定 403 pay-view）；`X-Tm` 恒 `win`（mac 构建除外）——发 `linux` 会被部分账号 403。
-- **不做登录 / 签到 / 积分 / token 刷新**：上游的 refresh 接口需要客户端签名（X-Auth-Sign），本期不做；token 失效只能重新获取。
+- **转发适配器本身不做登录 / 签到 / 积分 / token 刷新**：这些由账号中心完成。国内版走手机验证码；国际版走 OAuth（Z.ai / Google）+ 阿里云滑块，回调仅接受官方登记的回环端口 `18432 / 19654 / 19723 / 53699`（`http://localhost:<port>/auth/callback-zai`），captcha 参数由面板前端阿里云 SDK 生成、后端只透传。签到 / 余额 / 刷新走 userapi 链路。
 
 > 已知边界（AutoClaw）：① 远程模型目录（`/proxy/autoclaw-model-config`）与 token 刷新都需要客户端签名，本期用静态路由表与手工粘贴替代——上游新增模型时，可在渠道 `models` 里显式登记，`X-Request-Model` 走显式前缀透传；② 上游闸门（头集合 / system 白名单 / max_tokens）是**实测行为**，可能随上游版本变化，`406` 文案里列了排查方向。
 
@@ -162,11 +162,27 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 - **信封与业务错误**：HTTP 恒 200，错误在 SSE 信封 `statusCodeValue` 里——网关在状态层归一：排队（业务码 10605）→ **503** `qoder_model_busy`（不是登录态/额度问题，稍后重试即可，不罚凭证也不罚渠道）；额度/限流 → 429 `qoder_quota_exceeded`；401/业务码 105 → 401 `token_invalid`（重新粘贴）。流式下靠**首帧预读**在向客户端写任何字节之前完成归一（换证无损）。
 - **模型未知名是硬失败**：`model_not_found`，**不**静默回落（与 AutoClaw 的 `zai_auto` 回退不同）——静态表在 README/预设里，上游新增模型请等适配器更新。
 - **思考拆解**：上游可能把思考混在正文里（`<thinking>` 等标签），适配器跨分片拆解成 `reasoning_content`；"关闭思考"降级为不指定（上游无法真正关闭，发 false 会断连）。
-- **不做**：token 刷新 / PAT 兑换 / 上下文档位 / 签到 / 额度查询（设计文档 §1.2，每项的后果与替代见 `starport-qoder-design.md`）。
+- **token 刷新**：设备流令牌（`dt-`）与作业令牌（`jt-`）分别走 `deviceToken/refresh` / `jobToken/refresh`，由平台签到调度器在登录态失效时**自动刷新 + 回写 accounts.json + 重试一次**（与 AutoClaw 同款闭环）。刷新链来自参考实现，仍需真实账号验收。
+- **国际版余额与签到**：`GET /api/v2/quota/usage` 可用（Bearer，主机 `openapi.qoder.sh`）；Free 新账号通常为 0 credits（实测 `userQuota.total=0`，无 addOn/org 桶）。每日 Credits 的 `CLAIM_BENEFIT` 领取要求 Qoder 客户端风控身份（`Cosy-MachineToken/Type/Code`，由客户端 `runtime-info.exe` 生成；AgentHub 亦注明同一限制），设备码登录账号没有该身份，因此面板显示「平台无此活动」，不是漏实现。
+- **仍不做**：PAT 兑换 / 上下文档位（设计文档 §1.2，后果与替代见 `starport-qoder-design.md`）。
+
+**`trae`（字节 Trae SOLO，国内）**
+
+- **原生适配器（第一批：转发）**：base 建议 `https://trae-api-cn.mchost.guru`；聊天 `POST /api/agent/v3/llm_utils_chat`，模型目录 `POST /api/ide/v1/get_detail_param`。**只支持国内 SOLO 通道**；国际版是另一套两步协议，显式拒绝。
+- **三头鉴权 + 设备指纹**：同一个 accessToken 同时进 `Authorization: Cloud-IDE-JWT <token>`、`X-Cloudide-Token`、`X-Ide-Token`；`X-Uid` / `X-Machine-Id` / `X-Device-Id` 为空时**不发**该头（空值会被上游当成另一个身份）。
+- **白名单 payload**：只搬 `messages` / `tools` / `tool_choice` / 采样字段；`tools[].function.parameters` 转 JSON 字符串、`tool_choice` 转裸字符串、assistant `tool_calls[].function` 改名 `function_call`、`developer` 降成 `system`——多带字段不是被忽略，是被上游拒。
+- **自有 SSE**：没有 `[DONE]`（`event: done` 后由网关补）；`token_usage` 欠到下一帧；**HTTP 200 的 `event: error`** 在首帧预读阶段归一成 401/429/404/413，换证无损；非流式由网关整段聚合。
+- **模型目录**：远程 `get_detail_param`，与 `X-Ide-Version-Code` 绑定；过滤不可见/占位/已下线/本通道必死的配置（如 `deepseek-v4-pro`）。
+- **浏览器登录（v1.7.6 接入）**：PKCE + 本机回环回调——`GetLoginGuidance` 定登录域 → `{loginHost}/authorization?…`（`auth_callback_url=http://127.0.0.1:<port>/authorize` **刻意不编码**，官方前端正则硬校验）→ 回调携带 `authCode/refreshToken/userInfo` → `ExchangeToken`（**每登录上送 P-256 SPKI 公钥**，空公钥 = 业务码 20405）→ `GetUserInfo` 补身份。设备身份（machine/device/密钥对）落 `data/trae-device-identity.json`（0600）**同安装复用**，重复登录不再新增设备位；上游 20401（设备位满）时先在官方客户端解绑旧设备。仅国内 SOLO 通道；国际版显式拒绝。
+- **本批边界**：签到、refreshToken 绑定续期（DeviceProof）、余额在第二批接入；本批浏览器登录产出的凭证已含设备密钥对，粘贴凭证账号不受影响。
 
 ### 账号中心（v1.6.0 / v1.7.0 登录式添加）
 
 把各平台账号（非 CodeBuddy）统一收进一个页面管理：**账号是运行数据**（落 `data/accounts.json`，0600），凭证**单向投影**进 config.json 的 managed 渠道（自动挂进转发引擎，`ext:<平台>/<model>` 路由不变）。
+
+**统一账号视图（默认「全部平台账号」）**：Hero 置顶（金色「星港」+ 平台名、可用率 / 账号数 / 在途请求 / 今日签到、状态图例）、需要关注清单、顶栏平台下拉筛选、状态筛选与搜索；账号行带平台、健康原因、余额、签到、最近使用；点击行打开详情抽屉（平台能力、托管渠道状态、签到历史、测试/刷新/签到/停用/删除）。**CodeBuddy 池账号也计入「全部」的账号数、可用率、在途与签到，并以只读行出现在统一表中**（操作列「账号池」跳回专用视图）；选择「CodeBuddy 账号池」仍显示原账号池视图（积分/到期/负载趋势）。平台切换使用顶栏下拉框，不再使用分页签。新增平台只需补平台能力，不再需要新的账号表 DOM。
+
+**同构平台池（v1.7.6）**：Loomy / AutoClaw / Qoder / TRAE / 通用平台各自是一个「XXX 账号池」下拉入口，内部 Hero、负载趋势、在途与最近请求、模型锁池、积分到期卡与 CodeBuddy 同构。Qoder / AutoClaw 池内切换国内/国际；Loomy / TRAE / 通用平台是单区域池，不显示无效的区域页签。通用平台每账号投影 `c-<id>` 渠道，模型键 `ext:c-<id>/<model>` 在锁池表中按裸模型名归并。
 
 **添加方式一：浏览器登录（v1.7.0，与 CodeBuddy 账号同体验）**
 
@@ -175,11 +191,13 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 | 平台 | 登录方式 | 说明 |
 |---|---|---|
 | `qoder` / `qoder-intl` | PKCE 设备码轮询（官方登录页） | **无需本机客户端**；每平台同时只允许一个进行中会话 |
-| `autoclaw`（国内） | 手机号 + 短信验证码 | 60 秒发码频控；`autoclaw-intl` 需风控验证码，暂不支持 |
-| 其余平台 | 暂用「粘贴凭证」 | `trae`/`zcode` 等随各自转发适配器在后续版本开放 |
+| `autoclaw`（国内） | 手机号 + 短信验证码 | 60 秒发码频控 |
+| `autoclaw-intl`（国际） | OAuth（Z.ai / Google）+ 阿里云滑块 | 回环端口 18432/19654/19723/53699；需联网加载阿里云 SDK |
+| `trae`（SOLO 国内） | PKCE + 本机回环回调（随机端口） | 15 分钟一轮；设备身份同安装复用；回调页成败由面板轮询展示 |
+| 其余平台 | 暂用「粘贴凭证」 | `zcode` 等随各自转发适配器在后续版本开放 |
 
-- 会话 5 分钟超时；取消/过期/被新会话顶替都会停止后台轮询；全链路脱敏（授权链接不含 verifier，日志手机号打码）。
-- 本地联调/镜像可用环境变量覆盖登录端点：`STARPORT_ACCLOGIN_QODER_OPENAPI_CN/_INTL`、`STARPORT_ACCLOGIN_QODER_WEB_CN/_INTL`、`STARPORT_ACCLOGIN_AUTOCLAW_USERAPI`（空值=官方默认）。
+- 会话 5 分钟超时（TRAE 一轮登录 15 分钟）；取消/过期/被新会话顶替都会停止后台轮询；全链路脱敏（授权链接不含 verifier，日志手机号打码）。
+- 本地联调/镜像可用环境变量覆盖登录端点：`STARPORT_ACCLOGIN_QODER_OPENAPI_CN/_INTL`、`STARPORT_ACCLOGIN_QODER_WEB_CN/_INTL`、`STARPORT_ACCLOGIN_AUTOCLAW_USERAPI`、`STARPORT_ACCLOGIN_AUTOCLAW_INTL_USERAPI`、`STARPORT_ACCLOGIN_AUTOCLAW_OAUTH_API`（空值=官方默认；AutoClaw OAuth 的 URL/换码走加速站，captcha-config 仍走国际站 userapi）。
 
 **添加方式二：粘贴凭证**（v1.6.0 起支持，仍是 loomy/custom 等平台的入口）
 
@@ -191,15 +209,17 @@ CodeBuddy（`copilot.tencent.com`）没有开放的 OpenAI 形态 API。StarPort
 | `autoclaw` / `autoclaw-intl` | `{"token":"…","refresh_token":"…(可选)"}` | ✅ 每日 task-complete（两地独立） | ✅ |
 | `qoder`（中国版） | `{"access_token":"dt-…/jt-…","user_id":"…"}` | ✅ sash 活动领取 | ✅ |
 | `qoder-intl` | 同上 | — 平台无此活动 | ✅ |
+| `trae`（国内 SOLO） | `{"accessToken":"…","uid":"…","machineId":"…","deviceId":"…","refreshToken":"…(可选)"}` | —（第二批） | ✅（无登录/签到） |
 | `custom`（通用） | `{"base_url":"…","secret":"…"}` | — | ✅（普通渠道） |
 
 - **定时签到**：默认每天 **09:00** 对全账号跑一轮，失败 30 分钟后重试最多 2 次（重试仍失败 → 账号行标红）；手动按钮绕过窗口。签到成功后自动复活被"耗尽/待重登"判死的凭证。
+- **登录态刷新**：AutoClaw / Qoder 账号可点账号行「刷新」（或由签到遇到登录态失效时自动触发）——刷新成功后回写 `accounts.json` 并**立即重投影** managed 渠道，转发面马上使用新 token；blob 缺 `refresh_token` 时不显示该按钮。
 - **迁入 / 回退**：普通渠道在渠道设置里可「迁入账号中心」（每条凭证 → 一个账号，渠道转托管；部分失败整体回滚、不产生半迁移态）；托管渠道可「回退为普通渠道」（只动 3 个标记键，**凭证原样保留、零数据损失**；账号从账号中心删除）。
 - **托管边界**：managed 渠道的 `credentials` 由账号中心投影——经配置表单修改会被拒绝（报错带"账号中心托管"）；渠道级字段（base_url / models / 别名 / 备注）**永远以 config 为准**，账号中心不改写。误删渠道会在下次启动/账号操作时自动重建（账号是凭证事实来源）。
 - **老配置兼容**：全部新增 JSON 键 `omitempty`，没有 accounts.json 时行为与 v1.5.1 逐字节一致。
-- **⚠ 真实账号验收标红**：三平台签到（loomy / autoclaw / qoder）与 Qoder COSY 转发的接口形态来自参考实现逆向，**尚未用真实账号联调**——联调不过时签到会在面板台账显式报"平台接口可能已变更"（可观测，不静默）。
+- **⚠ 真实账号验收标红**：三平台签到（loomy / autoclaw / qoder）、Qoder 令牌刷新与 Qoder COSY 转发的接口形态来自参考实现逆向，**尚未用真实账号联调**——联调不过时签到会在面板台账显式报"平台接口可能已变更"（可观测，不静默）。
 
-后续规划：`trae` 等需要客户端签名或有状态转发的平台，将按同一套 `RegisterNative` 接口逐个补齐（签名类还需要设备指纹与登录态，工作量大得多）。
+后续规划：`trae` 第一批转发已接入；第二批补浏览器登录（回环回调 + EC P-256）、签到与 refreshToken 轮换。`zcode` 等其余平台继续按同一套 `RegisterNative` 接口逐个补齐。
 ### StarPort 相对上游的自有增量
 
 本仓库在继承上游全部能力之外，重点补强了以下方向（均为上游 `workbuddy2api-panel` 所没有的）：
@@ -317,7 +337,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | `upstream.timeout_seconds` / `header_timeout_seconds` / `idle_timeout_seconds` | `120` / 回落 / `300` | 三段超时分别管：短 RPC 总时长 / 聊天首字节前 / 流中空闲。聊天无总时长上限，长思考不掐断 |
 | `upstream.user_agent` | 空 | 出站 UA 覆盖；空保持现状（可配 `WorkBuddy/<ver>` 让官网「使用端」正确归因） |
 | `upstash.url` / `token` | 空 | Redis 镜像（可选），粘性绑定与池状态防重启丢失 |
-| `ext_channels[]` | `[]` | 外部渠道（多平台 Provider）：`name` / `base_url` / `protocol`（openai 缺省 / anthropic / gemini）/ `adapter`（原生适配器名，空 = 按协议；当前可用 `loomy`，非空时禁配 `auth`）/ `path`（路径覆盖，支持 `{model}`）/ `auth`（bearer / x-api-key / query / custom）/ `headers`（静态头，禁传输层头）/ `models`（显式名单，空 = 自动发现）/ `aliases`（别名 → 上游模型名）/ `credentials[]`（`label`/`secret`/`expires_at`/`disabled`/`auth`，≤20 条）/ `note` / `disabled` / `timeout_seconds` / `allow_private`。`api_key` 为兼容字段（与 `credentials` 互斥，非空时合成 `label="default"` 凭证）。模型名 `ext:<渠道>/<模型或别名>` 路由；凭证池按配置顺序选证，遇 429 / 401 / 403 自动换下一条凭证重试（单请求最多换 1 次、共 2 次上游往返）；任何接口不回显 secret（只回脱敏哨兵，保存时按渠道名/label 回填磁盘原值）；`base_url` 在**启动与保存双期**做 SSRF 校验（内网/元数据字面地址拒绝，`allow_private` 显式放行内网） |
+| `ext_channels[]` | `[]` | 外部渠道（多平台 Provider）：`name` / `base_url` / `protocol`（openai 缺省 / anthropic / gemini）/ `adapter`（原生适配器名，空 = 按协议；当前可用 `loomy` / `autoclaw` / `autoclaw-intl` / `qoder` / `qoder-intl` / `trae`，非空时禁配 `auth`）/ `path`（路径覆盖，支持 `{model}`）/ `auth`（bearer / x-api-key / query / custom）/ `headers`（静态头，禁传输层头）/ `models`（显式名单，空 = 自动发现）/ `aliases`（别名 → 上游模型名）/ `credentials[]`（`label`/`secret`/`expires_at`/`disabled`/`auth`，≤20 条）/ `note` / `disabled` / `timeout_seconds` / `allow_private`。`api_key` 为兼容字段（与 `credentials` 互斥，非空时合成 `label="default"` 凭证）。模型名 `ext:<渠道>/<模型或别名>` 路由；凭证池按配置顺序选证，遇 429 / 401 / 403 自动换下一条凭证重试（单请求最多换 1 次、共 2 次上游往返）；任何接口不回显 secret（只回脱敏哨兵，保存时按渠道名/label 回填磁盘原值）；`base_url` 在**启动与保存双期**做 SSRF 校验（内网/元数据字面地址拒绝，`allow_private` 显式放行内网） |
 | `ext_intel.enabled` / `url` / `interval_hours` | `true` / token-fbi / `12` | 面板额度情报拉取（仅展示，不参与路由）；`enabled=false` 或 `url=""` 关闭外联 |
 | `update.check_enabled` / `check_interval_hours` | `true` / `6` | 版本检查开关与间隔；只提示不自动下载，离线场景可关 |
 | `logging.request_archive_enabled` / `retention_days` / `max_mb` | `true` / `7` / `100` | 请求元数据 JSONL 归档（不含提示词、响应正文与凭证）与保留策略 |
@@ -364,7 +384,7 @@ curl -sN http://localhost:7863/v1/chat/completions \
 | **用量** | 指标卡、Token 时序图、按账号 / 模型 / 域的用量明细、积分扣除历史（折算积分 / 1M Token） |
 | **积分构成** | 积分到期分布、账号对比、逐包明细（折叠策略可配 `panel.package_detail_limit`） |
 | **任务中心** | 全账号成长任务扫描、执行队列（账号内串行、账号间并发 1-3）、开学季状态卡 |
-| **模型与档位** | 实时查询上游模型：生效价与牌价、思考档位、上下文与输出上限；支持探测数据叠加实测钳制告警 |
+| **模型与档位** | 实时查询上游模型：生效价与牌价、思考档位、上下文与输出上限；支持探测数据叠加实测钳制告警。**外部渠道模型（`ext:<平台>/<模型>`）也在此列出**，可按具体平台筛选并复制完整接入名；Qoder 元数据走远程目录（倍率/思考档位/上下文/输出），取不到时回退静态表 |
 | **API 密钥** | Agent 接入密钥的创建与吊销（StarPort 独有，见上） |
 | **配置** | 在线编辑 config.json，热生效字段立即应用 |
 | **运行日志** | 请求记录表（时间 / 结果 / 模型 / 账号 / **来源 IP·UA** / 耗时 / token / 请求 ID）+ 按任务 / 对话 / 系统分频道的运行日志；时间范围查询（预设与自定义区间，今天与自定义区间由浏览器按本地时区计算） |

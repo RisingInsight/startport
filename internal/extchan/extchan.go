@@ -319,6 +319,11 @@ type Manager struct {
 	intelURL  string
 	intelOn   bool
 	intelStop chan struct{}
+
+	// catalog 带元数据的模型目录缓存（/v1/models 与面板共用；见 catalog.go）。
+	catalogMu   sync.Mutex
+	catalogRows []map[string]any
+	catalogAt   time.Time
 }
 
 // Config Manager 构造参数。
@@ -436,6 +441,10 @@ func (m *Manager) ReplaceAll(defs []ChannelDef) {
 		out = append(out, ch)
 	}
 	m.channels = out
+	// 配置/凭证变了，元数据目录缓存立即失效（否则 /v1/models 会继续吐旧模型）。
+	m.catalogMu.Lock()
+	m.catalogRows, m.catalogAt = nil, time.Time{}
+	m.catalogMu.Unlock()
 }
 
 // ChannelDef 渠道定义（config JSON 形态；与 Channel 分开是为了解耦配置校验

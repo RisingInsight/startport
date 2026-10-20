@@ -43,6 +43,7 @@ func SetChatLogOutput(w io.Writer) { chatLogOut = w }
 type chatStat struct {
 	start            time.Time
 	model            string
+	effort           string // 客户端请求的推理档位（reasoning_effort）；空 = 未声明
 	mode             string // "stream" | "sync"
 	uid              string // 完整 uid，展示时只取前 8 位
 	nick             string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
@@ -51,6 +52,8 @@ type chatStat struct {
 	status           int
 	requestID        string
 	outcome          string
+	errCode          string
+	errMsg           string
 	attempts         int
 	credit           float64
 	hasCredit        bool
@@ -72,12 +75,14 @@ type chatStat struct {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
+// effort 与 model 一样从入站请求体提取——两条链路（CodeBuddy 主链路 / ext 外部渠道）
+// 共用同一个 chatStat，档位可观测性不再随路径分叉。
 func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	return &chatStat{start: now, model: parseModelFromBody(body), effort: parseEffortFromBody(body), mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志。
@@ -167,6 +172,7 @@ func (s *chatStatsReader) parseSSELine(line string) {
 			CompletionTokens     *int     `json:"completion_tokens"`
 			TotalTokens          *int     `json:"total_tokens"`
 			Credit               *float64 `json:"credit"`
+			Credits              *float64 `json:"credits"`
 			PromptCacheHitTokens *int     `json:"prompt_cache_hit_tokens"`
 			PromptCacheMissTok   *int     `json:"prompt_cache_miss_tokens"`
 		} `json:"usage"`
@@ -195,6 +201,11 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	if chunk.Usage.Credit != nil {
 		s.hasCredit = true
 		s.credit = *chunk.Usage.Credit
+	} else if chunk.Usage.Credits != nil {
+		// Qoder 内层 usage 用复数 credits（AgentHub 同口径）；与 CodeBuddy 的
+		// 单数 credit 并存，优先单数，缺失才取复数。
+		s.hasCredit = true
+		s.credit = *chunk.Usage.Credits
 	}
 	if chunk.Usage.PromptCacheHitTokens != nil {
 		s.hasCacheHit = true
@@ -274,6 +285,27 @@ func parseModelFromBody(body []byte) string {
 		return "-"
 	}
 	return obj.Model
+}
+
+// parseEffortFromBody 从请求 JSON 提取客户端声明的推理档位（只做观测，不参与转发）。
+//
+// 兼容两种上线形态：顶层 reasoning_effort（pi-ai openai-completions 的缺省
+// 发射形态，也是本网关 workbuddy/test 两个提供商的形态），以及 reasoning.effort
+// 嵌套对象（OpenRouter / Responses 风格客户端）。取不到返回空串（JSON 省略该字段）。
+func parseEffortFromBody(body []byte) string {
+	var obj struct {
+		ReasoningEffort string `json:"reasoning_effort"`
+		Reasoning       struct {
+			Effort string `json:"effort"`
+		} `json:"reasoning"`
+	}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	if v := strings.TrimSpace(obj.ReasoningEffort); v != "" {
+		return v
+	}
+	return strings.TrimSpace(obj.Reasoning.Effort)
 }
 
 // usageDeltaFromResponse 从非流式聚合响应中提取明确存在的 token 字段。
@@ -401,7 +433,10 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		s := t.stat
 		e.Account = logfmt.Label(s.uid, s.nick)
 		e.Model = s.model
+		e.Effort = s.effort
 		e.Outcome = s.outcome
+		e.ErrorCode = s.errCode
+		e.Error = s.errMsg
 		e.TTFBMs = s.ttfb.Milliseconds()
 		e.Attempts = s.attempts
 		e.PromptTokens = s.promptTokens

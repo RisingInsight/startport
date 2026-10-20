@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/RisingInsight/startport/internal/extchan"
@@ -61,7 +62,9 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 	if derr != nil {
 		// 无可用凭证 / 渠道冷却 / 传输失败 / Gemini 流式不支持：统一映射。
 		status, code, msg := extErrorFields(derr)
-		recordExtAttempt(h, st, apiKeyName, ch2, nil, upstream, pool.TokenUsageDelta{}, attemptStarted, 0, display)
+		st.errCode = code
+		st.errMsg = extErrorLabel(code, msg)
+		recordExtAttempt(h, st, apiKeyName, ch2, nil, upstream, pool.TokenUsageDelta{}, 0, false, false, attemptStarted, 0, display)
 		st.status = status
 		st.outcome = reqlog.OutcomeHTTPError
 		log.Printf("WARN: [server] ext=%s model=%s: %s (%s)", ch2.Name, upstream, code, msg)
@@ -71,7 +74,10 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 	cred := ch2.CredentialByLabel(res.CredentialLabel)
 
 	if res.Status >= 400 {
-		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, pool.TokenUsageDelta{}, attemptStarted, 0, display)
+		code, msg := extErrorFromBody(res.Body)
+		st.errCode = code
+		st.errMsg = extErrorLabel(code, msg)
+		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, pool.TokenUsageDelta{}, 0, false, false, attemptStarted, 0, display)
 		st.status = res.Status
 		st.outcome = reqlog.OutcomeHTTPError
 		// 错误原文透传（与主链路 error-passthrough 同哲学：客户端必须看到
@@ -108,12 +114,13 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 			}
 		}
 		delta := stats.Usage()
+		credit, hasCredit := stats.Credit()
 		if clientGone {
 			st.outcome = reqlog.OutcomeInterrupted
 		} else if st.outcome == "" {
 			st.outcome = reqlog.OutcomeSuccess
 		}
-		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, delta, attemptStarted, stats.TTFB(), display)
+		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, delta, credit, hasCredit, true, attemptStarted, stats.TTFB(), display)
 		st.ttfb = stats.TTFB()
 		if toks, hasUsage := stats.Tokens(); hasUsage {
 			st.toks = toks
@@ -133,7 +140,8 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 			respObj["model"] = display
 		}
 		delta := usageDeltaFromResponse(respObj)
-		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, delta, attemptStarted, 0, display)
+		credit, hasCredit := extUsageCredit(respObj)
+		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, delta, credit, hasCredit, true, attemptStarted, 0, display)
 		if u, ok := respObj["usage"].(map[string]any); ok {
 			if ct, ok := u["completion_tokens"].(float64); ok {
 				st.toks = int(ct)
@@ -142,7 +150,9 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 		writeJSON(w, http.StatusOK, respObj)
 	} else {
 		// 上游回了 200 但 body 不是 JSON：按坏网关处理（不罚渠道——偶发形态）。
-		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, pool.TokenUsageDelta{}, attemptStarted, 0, display)
+		st.errCode = "upstream_parse"
+		st.errMsg = "上游返回非 JSON 响应"
+		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, pool.TokenUsageDelta{}, 0, false, false, attemptStarted, 0, display)
 		st.status = http.StatusBadGateway
 		st.outcome = reqlog.OutcomeHTTPError
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", "ext channel returned non-JSON body")
@@ -159,14 +169,75 @@ func extErrorFields(err error) (int, string, string) {
 	return http.StatusBadGateway, "upstream_error", "ext channel error: " + logfmt.Truncate(err.Error(), 300)
 }
 
-// recordExtAttempt 外部渠道的用量记账（复用 usage.Recorder；realm 固定 "ext"，
-// uid 用 "ext:<channel>"——用量视图天然按渠道分组），同时累计凭证级进程内计数。
-//
-// cred 为 nil 时（未能拿到凭证，如无可用凭证）只记渠道维度。
+// extErrorFromBody 从上游错误信封提取 code/message；非 JSON 原文兜底。
+func extErrorFromBody(body []byte) (string, string) {
+	var env struct {
+		Error struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if len(body) > 0 && json.Unmarshal(body, &env) == nil {
+		code := env.Error.Code
+		if code == "" {
+			code = env.Error.Type
+		}
+		if code != "" || env.Error.Message != "" {
+			return code, env.Error.Message
+		}
+	}
+	return "upstream_error", string(body)
+}
+
+// extErrorLabel 把上游错误码翻成人能看懂的原因，供请求记录/Qoder 池直接展示。
+func extErrorLabel(code, msg string) string {
+	switch code {
+	case "qoder_model_busy":
+		return "上游模型资源受限/排队，请约 30 秒后重试"
+	case "qoder_quota_exceeded":
+		return "上游额度/限流已耗尽"
+	case "token_invalid":
+		return "上游登录态失效，请刷新或重新登录"
+	case "qoder_model_not_found":
+		return "上游没有该模型"
+	case "all_credentials_unavailable":
+		if msg != "" {
+			return logfmt.Truncate(msg, 240)
+		}
+		return "渠道内没有可用凭证"
+	case "upstream_parse":
+		return "上游返回非 JSON 响应"
+	}
+	if strings.Contains(msg, "context deadline exceeded") {
+		return "上游请求超时（未在时限内返回）"
+	}
+	if strings.Contains(msg, "context canceled") {
+		return "客户端断开或请求被取消"
+	}
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return code
+	}
+	return logfmt.Truncate(msg, 240)
+}
+
+// recordExtAttempt 外部渠道的用量记账（复用 usage.Recorder；realm 固定 "ext"）。
+// 有凭证时 uid 用凭证 label（托管账号即账号 ID），按账号归因；没有凭证才回落到
+// ext:<channel>。credits 取上游 usage.credit/credits，缺失时 HasCredit=false。
 func recordExtAttempt(h *Handler, st *chatStat, apiKeyName string, ch2 *extchan.Channel,
 	cred *extchan.Credential, model string, delta pool.TokenUsageDelta,
-	started time.Time, ttfb time.Duration, displayModel string) {
+	credit float64, hasCredit bool, ok bool, started time.Time, ttfb time.Duration, displayModel string) {
 	st.attempts++
+	uid := "ext:" + ch2.Name
+	if cred != nil && cred.Label != "" {
+		uid = cred.Label
+		st.uid = uid
+	}
+	if hasCredit {
+		st.credit = credit
+		st.hasCredit = true
+	}
 	if delta.HasPromptTokens {
 		st.promptTokens = delta.PromptTokens
 	}
@@ -200,7 +271,7 @@ func recordExtAttempt(h *Handler, st *chatStat, apiKeyName string, ch2 *extchan.
 		cred.NoteUsage(delta.PromptTokens, delta.CompletionTokens)
 	}
 	if h.cfg.Usage != nil {
-		h.cfg.Usage.Add(time.Now(), "ext", "ext:"+ch2.Name, delta.Model, usage.Delta{
+		h.cfg.Usage.Add(time.Now(), "ext", uid, delta.Model, usage.Delta{
 			KeyName:          apiKeyName,
 			PromptTokens:     delta.PromptTokens,
 			HasPromptTokens:  delta.HasPromptTokens,
@@ -208,14 +279,31 @@ func recordExtAttempt(h *Handler, st *chatStat, apiKeyName string, ch2 *extchan.
 			HasCompletion:    delta.HasCompletionTokens,
 			TotalTokens:      delta.TotalTokens,
 			HasTotal:         delta.HasTotalTokens,
+			Credit:           credit,
+			HasCredit:        hasCredit,
 			LatencyMs:        delta.LatencyMs,
 			HasLatency:       delta.HasLatencyMs,
 			TokensPerSecond:  delta.TokensPerSecond,
 			HasTPS:           delta.HasTokensPerSecond,
 			TTFBMs:           ttfb.Milliseconds(),
 			HasTTFB:          ttfb > 0,
-		}, delta.HasTotalTokens || delta.HasCompletionTokens || delta.HasPromptTokens)
+		}, ok)
 	}
+}
+
+// extUsageCredit 非流式响应里的真实扣费积分：Qoder 用复数 credits，
+// CodeBuddy 用单数 credit；优先单数，缺失才取复数。
+func extUsageCredit(resp map[string]any) (float64, bool) {
+	u, _ := resp["usage"].(map[string]any)
+	if u == nil {
+		return 0, false
+	}
+	for _, key := range []string{"credit", "credits"} {
+		if v, ok := u[key].(float64); ok {
+			return v, true
+		}
+	}
+	return 0, false
 }
 
 // credSecret 返回凭证秘密值（仅用于错误体脱敏；绝不输出/落盘）。

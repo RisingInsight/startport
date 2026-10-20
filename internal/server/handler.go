@@ -425,14 +425,15 @@ func (h *Handler) modelList() []map[string]any {
 
 func (h *Handler) modelListFor(r *http.Request) []map[string]any {
 	out := make([]map[string]any, 0)
-	// 外部渠道模型（ext:<channel>/<model>）：目录自动发现失败不阻塞 CodeBuddy
-	// 名单——两类上游互为独立可用域。r 为 nil 时跳过自动发现（只列显式配置）。
+	// 外部渠道模型（ext:<channel>/<model>）：带上适配器目录元数据（上下文/输出上限/
+	// 视觉/思考档位）。目录结果在 extchan 内缓存 10 分钟，避免每次客户端拉目录都
+	// 打上游元数据接口；自动发现失败时回退显式配置/ID 清单。
 	if h.cfg.Ext != nil {
 		var ctx context.Context = context.Background()
 		if r != nil && r.Context() != nil {
 			ctx = r.Context()
 		}
-		out = append(out, h.cfg.Ext.ModelList(ctx)...)
+		out = append(out, h.cfg.Ext.ModelCatalog(ctx)...)
 	}
 	for _, mi := range h.fetchDynamicModels() {
 		entry := map[string]any{

@@ -99,6 +99,11 @@ type Config struct {
 	SaveChannels func(defs []extchan.ChannelDef) error
 	// LoadChannelDefs 读当前盘上的渠道定义（一致性查询用；nil 时该端点降级）。
 	LoadChannelDefs func() []extchan.ChannelDef
+	// RefreshAccount 手动刷新账号登录态（nil = 用 checkin.RefreshAccount）。
+	// 测试注入点；生产不设置，走平台注册表里的真实刷新链。
+	RefreshAccount func(ctx context.Context, a *account.Account) (map[string]any, error)
+	// BalanceAccount 查询平台余额（nil = 用 checkin.QueryBalance）。
+	BalanceAccount func(ctx context.Context, a *account.Account) (*account.BalanceSnapshot, error)
 }
 
 // Panel 管理面板 handler。挂载方式：外层 mux Handle("/startport/", panel)，
@@ -189,6 +194,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/keys.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/ext.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/extwiz.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/captcha.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/acct.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /startport/api/logs", p.withAuth(p.logsHandler))
@@ -249,6 +255,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("DELETE /startport/api/accounts/{id}", p.withAuth(p.platformAccountDelete))
 	p.mux.HandleFunc("POST /startport/api/accounts/{id}/state", p.withAuth(p.platformAccountState))
 	p.mux.HandleFunc("POST /startport/api/accounts/{id}/probe", p.withAuth(p.platformAccountProbe))
+	p.mux.HandleFunc("POST /startport/api/accounts/{id}/refresh", p.withAuth(p.platformAccountRefresh))
+	p.mux.HandleFunc("POST /startport/api/accounts/{id}/platform_balance", p.withAuth(p.platformAccountBalance))
 	p.registerCheckinRoutes() // 平台签到（v1.6.0 T3；路由实现在 checkin.go）
 	p.registerLoginRoutes()   // 登录式添加（v1.7.0；路由实现在 acctlogin.go）
 	p.mux.HandleFunc("POST /startport/api/channels/{name}/migrate", p.withAuth(p.channelMigrate))
@@ -420,36 +428,70 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0)
 	var fetchErrs []string
 
-	// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
-	// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
-	if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
-		if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-			infos, err := p.cfg.Upstream.FetchModels(acct)
-			if err != nil {
-				fetchErrs = append(fetchErrs, "cn: "+err.Error())
-			} else {
-				for _, mi := range infos {
-					out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
+	// CodeBuddy 两域：只有 Pool/Upstream 都装配时才查；纯外部渠道部署也能用本页。
+	if p.cfg.Pool != nil && p.cfg.Upstream != nil {
+		// CN 域：有可用 CN 账号才查（此前无条件 Pool.Pick()+FetchModels——选中 global
+		// 账号时打 CN 端点必然失败，混合池表现为偶发 502，纯 global 池必炸）。
+		if uids := p.cfg.Pool.AvailableUIDsForRealm("cn"); len(uids) > 0 {
+			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+				infos, err := p.cfg.Upstream.FetchModels(acct)
+				if err != nil {
+					fetchErrs = append(fetchErrs, "cn: "+err.Error())
+				} else {
+					for _, mi := range infos {
+						out = append(out, panelModelEntry("cn", mi, mi.Efforts, mi.DefaultEffort, p.cfg.Upstream.HTTP))
+					}
+				}
+			}
+		}
+
+		// global 域：路由开关开且有可用 global 账号才查（独立目录端点，FetchGlobalModelInfos；
+		// Upstream.GlobalEnabled 是探测侧同一道闸，与 main 装配的 config global.enabled 一致）。
+		if p.cfg.Upstream.GlobalEnabled {
+			if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
+				if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
+					infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
+					if len(infos) == 0 {
+						fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
+					} else {
+						efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
+						for _, mi := range infos {
+							out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
+						}
+					}
 				}
 			}
 		}
 	}
 
-	// global 域：路由开关开且有可用 global 账号才查（独立目录端点，FetchGlobalModelInfos；
-	// Upstream.GlobalEnabled 是探测侧同一道闸，与 main 装配的 config global.enabled 一致）。
-	if p.cfg.Upstream.GlobalEnabled {
-		if uids := p.cfg.Pool.AvailableUIDsForRealm("global"); len(uids) > 0 {
-			if acct := p.cfg.Pool.AuthByUID(uids[0]); acct != nil {
-				infos := p.cfg.Upstream.FetchGlobalModelInfos(acct)
-				if len(infos) == 0 {
-					fetchErrs = append(fetchErrs, "global: 上游未返回可用模型")
-				} else {
-					efforts, defaults := p.cfg.Upstream.GlobalEffortSnapshot()
-					for _, mi := range infos {
-						out = append(out, panelModelEntry("global", mi, efforts[mi.ID], defaults[mi.ID], p.cfg.Upstream.HTTP))
-					}
-				}
+	// 外部渠道（Qoder/TRAE/AutoClaw/Loomy/自定义）：与 /v1/models 同源，
+	// id 即客户端要填的完整接入名 ext:<平台>/<模型>；别名另有一行 alias_of。
+	if p.cfg.ExtChan != nil {
+		statuses := map[string]extchan.Status{}
+		for _, st := range p.cfg.ExtChan.Status() {
+			statuses[st.Name] = st
+		}
+		extEntries := p.cfg.ExtChan.ModelCatalog(r.Context())
+		collisions := map[string]int{}
+		for _, m := range extEntries {
+			if id, _ := m["id"].(string); id != "" {
+				collisions[extBareModel(id)]++
 			}
+		}
+		for _, m := range extEntries {
+			id, _ := m["id"].(string)
+			ch := extChannelOf(id)
+			m["source"] = "ext"
+			m["provider"] = ch
+			m["platform_name"] = extPlatformName(ch)
+			if st, ok := statuses[ch]; ok {
+				m["protocol"] = st.Protocol
+				m["adapter"] = st.Adapter
+			}
+			if collisions[extBareModel(id)] > 1 {
+				m["name_collision"] = true
+			}
+			out = append(out, m)
 		}
 	}
 
@@ -462,6 +504,32 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
+}
+
+// extChannelOf 从 ext:<channel>/<model> 取渠道名。
+func extChannelOf(id string) string {
+	rest := strings.TrimPrefix(id, "ext:")
+	if i := strings.IndexByte(rest, '/'); i > 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
+// extBareModel 从 ext:<channel>/<model> 取渠道内裸模型名（重名检测用）。
+func extBareModel(id string) string {
+	rest := strings.TrimPrefix(id, "ext:")
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		return rest[i+1:]
+	}
+	return rest
+}
+
+// extPlatformName 外部渠道展示名：平台注册表优先，自定义渠道回落渠道名。
+func extPlatformName(channel string) string {
+	if spec, ok := account.SpecOf(channel); ok {
+		return spec.Name
+	}
+	return channel
 }
 
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
@@ -850,6 +918,25 @@ func (p *Panel) usage(w http.ResponseWriter, r *http.Request) {
 	for _, s := range p.cfg.Pool.List() {
 		if s.Nickname != "" {
 			nicks[s.UID] = s.Nickname
+		}
+	}
+	// 外部渠道按账号 ID 记账后，用账号中心的 label 做展示名。
+	if p.cfg.Accounts != nil {
+		for _, a := range p.cfg.Accounts.List("") {
+			if a.ID != "" && a.Label != "" {
+				nicks[a.ID] = a.Label
+			}
+		}
+	}
+	// 外部渠道按凭证 label（托管账号即账号 ID）记账；补上账号中心显示名，
+	// 让用量页/Qoder 池能按账号而不是 acc-xxx 展示。
+	if p.cfg.Accounts != nil {
+		for _, a := range p.cfg.Accounts.List("") {
+			name := a.Label
+			if name == "" {
+				name = a.ID
+			}
+			nicks[a.ID] = name
 		}
 	}
 	var currentRate func(realm, model string) string

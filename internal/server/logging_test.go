@@ -331,6 +331,53 @@ func TestParseModelFromBody(t *testing.T) {
 	}
 }
 
+// TestParseEffortFromBody 推理档位观测：顶层 reasoning_effort（pi-ai 形态）与
+// reasoning.effort（嵌套形态）都要能提取；未声明应是空串而不是 "-"（JSON 省略）。
+func TestParseEffortFromBody(t *testing.T) {
+	cases := []struct {
+		body string
+		want string
+	}{
+		{`{"model":"m","reasoning_effort":"max"}`, "max"},
+		{`{"reasoning_effort":" high "}`, "high"},
+		{`{"reasoning":{"effort":"medium"}}`, "medium"},
+		{`{"reasoning_effort":"","reasoning":{"effort":"low"}}`, "low"},
+		{`{"reasoning_effort":"max","reasoning":{"effort":"low"}}`, "max"},
+		{`{}`, ""},
+		{`not json`, ""},
+	}
+	for _, c := range cases {
+		if got := parseEffortFromBody([]byte(c.body)); got != c.want {
+			t.Errorf("parseEffortFromBody(%s) = %q, want %q", c.body, got, c.want)
+		}
+	}
+}
+
+// TestRequestEffortRecorded 请求记录落 effort：客户端声明的档位进入 reqlog 事件，
+// 成功与失败路径同口径（都在 newChatStat 里从入站 body 提取）。
+func TestRequestEffortRecorded(t *testing.T) {
+	const sseOK = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 200, sseOK, true
+	})
+	reqLog := reqlog.New(reqlog.Config{})
+	h := NewHandler(Config{
+		Pool:       testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:   up,
+		RequestLog: reqLog,
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"reasoning_effort":"max","messages":[]}`)))
+	s := reqLog.Snapshot()
+	if len(s.Recent) != 1 {
+		t.Fatalf("recent = %+v", s.Recent)
+	}
+	if got := s.Recent[0].Effort; got != "max" {
+		t.Fatalf("effort = %q, want max", got)
+	}
+}
+
 func TestCompletionTokensExtraction(t *testing.T) {
 	got := completionTokens(map[string]any{
 		"usage": map[string]any{"prompt_tokens": 10.0, "completion_tokens": 234.0, "total_tokens": 244.0},
