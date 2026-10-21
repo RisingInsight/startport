@@ -46,7 +46,7 @@ import (
 // 用 var 而非 const：const 无法被 `go build -ldflags -X` 注入，CI 也就无法把
 // git tag 打成二进制版本号（自动更新的「版本源」必须可注入）。默认值保留源码
 // 版本，本地裸构建（不带 -X）行为与改动前完全一致。
-var appVersion = "1.7.5"
+var appVersion = "2.0.0"
 
 // appCommit / appBuildTime 构建期元信息，由 CI 经 -ldflags -X 注入（本地构建为空）。
 // 仅用于启动日志与 /startport/api/overview 观测，不参与任何路由或出站决策。
