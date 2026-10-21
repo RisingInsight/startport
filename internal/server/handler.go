@@ -96,11 +96,9 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	if h.cfg.Live != nil {
 		return h.cfg.Live.Load()
 	}
-	return livecfg.Snapshot{
-		APIKey:           h.cfg.APIKey,
-		SoftCooldown:     h.cfg.SoftCooldown,
-		RecordClientInfo: h.cfg.RecordClientInfo,
-	}
+	// SanitizeFingerprints 恒 false：与原键值字面量行为一致（该字段只由启动装配
+	// 路径填充，Live 回退快照不携带）。
+	return livecfg.NewSnapshot(h.cfg.APIKey, h.cfg.SoftCooldown, false, h.cfg.RecordClientInfo)
 }
 
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
@@ -159,6 +157,8 @@ func NewHandler(cfg Config) *Handler {
 	// Anthropic Messages 出口（阶段二）：Claude Code / Anthropic SDK 直连外部渠道。
 	// 鉴权与 /v1/chat/completions 同通道（管理密钥或 agent 密钥）。
 	h.mux.HandleFunc("POST /v1/messages", h.chatAuth(h.handleExtMessages))
+	// Responses 出口（阶段三）：Codex CLI 直连。鉴权与 /v1/messages 同通道。
+	h.mux.HandleFunc("POST /v1/responses", h.chatAuth(h.handleResponses))
 	h.mux.HandleFunc("GET /v1/models", h.chatAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
