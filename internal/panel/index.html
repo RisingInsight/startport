@@ -2229,6 +2229,15 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             </table>
           </div>
         </div>
+        <div class="box" id="acctPanel-codex" hidden>
+          <header><h3>Codex（ChatGPT 订阅）账号</h3><span class="grow"></span><span class="note">凭证 = codex login 的 auth.json（账号中心添加下一批开放）</span></header>
+          <div class="tbl-wrap">
+            <table class="acc zebra">
+              <thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>余额</th><th>签到</th><th>添加时间</th><th class="c-acts">操作</th></tr></thead>
+              <tbody id="acBody-codex"><tr><td colspan="7" class="empty">加载中…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
         <div class="box" id="acctPanel-custom" hidden>
           <header><h3>通用平台账号</h3><span class="grow"></span><span class="note">任意 OpenAI / Anthropic / Gemini 兼容上游（每账号一条 c-&lt;id&gt; 渠道）</span></header>
           <div class="tbl-wrap">
@@ -2335,6 +2344,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
                 <option value="openai">openai · Chat Completions</option>
                 <option value="anthropic">anthropic · Messages</option>
                 <option value="gemini">gemini · generateContent</option>
+                <option value="responses">responses · OpenAI Responses（Codex）</option>
               </select>
               <span class="hint">决定 URL 形态与默认鉴权（anthropic→x-api-key、gemini→x-goog-api-key）</span></label>
             <label class="fld"><span class="lb">原生适配器</span>
@@ -2345,6 +2355,8 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
                 <option value="autoclaw-intl">autoclaw-intl · 国际版（智谱）</option>
                 <option value="qoder">qoder · 中国版（阿里）</option>
                 <option value="qoder-intl">qoder-intl · 国际版（阿里）</option>
+                <option value="trae">trae · SOLO 国内（字节）</option>
+                <option value="codex">codex · ChatGPT Codex（订阅）</option>
               </select>
               <span class="hint">平台专属覆盖（鉴权/请求形态）；选中后不再使用下面的鉴权方式</span></label>
           </div>
@@ -2828,6 +2840,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <option value="qoder">Qoder 国内（阿里）</option>
           <option value="qoder-intl">Qoder 国际（阿里）</option>
           <option value="trae">TRAE（字节 · SOLO 国内）</option>
+          <option value="codex">Codex（ChatGPT 订阅 · 账号中心下一批开放）</option>
           <option value="custom">通用平台（OpenAI / Anthropic / Gemini 兼容）</option>
         </select></label>
       <!-- 添加方式 Tab（v1.7.0）：浏览器登录支持 qoder 双区 / autoclaw 国内；
