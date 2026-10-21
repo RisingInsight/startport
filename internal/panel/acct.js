@@ -54,6 +54,12 @@ const ACCT_PLATFORMS = {
     schema: '必填 accessToken；uid/machineId/deviceId 建议一并填写（上游按设备绑定）。当前仅支持国内 SOLO 通道；登录/签到/刷新在下一批接入。',
     required: ['accessToken']
   },
+  codex: {
+    name: 'Codex（ChatGPT 订阅）',
+    sample: '（下一批开放：粘贴 codex login 产出的 auth.json 全文）',
+    schema: '⚠ 账号中心添加下一批开放（服务端凭证校验未接线）。当前请经「外部渠道」向导手工接入：adapter=codex、protocol=responses，凭证填 auth.json 全文；令牌过期由刷新机自动续期。',
+    required: []
+  },
   custom: {
     name: '通用平台',
     sample: '{\n  "base_url": "https://api.example.com",\n  "secret": "<API key>",\n  "protocol": "openai",\n  "auth": { "mode": "bearer" }\n}',
@@ -480,6 +486,7 @@ function acctHeroMark(platform) {
     'loomy-pool': ['L', '#2dd4bf'],
     'trae-pool': ['T', '#e5e7eb'],
     'custom-pool': ['C', '#94a3b8'],
+    codex: ['X', '#10a37f'],
     trae: ['T', '#e5e7eb'],
     autoclaw: ['A', '#a78bfa'], 'autoclaw-intl': ['A', '#a78bfa'],
     loomy: ['L', '#2dd4bf'],
@@ -1359,6 +1366,9 @@ function acctValidateBlob(platform, obj) {
   }
   if (platform === 'loomy' && String(obj.session).trim().length < 16) {
     return '凭证字段 session: 过短（长度 ≥16）';
+  }
+  if (platform === 'codex') {
+    return 'Codex 账号中心添加下一批开放（服务端凭证校验未接线）；当前请经「外部渠道」向导手工接入（adapter=codex）。';
   }
   if (platform === 'custom') {
     const base = String(obj.base_url || '').trim();

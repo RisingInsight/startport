@@ -158,7 +158,7 @@ func TestExtPresetsEndpoint(t *testing.T) {
 		if p.BaseURL != "" {
 			t.Errorf("预设 %q base_url 必须为空: %q", p.Key, p.BaseURL)
 		}
-		if p.Protocol != "openai" && p.Protocol != "anthropic" && p.Protocol != "gemini" {
+		if p.Protocol != "openai" && p.Protocol != "anthropic" && p.Protocol != "gemini" && p.Protocol != "responses" {
 			t.Errorf("预设 %q 协议非法: %q", p.Key, p.Protocol)
 		}
 		if p.NativeRequired {
