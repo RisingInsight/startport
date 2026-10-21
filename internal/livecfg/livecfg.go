@@ -33,6 +33,13 @@ func New(s Snapshot) *Holder {
 	return h
 }
 
+// NewSnapshot 按字段序快捷构造快照（handler 的 Live 回退路径用）。字段序 =
+// APIKey/SoftCooldown/SanitizeFingerprints/RecordClientInfo——插入新字段时
+// 此处会编译报错，不会静默错位。
+func NewSnapshot(apiKey string, softCooldown time.Duration, sanitizeFingerprints, recordClientInfo bool) Snapshot {
+	return Snapshot{apiKey, softCooldown, sanitizeFingerprints, recordClientInfo}
+}
+
 // Load 返回当前快照（Holder 为 nil 或从未 Store 时返回零值快照，调用方无需判空）。
 func (h *Holder) Load() Snapshot {
 	if h == nil {
