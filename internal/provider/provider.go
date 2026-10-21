@@ -29,10 +29,13 @@ const (
 	ProtocolAnthropic Protocol = "anthropic"
 	// ProtocolGemini Google Generative Language（/v1beta/models/...）。
 	ProtocolGemini Protocol = "gemini"
+	// ProtocolResponses OpenAI Responses（Codex 后端承载；无协议基准适配器，
+	// 只能配 adapter=codex 使用——native 路径不经过协议注册表）。
+	ProtocolResponses Protocol = "responses"
 )
 
 // protocolOrder 合法值清单（错误文案按此顺序给出，便于用户照抄）。
-var protocolOrder = []Protocol{ProtocolOpenAI, ProtocolAnthropic, ProtocolGemini}
+var protocolOrder = []Protocol{ProtocolOpenAI, ProtocolAnthropic, ProtocolGemini, ProtocolResponses}
 
 // ParseProtocol 解析协议名：空串归一为 openai（老配置语义），大小写不敏感，
 // 未知值返回带合法值清单的错误（config 校验直接透出给用户）。
@@ -41,10 +44,10 @@ func ParseProtocol(s string) (Protocol, error) {
 	switch p {
 	case "":
 		return ProtocolOpenAI, nil
-	case ProtocolOpenAI, ProtocolAnthropic, ProtocolGemini:
+	case ProtocolOpenAI, ProtocolAnthropic, ProtocolGemini, ProtocolResponses:
 		return p, nil
 	default:
-		return "", fmt.Errorf("protocol: %q 不是合法值（可用：openai / anthropic / gemini）", s)
+		return "", fmt.Errorf("protocol: %q 不是合法值（可用：openai / anthropic / gemini / responses）", s)
 	}
 }
 

@@ -31,6 +31,7 @@ const (
 	PlatformQoder        = "qoder"
 	PlatformQoderIntl    = "qoder-intl"
 	PlatformTrae         = "trae"
+	PlatformCodex        = "codex"
 	PlatformCustom       = "custom"
 )
 

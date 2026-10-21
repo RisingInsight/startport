@@ -90,6 +90,15 @@ var platformSpecs = []PlatformSpec{
 		// 真实账号验收通过后一次性打开（参见 TraeChecker/RefreshTrae 注释）。
 	},
 	{
+		Key: PlatformCodex, Name: "Codex（ChatGPT 订阅）", Native: true, Adapter: PlatformCodex,
+		DefaultBaseURL: "https://chatgpt.com/backend-api/codex",
+		// 刷新机已实现（checkin/codex_refresh.go，OAuth 刷新令牌换新令牌组，
+		// ⚠ 未真实账号验收——契约来自参考实现逆向，失败在台账显式报错不静默）。
+		// 无签到 / 无余额（ChatGPT 订阅无积分体系）；账号中心的凭证校验与投影
+		// 接线在下一批打开（届时粘贴 auth.json 即用）。
+		Refresh: true,
+	},
+	{
 		Key: PlatformCustom, Name: "通用平台",
 	},
 }
