@@ -5,14 +5,14 @@ package server
 
 import (
 	"context"
-	"reflect"
-	"time"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/RisingInsight/startport/internal/auth"
 	"github.com/RisingInsight/startport/internal/extchan"
@@ -78,9 +78,9 @@ func TestResponsesPoolFallbackSync(t *testing.T) {
 		Status string `json:"status"`
 		Model  string `json:"model"`
 		Output []struct {
-			Type   string `json:"type"`
-			Role   string `json:"role"`
-			Status string `json:"status"`
+			Type    string `json:"type"`
+			Role    string `json:"role"`
+			Status  string `json:"status"`
 			Content []struct {
 				Type string `json:"type"`
 				Text string `json:"text"`
