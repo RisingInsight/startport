@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"net/http"
 	"strings"
 	"time"
@@ -46,7 +47,7 @@ func queryLoomyBalanceAt(ctx context.Context, base, session string) (*account.Ba
 	}
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("积分请求失败（网络）")
+		return nil, fmt.Errorf("积分请求失败（网络）%s", netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

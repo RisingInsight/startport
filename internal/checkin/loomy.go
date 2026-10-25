@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"net/http"
 	"strings"
 	"time"
@@ -68,7 +69,7 @@ func (c *loomyChecker) CheckIn(ctx context.Context, a *account.Account) (Result,
 	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
-		return Result{}, fmt.Errorf("签到请求失败（网络）")
+		return Result{}, fmt.Errorf("签到请求失败（网络）%s", netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	// HTTP 401/403 → 登录态失效（client.rs:122-127 同一口径）。

@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"html"
 	"net"
 	"net/http"
@@ -296,7 +297,7 @@ func (m *Manager) userapiPostBase(ctx context.Context, base, token, path string,
 	req.Header.Set("Accept", "application/json")
 	resp, err := m.cfg.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败（网络），请检查网络后重试")
+		return nil, fmt.Errorf("请求失败（网络）%s，请检查网络后重试", netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	var payload map[string]any

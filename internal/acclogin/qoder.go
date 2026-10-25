@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"io"
 	"net/http"
 	"sort"
@@ -148,7 +149,7 @@ func (m *Manager) pollOnce(ctx context.Context, intl bool, pollURL, machineID st
 	}
 	resp, err := m.cfg.Client.Do(req)
 	if err != nil {
-		return nil, &pollError{Message: "轮询请求失败（网络），请检查网络后重试", retryable: true}
+		return nil, &pollError{Message: "轮询请求失败（网络）" + netdiag.ProxyHint(err) + "，请检查网络后重试", retryable: true}
 	}
 	defer resp.Body.Close()
 	switch {
