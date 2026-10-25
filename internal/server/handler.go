@@ -547,6 +547,15 @@ func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
 // 实时拉取 = 每次 2 个上游探测，客户端周期性刷新模型列表会持续打上游；上游故障时
 // 无冷却窗口，客户端重试即放大请求量——负缓存正是为此设计（见 handler_test 吸收
 // 上游 9832283 的注释）；且 cachedModelsSnapshot（gateway_hint 判定）依赖缓存写入。
+// dynamicModelsFetchMu 模型目录冷缓存的并发收敛（单飞）。
+//
+// 为什么需要：缓存 miss 的瞬间，并发的 /v1/models 请求会**各自**打一次上游
+// 探测——负缓存只在失败后才生效，救不了成功路径的并发窗口（客户端启动时
+// 常常并发拉 N 次模型列表）。拿住该锁串行化拉取，进入后再双检缓存：等锁
+// 期间前一个请求可能已完成填充（成功或负缓存），直接复用不再打上游。
+// 锁跨一次网络往返（秒级）：调用方本来就要等这次响应，串行等待不放大延迟。
+var dynamicModelsFetchMu sync.Mutex
+
 func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	dynamicModelsCache.RLock()
 	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
@@ -555,6 +564,21 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 		return out
 	}
 	// 失败负缓存：冷却期内不再请求上游。
+	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
+		dynamicModelsCache.RUnlock()
+		return nil
+	}
+	dynamicModelsCache.RUnlock()
+
+	dynamicModelsFetchMu.Lock()
+	defer dynamicModelsFetchMu.Unlock()
+	// 双检（等锁期间可能已被并发请求填充；判据与入口处完全一致）。
+	dynamicModelsCache.RLock()
+	if len(dynamicModelsCache.ids) > 0 && time.Since(dynamicModelsCache.fetched) < dynamicModelsTTL {
+		out := dynamicModelsCache.ids
+		dynamicModelsCache.RUnlock()
+		return out
+	}
 	if !dynamicModelsCache.lastFail.IsZero() && time.Since(dynamicModelsCache.lastFail) < modelsFetchFailCooldown {
 		dynamicModelsCache.RUnlock()
 		return nil
