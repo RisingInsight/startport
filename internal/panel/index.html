@@ -2930,15 +2930,17 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 
 <div class="us-tip" id="usTip" hidden></div>
 
-<!-- 加载顺序即依赖顺序：core.js（基础设施）→ app.js（视图主体）→ keys.js（密钥视图）。
-     classic scripts 共享全局作用域，顶层绑定只可向前引用；新增模块追加到末尾。 -->
+<!-- 加载顺序即依赖顺序：core.js（基础设施）→ qr.js（纯函数库，零 DOM 依赖）→
+     app.js（视图主体）→ keys.js（密钥视图）。classic scripts 共享全局作用域，
+     顶层绑定只可向前引用；新增模块按依赖位置插入。 -->
 <!-- 前端资源改动时递增 v：页面是 no-store，但旧磁盘缓存仍可能命中；query 强制换 URL。 -->
-<script src="core.js?v=ui29"></script>
-<script src="app.js?v=ui29"></script>
-<script src="keys.js?v=ui29"></script>
-<script src="ext.js?v=ui29"></script>
-<script src="extwiz.js?v=ui29"></script>
-<script src="captcha.js?v=ui29"></script>
-<script src="acct.js?v=ui29"></script>
+<script src="core.js?v=ui30"></script>
+<script src="qr.js?v=ui30"></script>
+<script src="app.js?v=ui30"></script>
+<script src="keys.js?v=ui30"></script>
+<script src="ext.js?v=ui30"></script>
+<script src="extwiz.js?v=ui30"></script>
+<script src="captcha.js?v=ui30"></script>
+<script src="acct.js?v=ui30"></script>
 </body>
 </html>

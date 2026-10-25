@@ -992,65 +992,9 @@ function renderQoderLoad(usage) {
   const cred = series.reduce((n, p) => n + Number(p.credits || 0), 0);
   if (note) note.textContent = req + ' 请求 / ' + err + ' 失败'
     + (cred > 0 ? ' · ' + fmtCredit(cred) + ' 积分' : ' · 渠道未上报积分');
-  renderQoderLoadSvg(host, pts);
-}
-function renderQoderLoadSvg(host, pts) {
-  const W = 1200, H = 260, PL = 52, PR = 60, PT = 16, PB = 30;
-  const iw = W - PL - PR, ih = H - PT - PB;
-  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
-  const span = Math.max(1, t1 - t0);
-  const max = Math.max(1, ...pts.map(p => p.req));
-  let minGap = Infinity;
-  for (let i = 1; i < pts.length; i++) minGap = Math.min(minGap, pts[i].t - pts[i - 1].t);
-  if (!isFinite(minGap) || minGap <= 0) minGap = span;
-  const bw = Math.max(2, Math.min(34, iw * (minGap / span) * 0.7));
-  const xOf = t => PL + bw / 2 + (t - t0) / span * Math.max(1, iw - bw);
-  const yOf = v => PT + ih - ih * (v / max);
-  const cMax = Math.max(0.0001, ...pts.map(p => p.credits));
-  const cyOf = v => PT + ih - ih * (v / cMax);
-  let out = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" preserveAspectRatio="xMidYMid meet">';
-  for (let i = 0; i <= 4; i++) {
-    const y = PT + ih - ih * i / 4;
-    out += '<line class="gl" x1="' + PL + '" y1="' + y.toFixed(1) + '" x2="' + (W - PR) + '" y2="' + y.toFixed(1) + '"/>';
-    out += '<text class="lb" x="' + (PL - 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' + fmtTok(max * i / 4) + '</text>';
-    out += '<text class="lb-r" x="' + (W - PR + 6) + '" y="' + (y + 3.5).toFixed(1) + '">' + fmtCredit(cMax * i / 4) + '</text>';
-  }
-  const yBase = PT + ih;
-  pts.forEach((p, i) => {
-    const x = xOf(p.t) - bw / 2;
-    out += '<g class="usbarg" data-i="' + i + '">';
-    const h = ih * (p.req / max);
-    if (p.req > 0) {
-      out += '<rect class="bar" x="' + x.toFixed(1) + '" y="' + (yBase - h).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + Math.max(1, h).toFixed(1) + '"/>';
-      if (p.err > 0) {
-        const eh = Math.max(2, h * p.err / p.req);
-        out += '<rect class="bar err" x="' + x.toFixed(1) + '" y="' + (yBase - eh).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + eh.toFixed(1) + '"/>';
-      }
-    }
-    out += '<rect class="usbar-hit" x="' + x.toFixed(1) + '" y="' + PT + '" width="' + bw.toFixed(1) + '" height="' + ih + '"/>';
-    out += '</g>';
-  });
-  const line = pts.map(p => xOf(p.t).toFixed(1) + ',' + cyOf(p.credits).toFixed(1)).join(' ');
-  out += '<polyline class="cred" points="' + line + '"/>';
-  out += '<line class="ax" x1="' + PL + '" y1="' + yBase + '" x2="' + (W - PR) + '" y2="' + yBase + '"/>';
-  const TICKS = Math.min(4, pts.length);
-  const used = new Set();
-  for (let k = 0; k < TICKS; k++) {
-    const target = t0 + span * (TICKS === 1 ? 0.5 : k / (TICKS - 1));
-    let bi = 0, best = Infinity;
-    for (let i = 0; i < pts.length; i++) {
-      const dd = Math.abs(pts[i].t - target);
-      if (dd < best) { best = dd; bi = i; }
-    }
-    if (used.has(bi)) continue;
-    used.add(bi);
-    const p = pts[bi], cx = xOf(p.t);
-    const anchor = cx < PL + 16 ? 'start' : (cx > W - PR - 16 ? 'end' : 'middle');
-    out += '<text class="lb" x="' + Math.max(PL, Math.min(W - PR, cx)).toFixed(1) + '" y="' + (H - 8) +
-      '" text-anchor="' + anchor + '">' + esc(fmtTokTimeLabel(p)) + '</text>';
-  }
-  out += '</svg>';
-  host.innerHTML = out;
+  // 与首页负载带共用同一 SVG 实现（app.js renderLoadChartSvg）——此前这里
+  // 维护着一份几乎逐行重复的渲染器。池分析恒为按天粒度，daily=true 不画跨天线。
+  host.innerHTML = renderLoadChartSvg(pts, true);
   usTipHide();
   bindChartTips(host, pts, { html: p => usLoadTipHTML(p, true) });
 }
