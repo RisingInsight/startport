@@ -34,14 +34,14 @@ func TestParseVersionAndNewer(t *testing.T) {
 
 // 可控的假 GitHub 源。
 type fakeGitHub struct {
-	mu      sync.Mutex
-	tag     string
-	pub     string
-	status  int
+	mu       sync.Mutex
+	tag      string
+	pub      string
+	status   int
 	redirect string
 }
 
-func (f *fakeGitHub) set(tag string) { f.mu.Lock(); f.tag = tag; f.mu.Unlock() }
+func (f *fakeGitHub) set(tag string)  { f.mu.Lock(); f.tag = tag; f.mu.Unlock() }
 func (f *fakeGitHub) setStatus(s int) { f.mu.Lock(); f.status = s; f.mu.Unlock() }
 
 func (f *fakeGitHub) handler() http.HandlerFunc {

@@ -18,7 +18,7 @@ func TestBalanceSupported(t *testing.T) {
 		}
 	}
 	// TRAE：queryTraeBalanceAt 实现与单测已就位（trae_balance.go），能力开关随
-		// platform.go TRAE 条目接线时移入上方清单。
+	// platform.go TRAE 条目接线时移入上方清单。
 	for _, p := range []string{account.PlatformTrae, account.PlatformCustom} {
 		if BalanceSupported(p) {
 			t.Errorf("%s 不应支持余额查询", p)
