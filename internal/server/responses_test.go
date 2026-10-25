@@ -4,7 +4,9 @@
 package server
 
 import (
+	"context"
 	"reflect"
+	"time"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -341,5 +343,42 @@ func TestResponsesToolCallOutputIndexContiguous(t *testing.T) {
 	}
 	if got := responsesAddedIndexes(rec2.Body.String()); !reflect.DeepEqual(got, []int{0, 1}) {
 		t.Errorf("纯工具流的 output_index 序列 = %v, want [0 1]\n完整输出:\n%s", got, rec2.Body.String())
+	}
+}
+
+// ext 流式翻译的单行上限（bufio.Scanner 8MB）回归：超长行属畸形流，此前
+// Scanner 以 ErrTooLong 静默终止后照常补收尾骨架——客户端把截断流当完整
+// 响应（/v1/messages 补 message_stop、/v1/responses 补 response.completed），
+// 残缺输出被喂进后续轮次。现在必须显式 error 事件终止，且 error 之后不补骨架。
+func TestExtStreamOversizedLineEmitsError(t *testing.T) {
+	big := "data: " + strings.Repeat("a", 9<<20) + "\n\n"
+	h := NewHandler(Config{})
+	tail := func(s string) string {
+		if len(s) > 400 {
+			return s[:400]
+		}
+		return s
+	}
+
+	rec := httptest.NewRecorder()
+	h.extMessagesStream(rec, &extchan.Channel{Name: "t"}, nil, "m",
+		io.NopCloser(strings.NewReader(big)), time.Now(), "")
+	out := rec.Body.String()
+	if !strings.Contains(out, "event: error") {
+		t.Errorf("/v1/messages 超长行应显式 error 事件，输出尾部:\n%s", tail(out))
+	}
+	if strings.Contains(out, "event: message_stop") {
+		t.Error("/v1/messages error 之后不得补收尾骨架（message_stop）")
+	}
+
+	rec2 := httptest.NewRecorder()
+	h.responsesStreamFromReader(rec2, context.Background(), "m",
+		io.NopCloser(strings.NewReader(big)), "", &extchan.Channel{Name: "t"}, nil, time.Now())
+	out2 := rec2.Body.String()
+	if !strings.Contains(out2, "event: error") {
+		t.Errorf("/v1/responses 超长行应显式 error 事件，输出尾部:\n%s", tail(out2))
+	}
+	if strings.Contains(out2, "event: response.completed") {
+		t.Error("/v1/responses error 之后不得补 completed 骨架")
 	}
 }

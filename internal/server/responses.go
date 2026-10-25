@@ -910,6 +910,9 @@ func (h *Handler) responsesStreamFromReader(w http.ResponseWriter, ctx context.C
 	x := newResponsesStreamXlator(display, responsesEventWriter(out, nil))
 	x.start()
 	sc := bufio.NewScanner(rc)
+	// 单行上限 8MB：超限行（畸形流）由 Scanner 以 ErrTooLong 终止——此前静默
+	// 结束并补 completed 骨架，客户端把截断流当完整响应。改为显式 error 事件
+	// 终止（与流中错误帧同语义：error 之后不补 completed）。
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
@@ -923,6 +926,14 @@ func (h *Handler) responsesStreamFromReader(w http.ResponseWriter, ctx context.C
 		if !x.ingest(payload) {
 			return // 流中错误帧：error 事件已透出，不补 completed
 		}
+	}
+	if serr := sc.Err(); serr != nil {
+		x.sendEvent("error", map[string]any{
+			"code":    "api_error",
+			"message": "upstream stream read error: " + serr.Error(),
+			"param":   nil,
+		})
+		return
 	}
 	x.finish()
 	if x.hasUsage {

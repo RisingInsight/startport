@@ -712,6 +712,10 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 	x.start()
 
 	sc := bufio.NewScanner(rc)
+	// 单行上限 8MB：SSE 按行分帧，超限行属畸形流（上游缺陷）。Scanner 以
+	// ErrTooLong 终止——此前循环静默结束并照常补收尾骨架，客户端把截断流当
+	// 完整 message（后续轮次喂进残缺上下文）。改为显式 error 事件终止：
+	// error 之后不补骨架（与流中错误帧同语义）。
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
@@ -725,6 +729,13 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 		if !x.ingest(payload) {
 			return // 流中错误帧：error 事件已透出，不补收尾骨架
 		}
+	}
+	if serr := sc.Err(); serr != nil {
+		x.sendEvent("error", map[string]any{
+			"type":  "error",
+			"error": map[string]any{"type": "api_error", "message": "upstream stream read error: " + serr.Error()},
+		})
+		return
 	}
 	x.finish()
 

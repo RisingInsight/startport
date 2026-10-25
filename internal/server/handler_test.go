@@ -2134,3 +2134,46 @@ func TestChatTransportClientDisconnectDoesNotDegrade(t *testing.T) {
 		t.Fatalf("断连不应把账号逐出可选池: %v", uids)
 	}
 }
+
+// TestModelsFetchSingleflight 冷缓存并发收敛回归：N 个并发 /v1/models 请求在
+// 缓存 miss 的瞬间只应触发**一次**上游拉取。此前无单飞——负缓存只在失败后
+// 生效，救不了成功路径：客户端启动时并发拉 N 次模型列表就打 N 次上游
+// （每次 2 个探测）。一次 FetchModels = 企业 + v3 两路探测，故 8 并发收敛后
+// 上游往返数应为 2（一次拉取），而非 16。
+func TestModelsFetchSingleflight(t *testing.T) {
+	dynamicModelsCache.Lock()
+	dynamicModelsCache.ids = nil
+	dynamicModelsCache.fetched = time.Time{}
+	dynamicModelsCache.lastFail = time.Time{}
+	dynamicModelsCache.Unlock()
+
+	var calls atomic.Int32
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls.Add(1)
+		return 200, `{"code":0,"data":{"models":[{"id":"sf-model","maxInputTokens":65536,"maxOutputTokens":8192}]}}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	const n = 8
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/models", nil))
+			if rec.Code != http.StatusOK {
+				t.Errorf("并发请求 code=%d want 200", rec.Code)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := calls.Load(); got != 2 {
+		t.Errorf("%d 个并发冷缓存请求打了 %d 次上游（want 2：单飞收敛未生效）", n, got)
+	}
+}
