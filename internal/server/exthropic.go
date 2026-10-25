@@ -32,6 +32,7 @@ import (
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/provider"
 	"github.com/RisingInsight/startport/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/upstream"
 	"github.com/RisingInsight/startport/internal/usage"
 )
 
@@ -505,7 +506,9 @@ func mapAnthropicStop(openaiFinish string) string {
 }
 
 // anthropicEventWriter 构造 SSE 事件写出闭包（ext 流式与主池回退桥共用）。
-func anthropicEventWriter(w http.ResponseWriter, fl http.Flusher) func(string, any) {
+// w 取 io.Writer（而非 http.ResponseWriter）：ext 流式路径要传入 upstream.SSEWriter
+// 以获得空闲心跳与写串行化，flush 职责也由它承担（此时 fl 传 nil）。
+func anthropicEventWriter(w io.Writer, fl http.Flusher) func(string, any) {
 	return func(event string, payload any) {
 		b, err := json.Marshal(payload)
 		if err != nil {
@@ -562,7 +565,7 @@ func (x *anthropicStreamXlator) start() {
 
 // ingest 处理一个 OpenAI chunk payload（"data: " 后、"[DONE]" 前的 JSON）。
 // 返回 false = 流中错误帧已按 Anthropic error 事件透出，调用方立即终止
-//（不再 finish——error 之后补收尾骨架是畸形流）。
+// （不再 finish——error 之后补收尾骨架是畸形流）。
 func (x *anthropicStreamXlator) ingest(payload string) bool {
 	x.start()
 	var chunk struct {
@@ -697,7 +700,15 @@ func (h *Handler) extMessagesStream(w http.ResponseWriter, ch2 *extchan.Channel,
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	x := newAnthropicStreamXlator(display, anthropicEventWriter(w, flusher))
+	// 客户端保活心跳（见 upstream/sse_heartbeat.go）：本出口是**翻译型**流——只有
+	// 上游帧到达、翻译状态机才会写出 Anthropic 事件，上游静默期零字节。这与
+	// /v1/chat/completions 是同一个故障面（Claude Code 走 /v1/messages，首帧前
+	// prefill 静默同样会被判 idle timeout），此前只有 openai 入口有 SSEWriter。
+	// 事件与心跳都经 SSEWriter 单锁串行化，心跳只在行边界补 `: keep-alive`，
+	// 不打断任何 event:/data: 帧；defer Close 覆盖三条退出路径。
+	out := upstream.NewSSEWriterInterval(w, flusher, sseHeartbeatInterval)
+	defer out.Close()
+	x := newAnthropicStreamXlator(display, anthropicEventWriter(out, nil))
 	x.start()
 
 	sc := bufio.NewScanner(rc)
@@ -761,7 +772,7 @@ func (h *Handler) recordExtMessagesUsage(apiKeyName string, ch2 *extchan.Channel
 // 既有 chatCompletions 主链路——选号/粘性/轮转/冷却/错误处置/提示词模式/记账
 // 全部复用，不新增第二套池语义。响应经 poolAnthropicBridge 实时折回 Anthropic
 // 形态（流式逐帧翻译，不牺牲首字延迟）；JSONL 请求归档与 chat 路径同一套包装
-//（Path 记 /v1/messages）。主池路径自带的用量记账已生效，本函数不重复记账。
+// （Path 记 /v1/messages）。主池路径自带的用量记账已生效，本函数不重复记账。
 func (h *Handler) handleMessagesPoolFallback(w http.ResponseWriter, r *http.Request, areq *anthropicReq) {
 	if h.cfg.Pool == nil {
 		writeAnthropicError(w, http.StatusNotImplemented, "api_error",
@@ -815,15 +826,15 @@ func (h *Handler) handleMessagesPoolFallback(w http.ResponseWriter, r *http.Requ
 //   - 非 200：整包缓冲，finish 时折回 Anthropic 错误信封（type 按状态映射）。
 type poolAnthropicBridge struct {
 	http.ResponseWriter // Header() 直通真实 w：流式头（event-stream 等）由 sse.go 正常落位
-	display  string
-	x        *anthropicStreamXlator
-	mode     int // 0=未定 1=SSE 逐帧翻译 2=整包缓冲
-	status   int // WriteHeader 记录（非 200 时 finish 折回错误形态）
-	sseBuf   []byte // SSE 帧缓冲（每帧以 \\n\\n 结束后复用）
-	bodyBuf  []byte // 非流式/错误体缓冲
-	sseDone  bool   // [DONE] 或流中错误帧之后不再翻译
-	errored  bool   // 流中错误帧已透出（finish 不再补收尾骨架——error 事件后接 message_stop 是畸形流）
-	finished bool
+	display             string
+	x                   *anthropicStreamXlator
+	mode                int    // 0=未定 1=SSE 逐帧翻译 2=整包缓冲
+	status              int    // WriteHeader 记录（非 200 时 finish 折回错误形态）
+	sseBuf              []byte // SSE 帧缓冲（每帧以 \\n\\n 结束后复用）
+	bodyBuf             []byte // 非流式/错误体缓冲
+	sseDone             bool   // [DONE] 或流中错误帧之后不再翻译
+	errored             bool   // 流中错误帧已透出（finish 不再补收尾骨架——error 事件后接 message_stop 是畸形流）
+	finished            bool
 }
 
 // WriteHeader 拦截：200 不转发（SSE 靠首写隐式 200，头已经 Header() 直通落位；
@@ -858,7 +869,20 @@ func (b *poolAnthropicBridge) Write(p []byte) (int, error) {
 			frame := string(b.sseBuf[:idx])
 			b.sseBuf = b.sseBuf[idx+2:]
 			if !strings.HasPrefix(frame, "data: ") {
-				continue // 注释行/空行
+				// SSE 注释帧（`: keep-alive`）必须原样转发给客户端：它是网关心跳，
+				// 唯一作用就是让客户端/代理看到「链路还活着」。此前这里一律 continue，
+				// 于是 upstream.StreamHint 写出的注释帧在这一层被**静默吞掉**——
+				// StreamHint 侧看到的是 Write 成功（n 字节 / err=nil），客户端却一个
+				// 字节都没收到，/v1/messages 的首帧前静默期又退回零字节（Claude Code
+				// 类客户端仍会 idle timeout）。
+				// 只转发 `:` 开头的帧（标准注释语义，任何 SSE 客户端都忽略）；其他非
+				// data 行（上游的 event:/id: 等）继续丢弃，翻译语义不变。
+				if strings.HasPrefix(frame, ":") {
+					if _, werr := io.WriteString(b.ResponseWriter, frame+"\n\n"); werr == nil {
+						b.Flush()
+					}
+				}
+				continue // 空行/其他非 data 行
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(frame, "data: "))
 			if payload == "" {

@@ -851,6 +851,15 @@ func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *po
 	if err != nil {
 		return nil, err
 	}
+	// 盘上旧配置（用于算出"本次真正改动且需重启"的字段子集）：必须在覆盖写之前读。
+	// 读不到/解析失败时 prevCfg 为 nil → 退回完整清单（宁可多提示，不可漏提示）。
+	var prevCfg *Config
+	if oldRaw, rerr := os.ReadFile(path); rerr == nil {
+		var prev Config
+		if json.Unmarshal(oldRaw, &prev) == nil {
+			prevCfg = &prev
+		}
+	}
 	// 外部渠道出站 SSRF 校验（与启动期同红线）：面板改 base_url 指向内网/
 	// 元数据地址时保存失败并回显原因。allow_private 渠道放行内网（自建聚合器），
 	// 元数据端点恒拒。
@@ -930,7 +939,7 @@ func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *po
 	// 丢缓存。新增/删除渠道即时生效，无需重启。
 	extMgr.ReplaceAll(extChannelDefs(newCfg.ExtChannels))
 
-	return restartRequiredFields(newCfg), nil
+	return restartRequiredFieldsChanged(prevCfg, newCfg), nil
 }
 
 // saveChannelsAccounts 账号中心投影的落盘入口（架构 §4.2）：把 acctchan 投影出的
@@ -1125,6 +1134,47 @@ func restartRequiredFields(c *Config) []string {
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
 	out = append(out, "server.read_timeout")
 	out = append(out, "update.check_enabled", "update.check_interval_hours")
+	return out
+}
+
+// restartRequiredFieldsChanged 返回「本次保存真正改动、且无法热生效」的字段名。
+//
+// 为什么要 diff：restartRequiredFields 恒返回完整清单（14 项，见其注释），面板
+// 直接拿长度提示「配置已保存，其中 N 项需重启进程生效」——用户只改了能热生效的
+// 字段（签到时段、池并发、冷却时长…）也会看到这条提示，误以为改动没生效，去做
+// 一次没有必要的重启；反过来，提示里混着一堆没动过的字段，真正的重启项反而被
+// 淹没。这里按值比较，只报**本次真的变了**的项。
+//
+// prev == nil（旧配置读不到/解析失败）时退回完整清单：宁可多提示，不可漏提示。
+func restartRequiredFieldsChanged(prev, next *Config) []string {
+	if next == nil {
+		return nil
+	}
+	if prev == nil {
+		return restartRequiredFields(next)
+	}
+	var out []string
+	add := func(name string, changed bool) {
+		if changed {
+			out = append(out, name)
+		}
+	}
+	add("listen", prev.Listen != next.Listen)
+	add("auth_dir", prev.AuthDir != next.AuthDir)
+	add("state_file", prev.StateFile != next.StateFile)
+	add("upstream.timeout_seconds", prev.Upstream.TimeoutSeconds != next.Upstream.TimeoutSeconds)
+	add("upstream.header_timeout_seconds", prev.Upstream.HeaderTimeoutSeconds != next.Upstream.HeaderTimeoutSeconds)
+	add("upstream.idle_timeout_seconds", prev.Upstream.IdleTimeoutSeconds != next.Upstream.IdleTimeoutSeconds)
+	add("upstream.user_agent", prev.Upstream.UserAgent != next.Upstream.UserAgent)
+	add("upstash", prev.Upstash.URL != next.Upstash.URL || prev.Upstash.Token != next.Upstash.Token)
+	add("session_sticky.ttl", prev.SessionSticky.TTL != next.SessionSticky.TTL)
+	add("session_sticky.gc_interval", prev.SessionSticky.GCInterval != next.SessionSticky.GCInterval)
+	add("logging.request_archive_enabled", prev.Logging.RequestArchiveEnabled != next.Logging.RequestArchiveEnabled)
+	add("logging.request_retention_days", prev.Logging.RequestRetentionDays != next.Logging.RequestRetentionDays)
+	add("logging.request_archive_max_mb", prev.Logging.RequestArchiveMaxMB != next.Logging.RequestArchiveMaxMB)
+	add("server.read_timeout", prev.Server.ReadTimeout != next.Server.ReadTimeout)
+	add("update.check_enabled", prev.Update.CheckEnabled != next.Update.CheckEnabled)
+	add("update.check_interval_hours", prev.Update.CheckIntervalHours != next.Update.CheckIntervalHours)
 	return out
 }
 

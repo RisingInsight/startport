@@ -162,6 +162,9 @@ func NewHandler(cfg Config) *Handler {
 	h.mux.HandleFunc("GET /v1/models", h.chatAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	// 存活探针（liveness）：恒 200，只证明 HTTP 栈还能应答。
+	// 与 /healthz 的分工见 livez 注释（就绪 vs 存活）。
+	h.mux.HandleFunc("GET /livez", h.livez)
 	if cfg.Panel != nil {
 		h.mux.Handle("/startport/", cfg.Panel) // /panel → /startport/ 由 ServeMux 自动重定向
 	}
@@ -246,6 +249,20 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 		"service":        ServiceName,
 		"realm_servable": realmServable,
 	})
+}
+
+// livez 存活探针（liveness）：恒 200，只证明进程的 HTTP 栈还能应答。
+//
+// 为什么需要它（与 /healthz 的分工）：/healthz 是**就绪**语义——无可用账号、
+// 或账号全部占满在途时返回 503，供负载均衡摘流量。容器编排的 HEALTHCHECK 若
+// 直接探 /healthz，那么「刚部署还没加账号」「只用外部渠道（ext:）没有 CodeBuddy
+// 账号」这类完全正常的实例会被永久标记 unhealthy（docker ps 显示 unhealthy、
+// depends_on: service_healthy 的编排直接起不来），而它其实工作得好好的。
+// 存活探针只回答"进程还在吗"，不掺业务状态。
+func (h *Handler) livez(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Service", ServiceName)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"alive": true, "service": ServiceName})
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
@@ -659,6 +676,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// modelBlock 记录本次是否因「模型级冷却」而选不到号（下方 acct==nil 分支填充）。
 	// 默认零值 Blocked=false = 按既有的"没有可用账号"口径报错。
 	var modelBlock pool.ModelBlockStatus
+	// inFlightFull 记录「选不到号」的真实成因：是并发槽位打满，还是号本身不可用。
+	// 两者对外都是 503，但排查方向完全相反——前者要调 max_in_flight（客户端并发
+	// 高于单号在途上限，dsh 这类 agent 并行工具调用时峰值可到十几），后者是号挂了/
+	// 积分保底/冷却。此前一律记 no_healthy_account，日志里分不清（实测 16:38 那批
+	// 毫秒级 503 全是槽位打满，却和「号全挂」长一个样）。
+	var inFlightFull bool
 
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
@@ -871,6 +894,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 两者此前都报 no_healthy_account，导致「模型不可用」被读成「号全挂了」。
 			// 在这里取一次快照，供下方错误构造区分（issue #102 附带发现 1）。
 			modelBlock = h.cfg.Pool.ModelBlocked(bareModel)
+			// 区分「槽位打满」与「号真不可用」：取本 realm 快照，healthy>0 且全部
+			// 达到在途上限 → 并发阻塞（客户端应退避/降低并发，不是账号故障）。
+			// 与 /healthz 的 ServableNow 同口径（healthy 里排除 inFlightFull）。
+			if _, healthy, _, _, full := h.cfg.Pool.CountsDetailedForRealm(realm); healthy > 0 && full >= healthy {
+				inFlightFull = true
+			}
 			break
 		}
 		st.uid = acct.UID
@@ -952,6 +981,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
+			// 客户端主动断连：传输层错误只是断连的连带（上游请求随请求 ctx 一起
+			// 取消）。账号本身健康——与流式分支「写客户端失败 = 人已走」同哲学，
+			// 不喂连败计数（否则用户连续取消几次请求就把单账号池降权出池，全网关
+			// 503 十分钟），也不解绑粘性（绑定的号没有故障，重连后应继续复用）。
+			// 轮转已无意义：ctx 已取消，rotateBackoff 必然返回 false。
+			if r.Context().Err() != nil {
+				break
+			}
 			h.cfg.Pool.NoteFailures(acct.UID)
 			fail(acct.UID)
 			if !rotateBackoff(i, r.Context()) {
@@ -1110,6 +1147,44 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeStreamError
 				log.Printf("WARN: [server] stream acct=%s model=%s: upstream error frame kind=%s payload=%s",
 					logfmt.Label(acct.UID, acct.Nickname), bareModel, kind, logfmt.Truncate(errFrame, 200))
+			case upstream.IsUpstreamAbortError(sErr):
+				// 读上游中断（上游掐流 / 传输层读超时 / 空闲看门狗 idle.go 掐流）：
+				// 这是**上游卡死**，不是「客户端走人」。此前本类错误与「写客户端失败」
+				// 共用同一条通道并被无条件 NoteSuccess，于是：上游卡死 → 网关空闲超时
+				// 断开 → 记成成功 → 账号健康度/熔断计数/连败降级全都不动 → 下一个
+				// 请求继续选中这个已经卡死的账号，形成无限重试（只能重启恢复）。
+				//
+				// 两类必须分开记账，判据与传输层的 isUpstreamTimeout 一致：请求 ctx
+				// 是否已取消。客户端主动断连时 r.Context() 已取消，且上游 body 随请求
+				// ctx 取消而读中断——那只是断连的连带，账号健康，回落中断语义；
+				// 客户端仍在（ctx 未取消）却读中断 → 只可能是上游自己的问题。
+				if r.Context().Err() != nil {
+					// 客户端已走：与下面的写失败分支同语义（人走了不算账号失败）。
+					st.outcome = reqlog.OutcomeInterrupted
+					h.cfg.Pool.NoteSuccess(acct.UID)
+					h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
+					if sessKey != "" && h.cfg.Session != nil {
+						h.cfg.Session.Bind(sessKey, acct.UID)
+					}
+				} else {
+					// 上游卡死：**不 NoteSuccess、不清 11102 负缓存、不绑粘性**（与
+					// error 帧分支同哲学——该号本轮没交出完整结果，不能据此认为可用）。
+					st.status = http.StatusBadGateway
+					st.outcome = reqlog.OutcomeStreamError
+					// 惩罚维度取**连败降权**（NoteFailures），不用 applyErrorPolicy(ErrServer)
+					// 的熔断（NoteError）。两条都不新造维度，但代价差一个量级，且本机是
+					// 单账号池（cn/global 各 total=1）：
+					//   - 熔断：3 次 → 冷却 30min 起、指数到 6h。唯一账号被熔断后，即使上游
+					//     1 分钟后恢复，用户还要干等熔断到期（全程 503）——比原来「一直转圈」
+					//     好不了多少，等于把上游的抖动放大成半小时不可用；
+					//   - 降权：5 次 → 降权 10min，到期自动回池重试，单号池代价可控。
+					// 哲学上也与仓库既有口径一致：传输层 isUpstreamTimeout 那段明确写了
+					// 「超时往往是上游全局慢，换号也一样慢」，故超时/读中断类不按 5xx 连坐
+					// 熔断。真正必须守住的是「不记成功、计数不被清零」——那才是本 P0 的根因。
+					h.cfg.Pool.NoteFailures(acct.UID)
+					log.Printf("WARN: [server] stream acct=%s model=%s: upstream aborted mid-stream (upstream fault, not noted success): %s",
+						logfmt.Label(acct.UID, acct.Nickname), bareModel, logfmt.Truncate(sErr.Error(), 200))
+				}
 			case sErr != nil:
 				// 客户端写失败（断连）：上游帧无恙，账号健康——账号侧照常记成功
 				// （与 default 同语义），请求日志归为 Interrupted（人已走，未完成）。
@@ -1237,6 +1312,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"
+	// 并发槽位打满：号是健康的，只是同时在途请求达到上限（见上方 inFlightFull
+	// 声明处的成因说明）。给独立 code，别让「并发不够」和「号全挂」共用一个词——
+	// 前者调 max_in_flight 就能解决，后者要去查账号。
+	if inFlightFull {
+		code = "account_busy"
+		msg = "all accounts reached their in-flight concurrency limit; retry after current requests finish"
+	}
 	// 上游超时：轮转已在传输层分支止损（见 isUpstreamTimeout），这里给一条**能区分**
 	// 的文案，别混进"没有可用账号"——两者的排查方向完全不同。
 	if errors.Is(lastErr, errUpstreamTimeout) {
@@ -1272,6 +1354,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 该做的是换个模型。用 400 + 明确的 code 把不可重试的性质讲清楚。
 			code = "model_unavailable"
 			status = http.StatusBadRequest
+		case upstream.ErrClient:
+			// 上游 4xx 且不属于上面任何具体形态（限流/账号故障/模型缺失/内容审核/
+			// 解析失败/图片无效）。典型是 11133 model_param_invalid 家族：hint 层
+			// 已经写明"请求参数被模型供应商拒绝"，但 code 停在默认的
+			// no_healthy_account、状态码停在 503 —— 与 #81（ErrModelBlocked）同一个
+			// 病：把**确定不可重试**的请求错误伪装成"账号暂时不可用、稍后再试"，
+			// 客户端于是对必然失败的请求无限重试，监控侧也把它记成账号故障。
+			// 400/422 是"这个 body 本身不被接受"，直接回 400 + bad_params；
+			// 其余 4xx（403 业务拒绝等）语义模糊（可能是账号侧权限），保持原状。
+			if ue.Status == http.StatusBadRequest || ue.Status == http.StatusUnprocessableEntity {
+				status = http.StatusBadRequest
+				code = "bad_params"
+				msg = "request was rejected by upstream; check the request body and model capabilities"
+			}
 		}
 		if s := strings.TrimSpace(ue.Msg); s != "" {
 			// 上游原文优先：透传 code/msg/requestId，不拼接本地前缀。
@@ -1305,6 +1401,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
+	// 落进请求日志的 err_code：此前主链路从不赋值，failed 请求在归档/面板里
+	// err_code 恒为空（ext 链路有值），只能看到 503 却分不清成因。至此与
+	// extrelay 的口径一致。
+	st.errCode = code
 	st.outcome = reqlog.OutcomeHTTPError
 }
 

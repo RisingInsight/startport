@@ -170,7 +170,8 @@ Eight native platforms (each with a dedicated adapter) plus generic channels (co
 | `POST /v1/responses` | Bearer | OpenAI Responses surface (Codex CLI entry point) |
 | `GET /v1/models` | Bearer | Catalog with context window, output cap, reasoning levels, channel origin |
 | `GET /status` | Bearer | Pool state, credential health, per-model rate-limit view |
-| `GET /healthz` | none | Health check (identifies itself with `service: "starport"`) |
+| `GET /healthz` | none | Readiness: 503 when no account is servable (load balancers use this) |
+| `GET /livez` | none | Liveness: always 200, only proves the process is up (container HEALTHCHECK uses this) |
 
 **The model name is the route**
 
@@ -183,6 +184,11 @@ Eight native platforms (each with a dedicated adapter) plus generic channels (co
 | channel alias | `ext:<channel>/<alias>` | mapped to the real upstream model id |
 
 `/v1/messages` and `/v1/responses` fall back to the main pool for non-`ext:` models — meaning **Claude Code and Codex CLI can both consume the account pool directly** instead of detouring through a third party.
+
+> ⚠️ **Bare names do not resolve identically on all three surfaces.**
+> On `/v1/chat/completions` a bare name goes to the **main pool only**. On `/v1/messages` and `/v1/responses` a bare name is first matched **uniquely against ext channels** and only falls back to the main pool when nothing matches — that lets ext-only deployments work without prefixing every model.
+> The catch: if a bare name also exists in an ext channel (e.g. `glm-5.3-flash` both in the CodeBuddy pool and under `ext:autoclaw/`), the same name lands on **different backends with different quotas** depending on the client.
+> Always use a full prefix (`cn:` / `global:` / `ext:<channel>/`) when you need to pin the backend.
 
 ## Quick start
 

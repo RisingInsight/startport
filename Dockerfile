@@ -39,5 +39,5 @@ COPY config.example.json /app/config.json
 USER app
 EXPOSE 7863
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
-  CMD wget -qO- http://127.0.0.1:7863/healthz || exit 1
+  CMD wget -qO- http://127.0.0.1:7863/livez || exit 1
 ENTRYPOINT ["/app/starport", "-config", "/app/config.json"]

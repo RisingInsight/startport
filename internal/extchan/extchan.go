@@ -144,6 +144,20 @@ func (c *Channel) NoteFailure(threshold int, breaker time.Duration, reason strin
 	c.lastErr = reason + " (breaker)"
 }
 
+// NoteStreamAbort 流式「200 开流后读上游失败」的渠道级记账（由 server 侧在流式
+// 透传结束时回调）。
+//
+// 为什么必须由外部回报：Do 返回成功之后流的读写在调用方手里，中途断流的结局
+// 不会回到渠道状态机。此前 server 侧只把请求记为 stream_error、不通知渠道，于是
+// **200 之后卡死的渠道永远不进冷却**——下一个请求继续选中它，主链路那条「越用
+// 越死」的闭环在 ext 侧没合上（只有可观测性变好了）。
+//
+// 口径与 Do 的传输失败一致（extFailThreshold 连败 → extBreaker 熔断），治理参数
+// 留在本包内，server 侧只负责「如实上报结局」。
+func (c *Channel) NoteStreamAbort(reason string) {
+	c.NoteFailure(extFailThreshold, extBreaker, reason)
+}
+
 // 渠道派生状态（面板与 /status 用；不单独存储，按凭证池实时派生）。
 const (
 	// StateAvailable ≥1 条凭证可用。
