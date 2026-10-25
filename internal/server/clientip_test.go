@@ -47,8 +47,8 @@ func TestResolveClientIPTrustsWhenPeerTrusted(t *testing.T) {
 		remote, xff, real, want string
 	}{
 		{"10.1.2.3:1234", "203.0.113.9, 10.1.2.3", "203.0.113.9", "203.0.113.9"}, // XFF 首段优先
-		{"10.1.2.3:1234", "", "203.0.113.9", "203.0.113.9"},                       // 无 XFF 回落 X-Real-IP
-		{"10.1.2.3:1234", "", "", "10.1.2.3"},                                     // 转发头全无 → 直连
+		{"10.1.2.3:1234", "", "203.0.113.9", "203.0.113.9"},                      // 无 XFF 回落 X-Real-IP
+		{"10.1.2.3:1234", "", "", "10.1.2.3"},                                    // 转发头全无 → 直连
 	}
 	for _, c := range cases {
 		if got := resolveClientIP(reqWith(c.remote, c.xff, c.real), nets); got != c.want {

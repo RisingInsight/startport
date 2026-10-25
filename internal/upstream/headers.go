@@ -185,7 +185,7 @@ func (c *Client) injectCodeBuddyRequest(req *http.Request) {
 // 复用同值；TraceID 透传入站值（空 = 回落 conversationRequestID）。
 // messageID（消息级，每条独立）由 ChatHeaders 内部生成，无需外部可见。
 type ChatMeta struct {
-	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
+	ConversationID string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	// CacheConvID prompt_cache_key 会话段的兜底源：ConversationID 为空时用它（内容派生、
 	// 会话内稳定）。**只用于缓存键**，不参与任何出站头——头仍严格透传客户端原值。
 	// 缺了它，无会话键客户端的缓存键会退化成每账号一个定值，同账号所有会话互相覆盖。

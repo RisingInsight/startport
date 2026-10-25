@@ -129,14 +129,14 @@ func (p *Pool) startFlusher() {
 		defer t.Stop()
 		for {
 			select {
-		case <-t.C:
-			p.mu.Lock()
-			// 自然到期的冷却残留 reason 一并扫掉（数据层去脏；接口层另有按查询期过滤）。
-			p.sweepExpiredCoolReasonLocked(time.Now())
-			if p.dirty.Swap(false) {
-				p.saveLocked()
-			}
-			p.mu.Unlock()
+			case <-t.C:
+				p.mu.Lock()
+				// 自然到期的冷却残留 reason 一并扫掉（数据层去脏；接口层另有按查询期过滤）。
+				p.sweepExpiredCoolReasonLocked(time.Now())
+				if p.dirty.Swap(false) {
+					p.saveLocked()
+				}
+				p.mu.Unlock()
 			case <-stopCh:
 				return
 			}

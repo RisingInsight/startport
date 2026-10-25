@@ -1,47 +1,28 @@
-# 行尾统一：仓库内文本文件一律 LF。
+# 文本文件统一 LF 入库/检出。
 #
-# 为什么需要：此前全仓是 CRLF 检出，`gofmt -l` 会把**每一个** .go 文件都报成
-# 未格式化（142 个），CI 的格式检查因此形同虚设；Dockerfile 里还得靠
-# `sed -i 's/\r$//'` 补救脚本行尾。
-#
-# 注意：本文件只约束**后续检出**。已在工作区的文件要重新检出（
-# `git add --renormalize .` 或删掉后 checkout）才会变成 LF。
-
-# 文本文件：检出一律 LF（无论提交时是什么）
-* text=auto eol=lf
-
-# 明确点名的文本类型（避免 auto 把无扩展名文件当二进制）
-*.go       text eol=lf
-*.js       text eol=lf
-*.mjs      text eol=lf
-*.cjs      text eol=lf
-*.css      text eol=lf
-*.html     text eol=lf
-*.json     text eol=lf
-*.yml      text eol=lf
-*.yaml     text eol=lf
-*.md       text eol=lf
-*.sh       text eol=lf
-*.py       text eol=lf
-*.txt      text eol=lf
-go.mod     text eol=lf
-go.sum     text eol=lf
-Dockerfile text eol=lf
-
-# 二进制/产物：不做任何行尾转换
-*.exe   binary
-*.zip   binary
-*.gz    binary
-*.png   binary
-*.jpg   binary
-*.jpeg  binary
-*.gif   binary
-*.ico   binary
-*.woff  binary
-*.woff2 binary
-
-# 语言统计：把产物目录排除在 diff/linguist 之外
-data/**       linguist-vendored
-auths/**      linguist-vendored
-wb2api.exe    binary
-starport.exe  binary
+# 为什么需要：Windows 开发机常设 core.autocrlf=true，工作区被检出成 CRLF 而
+# 仓库对象是 LF——gofmt 对 CRLF 文件全部点名（曾出现 58 个文件的假阳性），
+# 本地 `gofmt -l` 与 CI（ubuntu，LF）判定不一致，掩盖真实的格式回归。
+# 显式 eol=lf 后两端判定恒一致；应用规则后刷新工作区：
+#   git add --renormalize . && git checkout-index -f -a
+*.go           text eol=lf
+*.js           text eol=lf
+*.html         text eol=lf
+*.css          text eol=lf
+*.md           text eol=lf
+*.json         text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.sh           text eol=lf
+*.svg          text eol=lf
+*.mod          text eol=lf
+*.sum          text eol=lf
+*.svg          text eol=lf
+go.work        text eol=lf
+Dockerfile     text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+# 二进制产物（.gitignore 已挡；显式声明防误判）
+*.exe binary
+*.png binary
+*.zip binary
