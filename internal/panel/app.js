@@ -54,6 +54,10 @@ document.querySelectorAll('.nav a').forEach(a => a.onclick = e => { e.preventDef
    其余 hash 仍是顶层视图。手动改地址栏或前进/后退都走这里。 */
 function goHash(hash) {
   const [base, sub] = String(hash || '').split('/');
+  // 老锚点（#accounts / #extchan）必须**原样**交给 go()：goHash 若先归一化成
+  // 'accounts-center'，go() 里的老锚点重定向分支（#accounts → 全部平台、
+  // #extchan → 展开渠道设置抽屉）就永远不会命中——抽屉语义静默丢失。
+  if (base === 'accounts' || base === 'extchan') { go(base); return; }
   const target = base in TITLES ? base : 'accounts-center';
   go(target);
   if (target === 'accounts-center' && sub && typeof selectAcctTab === 'function') {
@@ -98,7 +102,7 @@ function renderAccounts(list) {
       const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
         : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
       tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
-    } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
+    } else tag = '<span class="tag ok">可用</span>';
     // 冷却原因备注：仅「正在冷却」时显示（与徽标倒计时互补）。恢复后一律不显示——
     // 后端 statusOf 已按查询期过滤、flusher 每 5s 扫除过期残留，这里是最后一道
     // 前端防线（覆盖到期与扫除之间的窗口）。
@@ -1916,7 +1920,6 @@ function renderQueue(groups, progress, emptyTitle, emptyDesc) {
     $('qProg').hidden = true; $('qcSummary').textContent = '';
     return;
   }
-  empty.style.display = 'none';
   empty.style.display = 'none';
   let total = 0;
   list.innerHTML = groups.map(g => {
@@ -3827,10 +3830,13 @@ function renderExpirySnapshot(d) {
   });
   const rows = keyed.map(({ a, ms }) => {
     const nm = esc(a.nickname || String(a.uid || '').slice(0, 8));
+    // 行结构与 renderExpiry（逐包明细版）保持一致：色点与账号名包进 .exp-hd
+    //（.exp-row 是纵向 flex，裸放会让色点与名字各占一行），天数走 .exp-days 大字。
     if (!ms || !a.credits_earliest_remaining) {
-      return '<div class="exp-row"><span class="exp-dot" style="background:var(--ok)"></span>' +
-        '<span class="exp-nm">' + nm + '</span>' +
-        '<span class="exp-main">无近期到期批次</span></div>';
+      return '<div class="exp-row"><div class="exp-hd"><span class="exp-dot" style="background:var(--ok)"></span>' +
+        '<span class="exp-nm">' + nm + '</span></div>' +
+        '<div class="exp-days" style="color:var(--ink-3)">无临期</div>' +
+        '<div class="exp-main">无近期到期批次</div></div>';
     }
     const days = Math.max(0, Math.ceil((ms - today.getTime()) / 86400000));
     const remain = Number(a.credits_earliest_remaining || 0);
@@ -3838,13 +3844,13 @@ function renderExpirySnapshot(d) {
     const cls = days <= 3 ? 'var(--bad)' : days <= 7 ? 'var(--warn)' : 'var(--ok)';
     const dayWord = days === 0 ? '今天到期' : days === 1 ? '明天到期' : days + ' 天后到期';
     const when = new Date(ms).toISOString().slice(0, 10);
-    return '<div class="exp-row"><span class="exp-dot" style="background:' + cls + '"></span>' +
-      '<span class="exp-nm">' + nm + '</span>' +
-      '<span class="exp-main">最近到期 <b>' + esc(when) + '</b>（' + dayWord +
-      '）· 该批 <b>' + fmtTok(remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
+    return '<div class="exp-row"><div class="exp-hd"><span class="exp-dot" style="background:' + cls + '"></span>' +
+      '<span class="exp-nm">' + nm + '</span></div>' +
+      '<div class="exp-days" style="color:' + cls + '">' + dayWord + '</div>' +
+      '<div class="exp-main">最近到期 <b>' + esc(when) + '</b> · 该批 <b>' + fmtTok(remain) + '</b> 积分 · 到期前日均需耗 ≥<b>' +
       fmtTok(daily) + '</b>' +
       '<div class="note">仅最早一批，点「检查」看全部到期批次</div>' +
-      '</span></div>';
+      '</div></div>';
   }).join('');
   $('expList').innerHTML = rows || '<div class="empty">没有账号</div>';
   $('expNote').textContent = list.length + ' 个账号 · 快照（来自本地状态，点「检查」拉实时明细）';

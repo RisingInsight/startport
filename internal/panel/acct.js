@@ -747,6 +747,7 @@ function renderAcctUnifiedRow(a) {
   acts.push('<button type="button" class="xs" data-act="toggle" data-id="' + esc(a.id) + '">'
     + (a.disabled ? '启用' : '停用') + '</button>');
   acts.push('<button type="button" class="xs" data-act="del" data-id="' + esc(a.id) + '">删除</button>');
+  // .acts-wrap 提供按钮间距与右对齐：直接 join 的按钮互相贴死，与主账号表的操作列不一致。
   return '<tr' + (a.disabled ? ' style="opacity:.55"' : '') + ' data-acct-id="' + esc(a.id) + '">'
     + '<td><b>' + esc(a.label) + '</b>'
     + (a.note ? '<div class="note">' + esc(a.note) + '</div>' : '')
@@ -759,7 +760,7 @@ function renderAcctUnifiedRow(a) {
     + '<td>' + u.sf + '</td>'
     + '<td>' + u.usage + '</td>'
     + '<td>' + (lastOK ? esc(ago(lastOK)) : '<span class="note">—</span>') + '</td>'
-    + '<td class="c-acts">' + acts.join('') + '</td>'
+    + '<td class="c-acts"><div class="acts-wrap">' + acts.join('') + '</div></td>'
     + '</tr>';
 }
 
@@ -1639,20 +1640,30 @@ async function acctBalance(id, btn) {
 }
 
 async function acctRefreshAll(btn) {
+  // 列表可能因为首屏 401（密钥门未通过时页面就已渲染）而根本没加载成功——此时
+  // acctAccounts 是空的，直接往下走只会弹一句「没有可刷新的账号（需要 refresh_token）」，
+  // 把「列表没取到」误导成「账号不支持刷新」，而用户点的正是唯一能自救的按钮。
+  // 先补一次拉取再判断。
+  if (!acctLoaded || !acctAccounts.length) await loadAcctAccounts();
   const list = acctScopeAccounts().filter(a => a.capabilities && a.capabilities.refresh);
   if (!list.length) { toast('当前范围内没有可刷新的账号（需要 refresh_token）', 'mute'); return; }
   const old = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; }
-  let ok = 0, fail = 0;
+  let ok = 0, fail = 0, firstErr = '';
   for (let i = 0; i < list.length; i++) {
     if (btn) btn.textContent = '刷新中 ' + (i + 1) + '/' + list.length;
     try {
       await api('accounts/' + encodeURIComponent(list[i].id) + '/refresh', { method: 'POST' });
       ok++;
-    } catch (e) { fail++; }
+    } catch (e) {
+      fail++;
+      // 只报「失败 N」时用户无法判断是网络问题、凭据过期还是平台不支持；
+      // 带出第一条原因（上游/服务端的原文），可据此决定重登还是换号。
+      if (!firstErr) firstErr = (list[i].label || list[i].platform || list[i].id) + '：' + (e.message || '失败');
+    }
   }
   if (btn) { btn.disabled = false; btn.textContent = old; }
-  toast('刷新完成：成功 ' + ok + (fail ? ' · 失败 ' + fail : ''), fail ? 'bad' : 'ok');
+  toast('刷新完成：成功 ' + ok + (fail ? ' · 失败 ' + fail + '（' + firstErr + '）' : ''), fail ? 'bad' : 'ok');
   await loadAcctAccounts();
 }
 
@@ -1737,7 +1748,11 @@ if ($('acctDetailBody')) {
     await openAcctDetail(id);
   };
 }
-if ($('btnCheckinAll')) $('btnCheckinAll').onclick = () => acctCheckinAll($('btnCheckinAll'));
+/* 全平台签到按钮用独立 id（btnAcctCheckinAll）：CodeBuddy 视图的「全部签到」
+   是 btnCheckinAll（checkin_all，仅主池）——两按钮曾是同一 id， acct.js 后加载
+   的绑定会覆盖 app.js 的绑定，结果 CodeBuddy 视图的按钮执行了全平台签到、
+   这里的按钮反而是死的。 */
+if ($('btnAcctCheckinAll')) $('btnAcctCheckinAll').onclick = () => acctCheckinAll($('btnAcctCheckinAll'));
 if ($('btnExtDrawer')) $('btnExtDrawer').onclick = () => openAcctDrawer(!acctDrawerOpen);
 if ($('btnExtDrawerClose')) $('btnExtDrawerClose').onclick = () => openAcctDrawer(false);
 if ($('btnAcctConsistency')) $('btnAcctConsistency').onclick = acctConsistency;

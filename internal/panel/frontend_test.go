@@ -2375,3 +2375,33 @@ func TestAccountCenterDOM(t *testing.T) {
 		}
 	}
 }
+
+// TestIndexHTMLUniqueIDs index.html 的所有 id= 必须唯一。
+//
+// 为什么钉住：经典脚本用 $(id)（= getElementById）绑事件——文档里出现两个同名
+// id 时 getElementById 恒返回**第一个**，于是后加载模块的绑定覆盖先加载模块的
+// 绑定、后一个同名按钮永远拿不到事件。实际踩坑（2026-10）：账号中心「全平台签到」
+// 与 CodeBuddy 视图「全部签到」同名，结果前者是死按钮、后者执行了错误接口。
+// 正则取 id="..." 字面量即可：面板 HTML 是模板产物，不存在动态拼接 id。
+func TestIndexHTMLUniqueIDs(t *testing.T) {
+	raw, err := os.ReadFile("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(`\bid="([A-Za-z][\w-]*)"`)
+	seen := map[string]int{}
+	for _, m := range re.FindAllStringSubmatch(string(raw), -1) {
+		id := m[1]
+		if prev, dup := seen[id]; dup {
+			t.Errorf("index.html 存在重复 id=%q（首现于第 %d 处匹配）", id, prev)
+			continue
+		}
+		seen[id] = len(seen) + 1
+	}
+	// 两个签到按钮必须各自成 id 且都存在（防止有人改回去）。
+	for _, want := range []string{"btnCheckinAll", "btnAcctCheckinAll"} {
+		if _, ok := seen[want]; !ok {
+			t.Errorf("index.html 缺 id=%q", want)
+		}
+	}
+}
