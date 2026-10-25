@@ -21,7 +21,7 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
-//go:embed app.js core.js keys.js ext.js extwiz.js acct.js captcha.js
+//go:embed app.js core.js qr.js keys.js ext.js extwiz.js acct.js captcha.js
 var panelFS embed.FS
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：

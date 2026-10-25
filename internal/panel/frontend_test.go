@@ -24,7 +24,7 @@ import (
 // 它导出的 openExtWizard，故必须排在 ext.js 之后加载）。
 // 2026-10-18 增补 acct.js（账号中心视图 v1.6.0；依赖 core.js 的 $/esc/ago/api/toast，
 // 并在运行时调用 app.js 的 go / ext.js 的 loadExt——排在两者之后加载）。
-var panelJSFiles = []string{"core.js", "app.js", "keys.js", "ext.js", "extwiz.js", "captcha.js", "acct.js"}
+var panelJSFiles = []string{"core.js", "qr.js", "app.js", "keys.js", "ext.js", "extwiz.js", "captcha.js", "acct.js"}
 
 // mergedAppJSPath 拼接全部面板 JS 为临时文件并返回路径（供 node harness 读取）。
 // 这样所有按函数名切片 app.js 的既有测试在拆分后无需改动切法。

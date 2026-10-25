@@ -191,6 +191,7 @@ func (p *Panel) routes() {
 	// Go 1.22 mux 通配符须占满整段，故按文件显式注册（新增 JS 文件在此加一行）。
 	p.mux.HandleFunc("GET /startport/app.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/core.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/qr.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/keys.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/ext.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/extwiz.js", p.appScript)
