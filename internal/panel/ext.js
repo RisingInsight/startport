@@ -96,15 +96,15 @@ function renderChannelCard(c) {
   } else {
     credTable = '<div class="note" style="margin-top:8px">未配置凭证（不注入鉴权；自建内网聚合器场景）</div>';
   }
-  return '<div style="border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:0 0 14px">'
-    + '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+  return '<div class="ec-card">'
+    + '<div class="ec-hd">'
     + '<b>' + esc(c.name) + '</b>'
     + '<span class="tag mute">' + esc(c.protocol || 'openai') + '</span>'
     // 原生适配器徽标：只在显式配置时出现（空 = 按协议，不缺省刷一个标签）。
     + (c.adapter ? ' <span class="tag" title="原生适配器">' + esc(c.adapter) + '</span>' : '')
     + (c.managed ? '<span class="tag mute" title="credentials 由账号中心投影，在此修改会被拒绝">账号中心托管</span>' : '')
     + '<span class="tag ' + st[1] + '">' + esc(st[0]) + '</span>' + cool
-    + '<span class="grow" style="flex:1"></span>'
+    + '<span class="grow"></span>'
     + (!c.managed
       ? '<button type="button" class="xs" data-ec="migrate" data-name="' + esc(c.name) + '" title="把静态凭证转为账号条目挂入账号中心对应平台页签">迁入账号中心</button>'
       : '<button type="button" class="xs" data-ec="rollback" data-name="' + esc(c.name) + '" title="清除托管标记：账号从账号中心删除，凭证原样保留在渠道（可重新迁入）">回退</button>')
@@ -112,7 +112,7 @@ function renderChannelCard(c) {
     + '<button type="button" class="xs" data-ec="edit" data-name="' + esc(c.name) + '">编辑</button>'
     + '<button type="button" class="xs" data-ec="del" data-name="' + esc(c.name) + '">删除</button>'
     + '</div>'
-    + '<div class="note" style="margin-top:6px">'
+    + '<div class="note ec-meta">'
     + '<code>' + esc(c.base_url) + '</code>'
     + ' · 凭证 ' + (c.credentials_usable || 0) + '/' + (c.credentials_total || 0) + ' 可用'
     + (c.credentials_invalid ? ' · ' + c.credentials_invalid + ' 失效' : '')

@@ -500,6 +500,8 @@ body > .acts-menu { position: fixed; z-index: 70; }
 .tag.warn { background: var(--warn-soft); color: var(--warn); }
 .tag.bad { background: var(--bad-soft); color: var(--bad); }
 .tag.mute { background: var(--surface-2); color: var(--ink-3); border: 1px solid var(--line); }
+/* 中性暂停态（keys.js 的「已禁用」等）：与 mute 同构但带主色调的冷色。 */
+.tag.cool { background: var(--surface-2); color: var(--cool); border: 1px solid var(--line); }
 .rate-limits { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; min-width: 210px; }
 .rate-limit {
   display: flex; align-items: baseline; gap: 6px; padding: 4px 7px;
@@ -607,7 +609,10 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
 }
 /* Toast 入场：轻抬 + 淡入（transform/opacity，不动布局）。 */
 @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-.tst.ok { border-left-color: var(--ok); } .tst.err { border-left-color: var(--bad); }
+.tst.ok { border-left-color: var(--ok); }
+/* err 与 bad 同义（历史上两套叫法并存：app.js 用 err，acct/ext/keys 用 bad）。
+   只给 err 上色曾让账号中心 / 渠道页的失败提示没有红色语义条。 */
+.tst.err, .tst.bad { border-left-color: var(--bad); }
 
 @media (max-width: 760px) {
   .shell { grid-template-columns: 1fr; }
@@ -848,6 +853,14 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   .pk-card .expirybar { display: flex; height: 5px; border-radius: 3px; overflow: hidden;
     margin-top: 6px; background: var(--surface-2); }
   .pk-card .expirybar i { display: block; height: 100%; min-width: 2px; }
+
+  /* ── 渠道设置抽屉的渠道卡片（原 ext.js 内联样式收编为类）──────────────
+     视觉值与原内联样式逐项一致，只是类化：圆角 10px 与 .kpi / .us-group /
+     .exp-row 同一档，后续调整改这里一处即可，不必再动 JS 字符串。 */
+  .ec-card { border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 0 0 14px; }
+  .ec-hd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ec-hd .grow { flex: 1; }
+  .ec-meta { margin-top: 6px; }
 
   /* ── 筛选栏（模型档位 / 运行日志 / 用量共用）─────────────────────────
      面板控件默认 input/select 是 width:100%（配置表单要整行），筛选栏里必须显式
@@ -1328,6 +1341,17 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 }
 #acctPanel-all .acct-main th.c-acts, #acctPanel-all .acct-main td.c-acts { text-align: right; }
 #acctPanel-all .acct-main td.c-acts { padding-right: 14px; }
+/* 操作列 sticky 右固定：与主账号表（td.acts）同待遇。统一表是 10 列宽表
+   （min-width 1740px），窄视口横向滚动时操作按钮若跟随内容滚出视口，
+   「签到 / 删除」就点不到。zebra 已移除（与主账号表对齐，#view-usage 同样
+   显式去 zebra），不存在行底色与 sticky 底色错位的问题。 */
+#acctPanel-all .acct-main th.c-acts,
+#acctPanel-all .acct-main td.c-acts {
+  position: sticky; right: 0; z-index: 2;
+  background: var(--surface);
+  box-shadow: -10px 0 12px -10px rgba(0,0,0,.5);
+}
+#acctPanel-all .acct-main tbody tr:hover td.c-acts { background: var(--surface-2); }
 @media (max-width: 900px) {
   #acctPanel-all .box > header { flex-wrap: wrap; }
   #acctPanel-all .box > header .note { order: 5; }
@@ -1790,7 +1814,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
     <section class="view" id="view-models" hidden>
       <div class="box">
         <header>
-          <h3>模型能力 <span class="hint">max_tokens bug已修复目前可以正常透传最大输出,但是官方返回的最大输出仅为参考，不保证完全正确；外部渠道模型用 <code>ext:&lt;平台&gt;/&lt;模型&gt;</code> 接入，重名时用完整前缀消歧
+          <h3>模型能力 <span class="hint">max_tokens 已可正常透传；官方返回的最大输出仅供参考，不保证完全正确。外部渠道模型用 <code>ext:&lt;平台&gt;/&lt;模型&gt;</code> 接入，重名时用完整前缀消歧
           </span></h3>
           <span class="grow"></span>
           <span class="note" id="mdNote">实时查询上游</span>
@@ -2094,7 +2118,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             <span class="grow"></span>
             <span class="note" id="acctAllNote">—</span>
             <button type="button" class="xs" id="btnAcctAdd">添加账号</button>
-            <button type="button" class="xs" id="btnCheckinAll" title="对当前平台（或全部支持签到的平台）账号执行一次签到">全平台签到</button>
+            <button type="button" class="xs" id="btnAcctCheckinAll" title="对当前平台（或全部支持签到的平台）账号执行一次签到">全平台签到</button>
             <button type="button" class="xs" id="btnExtDrawer" title="原「外部渠道」页的全部能力收进这里（进阶）">渠道设置 ▾</button>
           </header>
           <div class="attn ok" id="acctAttn" style="margin:12px 17px 0">—</div>
@@ -2119,7 +2143,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             <button type="button" class="xs" id="btnAcctRefreshAll">刷新全部</button>
           </div>
           <div class="tbl-wrap">
-            <table class="acc zebra acct-main">
+            <table class="acc acct-main">
               <thead><tr><th>账号</th><th>平台</th><th>状态</th><th>余额</th><th>签到</th><th>在途</th><th>成功 / 失败</th><th>用量</th><th>最近成功</th><th class="c-acts">操作</th></tr></thead>
               <tbody id="acBody-all"><tr><td colspan="10" class="empty">加载中…</td></tr></tbody>
             </table>
@@ -2616,7 +2640,7 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
     <section class="view" id="view-logs" hidden>
       <div class="box">
         <header>
-          <h3>请求记录 <span class="hint">调用来源：IP 取 X-Forwarded-For 首段，无代理头时回落 TCP 对端</span></h3>
+          <h3>请求记录 <span class="hint">来源 IP 仅在直连地址命中可信代理白名单时取转发头，其余一律记录 TCP 对端（防伪造）</span></h3>
           <span class="grow"></span>
           <span class="note" id="reqSummary">—</span>
           <span class="note" id="reqNote">—</span>
@@ -2909,12 +2933,12 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
 <!-- 加载顺序即依赖顺序：core.js（基础设施）→ app.js（视图主体）→ keys.js（密钥视图）。
      classic scripts 共享全局作用域，顶层绑定只可向前引用；新增模块追加到末尾。 -->
 <!-- 前端资源改动时递增 v：页面是 no-store，但旧磁盘缓存仍可能命中；query 强制换 URL。 -->
-<script src="core.js?v=ui27"></script>
-<script src="app.js?v=ui27"></script>
-<script src="keys.js?v=ui27"></script>
-<script src="ext.js?v=ui27"></script>
-<script src="extwiz.js?v=ui27"></script>
-<script src="captcha.js?v=ui27"></script>
-<script src="acct.js?v=ui27"></script>
+<script src="core.js?v=ui29"></script>
+<script src="app.js?v=ui29"></script>
+<script src="keys.js?v=ui29"></script>
+<script src="ext.js?v=ui29"></script>
+<script src="extwiz.js?v=ui29"></script>
+<script src="captcha.js?v=ui29"></script>
+<script src="acct.js?v=ui29"></script>
 </body>
 </html>

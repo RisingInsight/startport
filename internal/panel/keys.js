@@ -25,10 +25,10 @@ function renderKeys() {
     return;
   }
   $('akBody').innerHTML = akList.map(k => {
-    const st = k.disabled ? '<span class="tag" style="color:var(--cool)">已禁用</span>' : '<span class="tag" style="color:var(--ok)">启用中</span>';
+    const st = k.disabled ? '<span class="tag cool">已禁用</span>' : '<span class="tag ok">启用中</span>';
     return '<tr>' +
       '<td class="mark" aria-hidden="true"></td>' +
-      '<td><b>' + esc(k.name) + '</b>' + (k.disabled ? '<div class="note">' + st + '</div>' : '<div class="note">' + st + '</div>') + '</td>' +
+      '<td><b>' + esc(k.name) + '</b><div class="note">' + st + '</div></td>' +
       '<td><code>' + esc(k.prefix) + '…</code></td>' +
       '<td>' + esc(ago(k.created_at)) + '</td>' +
       '<td>' + (k.last_used ? esc(ago(k.last_used)) : '—') + '</td>' +

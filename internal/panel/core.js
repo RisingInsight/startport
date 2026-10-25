@@ -549,7 +549,16 @@ $('btnKey').onclick = async () => {
     $('keyErr').hidden = true;
     $('keyVeil').classList.remove('on');
     start();
+    // 首屏是在**没有密钥**的情况下渲染的：各视图的加载器都在那次 401 里失败，并把
+    // 错误写死进了 DOM（账号中心会一直显示「读取失败：密钥无效或未填写」，点刷新
+    // 也回不来）。这里重放一次当前路由，让当前视图用新密钥重新取数。
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
   } catch (e) { $('keyErr').hidden = false; }
 };
 $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') $('btnKey').click(); });
+// 输入框包在 <form> 里（只为让浏览器/密码管理器识别成登录字段），但页面 CSP 是
+// form-action 'none'（全站无表单提交目标）——回车会触发隐式提交，浏览器每次都报
+// 「violates the following CSP directive: form-action 'none'」到控制台，看起来像
+// 面板坏了。提交路径统一走上面的 keydown → btnKey.click()，这里直接掐掉默认提交。
+if ($('keyInput').form) $('keyInput').form.addEventListener('submit', e => e.preventDefault());
 
