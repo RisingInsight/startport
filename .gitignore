@@ -24,6 +24,9 @@ __pycache__/
 
 # Backups (contains auth tokens)
 backups/
+# 手工备份快照（config.json.bak* 含真实密钥/凭证，禁止入库）
+config.json.bak*
+/starport-backup-*.exe
 
 # IDE
 .idea/
