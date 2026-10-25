@@ -14,10 +14,12 @@
 //
 // 流式事件骨架（OpenAI 官方序列的必需子集）：
 // response.created → response.in_progress →
-//   [message: output_item.added + content_part.added + output_text.delta* +
-//    output_text.done + content_part.done + output_item.done] |
-//   [function_call: output_item.added + function_call_arguments.delta* +
-//    function_call_arguments.done + output_item.done] →
+//
+//	[message: output_item.added + content_part.added + output_text.delta* +
+//	 output_text.done + content_part.done + output_item.done] |
+//	[function_call: output_item.added + function_call_arguments.delta* +
+//	 function_call_arguments.done + output_item.done] →
+//
 // response.completed（含 usage）。流中错误帧 → event: error 后终止（不补骨架）。
 package server
 
@@ -36,20 +38,21 @@ import (
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/provider"
 	"github.com/RisingInsight/startport/internal/reqlog"
+	"github.com/RisingInsight/startport/internal/upstream"
 )
 
 // responsesReq Responses 请求主干（未知字段忽略）。
 type responsesReq struct {
-	Model           string          `json:"model"`
-	Input           json.RawMessage `json:"input"`
-	Instructions    json.RawMessage `json:"instructions"`
-	Stream          bool            `json:"stream"`
-	MaxOutputTokens int             `json:"max_output_tokens"`
-	Temperature     *float64        `json:"temperature"`
-	TopP            *float64        `json:"top_p"`
-	Tools           []responsesTool `json:"tools"`
-	ToolChoice      json.RawMessage `json:"tool_choice"`
-	ParallelToolCalls *bool         `json:"parallel_tool_calls"`
+	Model             string          `json:"model"`
+	Input             json.RawMessage `json:"input"`
+	Instructions      json.RawMessage `json:"instructions"`
+	Stream            bool            `json:"stream"`
+	MaxOutputTokens   int             `json:"max_output_tokens"`
+	Temperature       *float64        `json:"temperature"`
+	TopP              *float64        `json:"top_p"`
+	Tools             []responsesTool `json:"tools"`
+	ToolChoice        json.RawMessage `json:"tool_choice"`
+	ParallelToolCalls *bool           `json:"parallel_tool_calls"`
 	// 网关无会话存储：previous_response_id / store 出现即 400（见 responsesToOpenAI）。
 	PreviousResponseID string `json:"previous_response_id"`
 }
@@ -448,10 +451,10 @@ func openAIRespToResponses(respBody []byte, model string) (map[string]any, *oa2a
 	output := []map[string]any{}
 	if choice.Message.Content != "" {
 		output = append(output, map[string]any{
-			"type":     "message",
-			"id":       "msg_" + fmt.Sprintf("%d", time.Now().UnixNano()),
-			"status":   "completed",
-			"role":     "assistant",
+			"type":    "message",
+			"id":      "msg_" + fmt.Sprintf("%d", time.Now().UnixNano()),
+			"status":  "completed",
+			"role":    "assistant",
 			"content": []map[string]any{{"type": "output_text", "text": choice.Message.Content, "annotations": []any{}}},
 		})
 	}
@@ -470,15 +473,15 @@ func openAIRespToResponses(respBody []byte, model string) (map[string]any, *oa2a
 		})
 	}
 	resp := map[string]any{
-		"id":                 "resp_" + fmt.Sprintf("%d", time.Now().UnixNano()),
-		"object":             "response",
-		"created_at":         time.Now().Unix(),
-		"status":             "completed",
-		"model":              model,
-		"output":             output,
+		"id":                  "resp_" + fmt.Sprintf("%d", time.Now().UnixNano()),
+		"object":              "response",
+		"created_at":          time.Now().Unix(),
+		"status":              "completed",
+		"model":               model,
+		"output":              output,
 		"parallel_tool_calls": true,
-		"error":              nil,
-		"incomplete_details": nil,
+		"error":               nil,
+		"incomplete_details":  nil,
 	}
 	if oaiResp.Usage != nil {
 		resp["usage"] = responsesUsage{
@@ -510,8 +513,8 @@ type responsesStreamXlator struct {
 	textAll  strings.Builder
 	outIdx   int
 	// 工具调用聚合（OpenAI 流式按 index 分片 arguments）。
-	toolAgg map[int]*openAIToolCall
-	toolSeq []int
+	toolAgg    map[int]*openAIToolCall
+	toolSeq    []int
 	toolOutIdx map[int]int
 	// 完成的文本块（finish 组装最终 output 用）。
 	lastText       string
@@ -608,9 +611,9 @@ func (x *responsesStreamXlator) ingest(payload string) bool {
 		for _, tc := range c.Delta.ToolCalls {
 			agg := x.toolAgg[tc.Index]
 			if agg == nil {
-				// 新工具调用：收尾打开中的文本块，开 function_call item。
+				// 新工具调用：收尾打开中的文本块（若已打开，closeTextItem 会把
+				// outIdx 前进到下一空位），然后本工具 item 占用当前 outIdx。
 				x.closeTextItem()
-				x.outIdx++
 				if x.toolOutIdx == nil {
 					x.toolOutIdx = map[int]int{}
 				}
@@ -622,11 +625,15 @@ func (x *responsesStreamXlator) ingest(payload string) bool {
 				x.sendEvent("response.output_item.added", map[string]any{
 					"output_index": x.outIdx,
 					"item": map[string]any{
-						"id": fmt.Sprintf("fc_%s_%d", strings.TrimPrefix(agg.ID, "call_"), tc.Index),
+						"id":   fmt.Sprintf("fc_%s_%d", strings.TrimPrefix(agg.ID, "call_"), tc.Index),
 						"type": "function_call", "status": "in_progress",
 						"call_id": agg.ID, "name": agg.Function.Name, "arguments": "",
 					},
 				})
+				// 占位之后才前进：closeTextItem 已把文本后的 outIdx 前进过一次，
+				// 这里若再预递增会让索引跳号（文本 0 → 工具 2），纯工具流则从 1
+				// 开始（跳过 0）——两种都违反 Responses 的连续 output_index 语义。
+				x.outIdx++
 			}
 			if tc.Function.Name != "" {
 				agg.Function.Name = tc.Function.Name
@@ -692,7 +699,7 @@ func (x *responsesStreamXlator) closeTextItem() {
 		"output_index": x.outIdx,
 		"item": map[string]any{
 			"id": x.itemID, "type": "message", "status": "completed",
-			"role": "assistant",
+			"role":    "assistant",
 			"content": []map[string]any{{"type": "output_text", "text": full, "annotations": []any{}}},
 		},
 	})
@@ -739,7 +746,7 @@ func (x *responsesStreamXlator) finish() {
 	if x.lastText != "" {
 		output = append([]map[string]any{{
 			"id": x.lastTextItemID, "type": "message", "status": "completed",
-			"role": "assistant",
+			"role":    "assistant",
 			"content": []map[string]any{{"type": "output_text", "text": x.lastText, "annotations": []any{}}},
 		}}, output...)
 	}
@@ -757,15 +764,15 @@ func (x *responsesStreamXlator) finish() {
 
 type poolResponsesBridge struct {
 	http.ResponseWriter // Header() 直通真实 w：流式头由 sse.go 正常落位
-	display  string
-	x        *responsesStreamXlator
-	mode     int // 0=未定 1=SSE 逐帧翻译 2=整包缓冲
-	status   int
-	sseBuf   []byte
-	bodyBuf  []byte
-	sseDone  bool
-	errored  bool
-	finished bool
+	display             string
+	x                   *responsesStreamXlator
+	mode                int // 0=未定 1=SSE 逐帧翻译 2=整包缓冲
+	status              int
+	sseBuf              []byte
+	bodyBuf             []byte
+	sseDone             bool
+	errored             bool
+	finished            bool
 }
 
 func (b *poolResponsesBridge) WriteHeader(code int) {
@@ -795,6 +802,17 @@ func (b *poolResponsesBridge) Write(p []byte) (int, error) {
 			frame := string(b.sseBuf[:idx])
 			b.sseBuf = b.sseBuf[idx+2:]
 			if !strings.HasPrefix(frame, "data: ") {
+				// SSE 注释帧（`: keep-alive`）必须原样转发给客户端：网关心跳的唯一
+				// 作用就是让客户端/代理看到「链路还活着」。此前一律 continue 会把它
+				// 静默吞掉（StreamHint 侧 Write 成功、客户端 0 字节），/v1/responses
+				// 的首帧前静默期又退回零字节（Codex CLI 类客户端仍会 idle timeout）。
+				// 只转发 `:` 开头的帧（标准注释语义）；其他非 data 行继续丢弃，
+				// 与 /v1/messages 桥接同口径。
+				if strings.HasPrefix(frame, ":") {
+					if _, werr := io.WriteString(b.ResponseWriter, frame+"\n\n"); werr == nil {
+						b.Flush()
+					}
+				}
 				continue
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(frame, "data: "))
@@ -859,7 +877,9 @@ func (b *poolResponsesBridge) finish() {
 }
 
 // responsesEventWriter SSE 事件写出闭包（Responses 事件面；ext 流式与主池桥共用）。
-func responsesEventWriter(w http.ResponseWriter, fl http.Flusher) func(string, any) {
+// w 取 io.Writer 的理由同 anthropicEventWriter：ext 路径传入 upstream.SSEWriter
+// 以获得空闲心跳，flush 由它内部完成（此时 fl 传 nil）。
+func responsesEventWriter(w io.Writer, fl http.Flusher) func(string, any) {
 	return func(event string, payload any) {
 		bs, err := json.Marshal(payload)
 		if err != nil {
@@ -873,7 +893,7 @@ func responsesEventWriter(w http.ResponseWriter, fl http.Flusher) func(string, a
 }
 
 // responsesStreamFromReader ext 渠道流式：OpenAI SSE → Responses 事件流
-//（记账与 extMessagesStream 同口径：realm=ext，凭证级计数）。
+// （记账与 extMessagesStream 同口径：realm=ext，凭证级计数）。
 func (h *Handler) responsesStreamFromReader(w http.ResponseWriter, ctx context.Context,
 	display string, rc io.ReadCloser, apiKeyName string, ch2 *extchan.Channel,
 	cred *extchan.Credential, attemptStarted time.Time) {
@@ -882,7 +902,12 @@ func (h *Handler) responsesStreamFromReader(w http.ResponseWriter, ctx context.C
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	fl, _ := w.(http.Flusher)
-	x := newResponsesStreamXlator(display, responsesEventWriter(w, fl))
+	// 客户端保活心跳：与 extMessagesStream 同因同治（Codex CLI 走 /v1/responses，
+	// 上游 prefill 静默期此前零字节）。事件与心跳经同一把锁串行化，注释帧只在
+	// 行边界补写，翻译语义零改动。
+	out := upstream.NewSSEWriterInterval(w, fl, sseHeartbeatInterval)
+	defer out.Close()
+	x := newResponsesStreamXlator(display, responsesEventWriter(out, nil))
 	x.start()
 	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)

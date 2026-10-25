@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -189,6 +190,35 @@ func TestChatBadParams400CarriesUpstreamBody(t *testing.T) {
 	}
 }
 
+// TestChatModelParamInvalid400 上游 400 + 11133（model_param_invalid；Classify
+// 词表不含 11133，归 ErrClient）→ 客户端必须拿到 400 + bad_params，而不是
+// 503 no_healthy_account。后者会把「这个请求体上游不接受」伪装成「账号暂时不可
+// 用、稍后重试」，客户端于是对必然失败的请求无限重试（与 #81 同一类问题）。
+func TestChatModelParamInvalid400(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 400, `{"code":11133,"msg":"the request parameters were rejected by the model provider","requestId":"rid-1"}`, false
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream: up,
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400: request-level rejection must not look retryable)", rec.Code, rec.Body)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "11133") {
+		t.Errorf("400 message should carry upstream 11133 body: %s", body)
+	}
+	if !strings.Contains(body, `"bad_params"`) {
+		t.Errorf("code should be bad_params: %s", body)
+	}
+	if strings.Contains(body, "no_healthy_account") {
+		t.Errorf("request-level failure must not be reported as account exhaustion: %s", body)
+	}
+}
+
 func TestChatNonStreamAggregates(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz != "Bearer at1" {
@@ -261,6 +291,188 @@ func TestChatStreamPassthrough(t *testing.T) {
 	}
 	if st.TokenUsage.LastLatencyMs < 1 || st.TokenUsage.LastTokensPerSecond == nil || *st.TokenUsage.LastTokensPerSecond <= 0 {
 		t.Errorf("latest performance=%+v", st.TokenUsage)
+	}
+}
+
+// abortBody 先吐出 data，随后返回一个非 EOF 的读错误：模拟上游「200 开流后掐流/
+// 卡死被空闲看门狗掐掉」——这是本次 P0 的现场（客户端一直转圈、网关把失败记成成功）。
+type abortBody struct {
+	data string
+	err  error
+}
+
+func (b *abortBody) Read(p []byte) (int, error) {
+	if b.data != "" {
+		n := copy(p, b.data)
+		b.data = b.data[n:]
+		return n, nil
+	}
+	if b.err != nil {
+		return 0, b.err
+	}
+	return 0, io.EOF
+}
+
+func (b *abortBody) Close() error { return nil }
+
+// newAbortUpstream 构造一个「200 开流 + 吐一帧后读中断」的假上游：本次 P0 的现场。
+func newAbortUpstream(head string) *upstream.Client {
+	return &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       &abortBody{data: head, err: errors.New("unexpected EOF")},
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+}
+
+// TestChatStreamUpstreamAbortDoesNotNoteSuccess P0 回归：上游中途读错误属于**上游
+// 卡死**，绝不能被当成「客户端断连」而 NoteSuccess——那会让账号健康度/熔断计数/
+// 降级计数全不动，下一个请求继续选中这个卡死的号，形成无限重试。
+// 断言：不记成功（SuccessCount 不增）+ 按连败降权口径吃到一次失败（NoteFailures →
+// consecutive_fails++）。刻意**不**断言 err_total/breaker（那是熔断维度，本路径不走）。
+func TestChatStreamUpstreamAbortDoesNotNoteSuccess(t *testing.T) {
+	const head = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"半\"}}]}\n\n"
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: newAbortUpstream(head)})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// 头已经发出（只能是 200），失败语义靠请求记录/账号记账收敛——与非流式不同。
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d want 200（头已发出）", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "半") {
+		t.Errorf("中断前已读到的帧必须已透传: %q", rec.Body.String())
+	}
+
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("account status missing")
+	}
+	if st.SuccessCount != 0 {
+		t.Fatalf("上游断流被记成功（success_count=%d）：卡死号会被当成健康号继续被选中，即本次 P0 故障", st.SuccessCount)
+	}
+	if st.ConsecutiveFails != 1 {
+		t.Fatalf("consecutive_fails=%d want 1：上游断流必须让账号吃到一次失败（NoteFailures 连败降权口径）", st.ConsecutiveFails)
+	}
+}
+
+// TestChatStreamUpstreamAbortDegradesAccount P0 的最终目标：卡死号不能「永远被
+// 反复选中」。连败 5 次（pool 默认 degrade_threshold）后账号被**降权出池**：
+// 多号池会绕开它，单号池则进入 10min 降权期后自动回池重试（代价可控，不像熔断
+// 那样 30min 起步把唯一账号锁死）。
+// 关键点：这条链以前根本走不到——每次断流都被 NoteSuccess 把连败计数清零。
+func TestChatStreamUpstreamAbortDegradesAccount(t *testing.T) {
+	const head = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"半\"}}]}\n\n"
+	const degradeThreshold = 5 // pool.defaultDegradeThreshold
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: newAbortUpstream(head)})
+	body := `{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	do := func() {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	}
+
+	// 前 4 次：连败计数逐次累积，尚未达阈。
+	for i := 1; i < degradeThreshold; i++ {
+		do()
+		if st, _ := p.Status("u1"); st.ConsecutiveFails != i {
+			t.Fatalf("第 %d 次断流后 consecutive_fails=%d want %d", i, st.ConsecutiveFails, i)
+		}
+		if st, _ := p.Status("u1"); !st.DegradeUntil.IsZero() {
+			t.Fatalf("第 %d 次断流后不应已降权（degrade_until=%v）", i, st.DegradeUntil)
+		}
+	}
+	// 第 5 次：达阈 → 降权（计数清零 + degrade_until 落在未来），账号退出可选池。
+	do()
+	st, _ := p.Status("u1")
+	if st.SuccessCount != 0 {
+		t.Fatalf("success_count=%d want 0：断流被记成功了（P0 回归）", st.SuccessCount)
+	}
+	if st.DegradeUntil.IsZero() || st.DegradeUntil.Before(time.Now()) {
+		t.Fatalf("第 %d 次断流后账号应已降权（degrade_until=%v）：否则下一个请求仍会首选这个卡死号", degradeThreshold, st.DegradeUntil)
+	}
+	if uids := p.AvailableUIDs(); len(uids) != 0 {
+		t.Fatalf("降权后账号不应还在健康池里: %v", uids)
+	}
+	// 第 6 次（降权期内的兜底探测）：降权状态与成功计数都**不**能被清零/翻转——
+	// 原故障的根因正是每次失败都被记成成功，账号永远停留在健康态。
+	before := st.DegradeUntil
+	do()
+	st6, _ := p.Status("u1")
+	if st6.SuccessCount != 0 {
+		t.Fatalf("第 6 次后 success_count=%d want 0：断流又被记成功了（P0 回归）", st6.SuccessCount)
+	}
+	if st6.DegradeUntil.IsZero() || st6.DegradeUntil.Before(before) {
+		t.Fatalf("降权截止被清零/回退（%v → %v）：卡死号会重新变成健康号", before, st6.DegradeUntil)
+	}
+}
+
+// cancelMidStreamBody 在吐完首帧后取消请求 ctx 再返回读错误：忠实模拟「客户端
+// 断连」——连接断了 → 请求 ctx 取消 → 上游 body 的读随之中断。
+type cancelMidStreamBody struct {
+	data   string
+	cancel context.CancelFunc
+	fired  bool
+}
+
+func (b *cancelMidStreamBody) Read(p []byte) (int, error) {
+	if b.data != "" {
+		n := copy(p, b.data)
+		b.data = b.data[n:]
+		return n, nil
+	}
+	if !b.fired {
+		b.fired = true
+		b.cancel()
+		return 0, errors.New("context canceled")
+	}
+	return 0, io.EOF
+}
+
+func (b *cancelMidStreamBody) Close() error { return nil }
+
+// TestChatStreamClientDisconnectStillNotesSuccess 反向保护（防误罚）：客户端断连时
+// 上游读中断只是它的连带（请求 ctx 已取消），必须**保持**原有「中断」语义——不罚号。
+// 否则用户每按一次停止 / 关一次窗口都会给健康账号喂一次失败，积累下来把好号打挂。
+func TestChatStreamClientDisconnectStillNotesSuccess(t *testing.T) {
+	const head = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"半\"}}]}\n\n"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	up := &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       &cancelMidStreamBody{data: head, cancel: cancel},
+			}, nil
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: up})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("account status missing")
+	}
+	if st.SuccessCount != 1 {
+		t.Fatalf("success_count=%d want 1：客户端断连时账号健康，应保持记成功（人走了不算账号失败）", st.SuccessCount)
+	}
+	if st.ConsecutiveFails != 0 {
+		t.Fatalf("consecutive_fails=%d want 0：客户端断连不得给账号喂失败", st.ConsecutiveFails)
 	}
 }
 
@@ -831,8 +1043,14 @@ func TestChatHTTP4xxClientDoesNotPenalize(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
+	// 状态码语义（收紧后）：上游 400 是"这个请求不被接受"，回 400 + bad_params。
+	// 此前回 503 no_healthy_account，把确定不可重试的请求错误伪装成"账号暂时不可用"，
+	// 客户端据此无限重试；本用例的核心断言（不罚账号）不变。
+	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), `"bad_params"`) {
+		t.Errorf("code should be bad_params: %s", rec.Body)
 	}
 	st, _ := p.Status("u1")
 	if st.Cooling || st.ErrTotal != 0 {
@@ -1175,6 +1393,28 @@ func TestStatusPortraitFields(t *testing.T) {
 	}
 	if st.LastErrTime.IsZero() {
 		t.Error("last_err should be set")
+	}
+}
+
+// TestLivezAlwaysOK 存活探针与就绪探针必须分离：空池时 /healthz 是 503（就绪），
+// 但 /livez 必须 200——否则「刚部署未加账号」或「只用 ext: 渠道」的实例会被容器
+// 编排永久标记 unhealthy（Docker HEALTHCHECK 探的就是它）。
+func TestLivezAlwaysOK(t *testing.T) {
+	h := NewHandler(Config{Pool: pool.New(""), Upstream: upstream.New()})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/livez", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d want 200 (liveness must not depend on account state) body=%s", rec.Code, rec.Body)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("livez not json: %v body=%s", err, rec.Body)
+	}
+	if resp["alive"] != true || resp["service"] != ServiceName {
+		t.Errorf("livez json=%v", resp)
+	}
+	if got := rec.Header().Get("X-Service"); got != ServiceName {
+		t.Errorf("X-Service=%q want %q", got, ServiceName)
 	}
 }
 
@@ -1830,5 +2070,67 @@ func TestChatMarkupRepairStrictModeRejectsUndeclaredTool(t *testing.T) {
 	msg := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)
 	if _, ok := msg["tool_calls"]; ok {
 		t.Fatalf("未声明的工具名不得转换: %#v", msg["tool_calls"])
+	}
+}
+
+// TestChatInFlightFullReturnsAccountBusy 覆盖「号健康、但在途槽位打满」这一与
+// 「号全挂」截然不同的 503 成因。实测 dsh 这类 agent 并行工具调用时并发可达十几，
+// 单号 max_in_flight=3 直接被拒（毫秒级 503），但日志里与真故障共用
+// no_healthy_account，运维分不清该调并发还是查账号。
+func TestChatInFlightFullReturnsAccountBusy(t *testing.T) {
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		return 200, `{"choices":[]}`, false
+	})
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	p.SetMaxInFlight(1)
+	if !p.Acquire("u1") {
+		t.Fatal("占满唯一在途槽位失败")
+	}
+	defer p.Release("u1")
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("code=%d body=%s want 503", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "account_busy") {
+		t.Errorf("body=%s want account_busy（在途打满必须与 no_healthy_account 区分）", rec.Body)
+	}
+}
+
+// B2 回归：客户端主动断连（请求 ctx 已取消）引起的传输层错误**不能**喂连败降权。
+// 此前该路径无条件 NoteFailures——用户连续取消 5 次请求（流式输出中途按 Esc、
+// harness 超时自行断开都属此类）就会把唯一账号降权出池 10 分钟，全网关 503，
+// 而账号本身毫无故障。断言：连发 6 次（超过默认降权阈值 5）后
+// consecutive_fails 仍为 0、未降权、账号仍在可选池。
+func TestChatTransportClientDisconnectDoesNotDegrade(t *testing.T) {
+	p := testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	h := NewHandler(Config{Pool: p, Upstream: &upstream.Client{
+		HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("dial tcp 203.0.113.1:443: connect: connection refused")
+		})},
+		ChatBaseCN:    "https://fake.example",
+		BillingBaseCN: "https://fake.example",
+	}})
+	body := `{"model":"glm-5.2","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	for i := 1; i <= 6; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // 客户端已断连：请求 ctx 取消，上游请求随之报 context canceled
+		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+	st, ok := p.Status("u1")
+	if !ok {
+		t.Fatal("account status missing")
+	}
+	if st.ConsecutiveFails != 0 {
+		t.Fatalf("consecutive_fails=%d want 0：客户端断连不应喂连败计数（会把健康号降权出池）", st.ConsecutiveFails)
+	}
+	if !st.DegradeUntil.IsZero() {
+		t.Fatalf("degrade_until=%v：客户端断连不应触发降权", st.DegradeUntil)
+	}
+	if uids := p.AvailableUIDs(); len(uids) != 1 {
+		t.Fatalf("断连不应把账号逐出可选池: %v", uids)
 	}
 }

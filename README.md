@@ -172,7 +172,8 @@ flowchart LR
 | `POST /v1/responses` | Bearer | OpenAI Responses 面（Codex CLI 主入口） |
 | `GET /v1/models` | Bearer | 模型目录，附上下文长度、输出上限、推理档位、渠道来源 |
 | `GET /status` | Bearer | 池状态、凭证健康、按模型聚合的限流视图 |
-| `GET /healthz` | 无 | 健康检查（带 `service: "starport"` 标识） |
+| `GET /healthz` | 无 | 就绪探针：无可用账号 / 账号全占满时回 503（供负载均衡摘流量） |
+| `GET /livez` | 无 | 存活探针：恒 200，只证明进程在（容器 HEALTHCHECK 用它） |
 
 **模型名即路由**
 
@@ -186,6 +187,11 @@ flowchart LR
 | 渠道别名 | `ext:<渠道>/<别名>` | 映射到上游真实模型名 |
 
 `/v1/messages` 与 `/v1/responses` 对非 `ext:` 模型回退主池——同一个自建端点可以同时服务 Claude Code 与 Codex CLI，客户端侧不需要任何改造。
+
+> ⚠️ **裸名在两个协议面上的解析不完全相同**（务必注意）：
+> `/v1/chat/completions` 的裸名**只走主池**；`/v1/messages` 与 `/v1/responses` 的裸名**先在外部渠道里唯一匹配**，命中即走该渠道（没命中才回退主池）——这样只用外部渠道的部署不必给每个模型加前缀。
+> 代价是：若某个裸名恰好也是某条外部渠道的模型名（例如 `glm-5.3-flash` 同时在 CodeBuddy 池与 `ext:autoclaw/` 下），同一名字在两种客户端上会落到**不同后端、扣不同额度**。
+> 想锁定后端就写全前缀（`cn:` / `global:` / `ext:<渠道>/`），别依赖裸名消歧。
 
 ## 快速开始
 

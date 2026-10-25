@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -870,6 +871,295 @@ func TestStreamHintErrorFrameObserver(t *testing.T) {
 	}
 	if normalObserved != 0 {
 		t.Fatalf("正常流触发了观察者 %d 次，want 0", normalObserved)
+	}
+}
+
+// --- 客户端保活心跳（见 sse_heartbeat.go）------------------------------------
+
+// pacedStep 一段字节 + 该段之前要静默的时长（模拟上游 prefill 或帧间停顿）。
+type pacedStep struct {
+	delay time.Duration
+	data  string
+}
+
+// pacedReader 按段吐出字节，每段之前先睡 delay：用来模拟「上游 200 之后长时间
+// 不吐首帧」和「流中长空闲」这两种静默场景。数据吐完返回 io.EOF。
+type pacedReader struct {
+	steps []pacedStep
+	cur   int  // 当前段下标
+	off   int  // 当前段已吐字节数
+	ready bool // 当前段的延迟是否已付（避免半段被读时重复睡）
+}
+
+func (p *pacedReader) Read(b []byte) (int, error) {
+	if len(b) == 0 {
+		return 0, nil
+	}
+	for p.cur < len(p.steps) {
+		st := p.steps[p.cur]
+		if !p.ready {
+			if st.delay > 0 {
+				time.Sleep(st.delay)
+			}
+			p.ready = true
+		}
+		n := copy(b, st.data[p.off:])
+		p.off += n
+		if p.off >= len(st.data) {
+			p.cur++
+			p.off = 0
+			p.ready = false
+		}
+		if n > 0 {
+			return n, nil
+		}
+	}
+	return 0, io.EOF
+}
+
+// heartbeatBaseline 返回「关闭心跳」时同一条流的逐字节输出（比对基线）。
+func heartbeatBaseline(t *testing.T, r io.Reader) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	// 负间隔 = 关闭心跳：只保留写锁，不启后台 goroutine。
+	if err := StreamHint(rec, r, nil, WithHeartbeatInterval(-1)); err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	return rec.Body.String()
+}
+
+// TestStreamHeartbeatBeforeFirstFrame 本次故障的核心场景：上游 200 之后迟迟不吐
+// 首帧。断言：
+//  1. 首帧到达之前客户端已经收到至少一个 `: keep-alive` 注释帧（这正是客户端
+//     空闲判定被满足的条件，否则 dsh 会在 300s 后超时重试）；
+//  2. 去掉注释帧后，整条流与「关闭心跳」的输出逐字节一致（数据帧内容/顺序零改动）；
+//  3. StreamHint 返回后不再有任何写入——心跳 goroutine 已被回收（无泄漏、无
+//     Close 后写）。
+func TestStreamHeartbeatBeforeFirstFrame(t *testing.T) {
+	const beat = ": keep-alive"
+	baseBody := heartbeatBaseline(t, strings.NewReader(sseFixture))
+
+	// 首帧前静默 200ms + 20ms 心跳间隔 → 预期约 10 个注释帧。
+	slow := &pacedReader{steps: []pacedStep{{delay: 200 * time.Millisecond, data: sseFixture}}}
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, slow, nil, WithHeartbeatInterval(20*time.Millisecond)); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	body := rec.Body.String()
+
+	if n := strings.Count(body, sseHeartbeatFrame); n < 1 {
+		t.Fatalf("首帧之前没有收到任何心跳注释帧（%d 个）: %q", n, body)
+	}
+	firstBeat := strings.Index(body, beat)
+	firstData := strings.Index(body, "data: ")
+	if firstData < 0 {
+		t.Fatalf("没有数据帧被透传: %q", body)
+	}
+	if firstBeat < 0 || firstBeat > firstData {
+		t.Fatalf("心跳必须出现在首帧之前（beat=%d, data=%d）: %q", firstBeat, firstData, body)
+	}
+	if got := strings.ReplaceAll(body, sseHeartbeatFrame, ""); got != baseBody {
+		t.Fatalf("去掉注释帧后必须逐字节一致\nwant %q\ngot  %q", baseBody, got)
+	}
+
+	// Close 之后不得再有写入：等若干个心跳周期，body 必须冻结。
+	before := rec.Body.String()
+	time.Sleep(100 * time.Millisecond)
+	if after := rec.Body.String(); after != before {
+		t.Fatalf("StreamHint 返回后仍有写入（心跳 goroutine 未回收）: %q -> %q", before, after)
+	}
+}
+
+// TestStreamHeartbeatDuringStreamIdle 流中间的长空闲（上游吐完首帧后停住）同样
+// 必须补心跳，且注释帧只能落在帧边界上——去掉注释帧后与基线逐字节一致即证明
+// 心跳没有切断任何 data 帧。
+func TestStreamHeartbeatDuringStreamIdle(t *testing.T) {
+	head := "data: {\"id\":\"x1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"你\"}}]}\n\n"
+	rest := "data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"好\"}}]}\n\n" +
+		"data: {\"id\":\"x1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"total_tokens\":7}}\n\n" +
+		"data: [DONE]\n\n"
+	baseBody := heartbeatBaseline(t, strings.NewReader(head+rest))
+
+	r := &pacedReader{steps: []pacedStep{
+		{data: head},
+		{delay: 200 * time.Millisecond, data: rest},
+	}}
+	rec := httptest.NewRecorder()
+	if err := StreamHint(rec, r, nil, WithHeartbeatInterval(20*time.Millisecond)); err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	body := rec.Body.String()
+
+	// 首帧之后的静默期必须有心跳（覆盖「流中长空闲」，不只是首帧之前）。
+	firstData := strings.Index(body, "data: ")
+	if firstData < 0 {
+		t.Fatalf("没有数据帧被透传: %q", body)
+	}
+	if !strings.Contains(body[firstData:], sseHeartbeatFrame) {
+		t.Fatalf("流中空闲没有补心跳: %q", body)
+	}
+	if got := strings.ReplaceAll(body, sseHeartbeatFrame, ""); got != baseBody {
+		t.Fatalf("去掉注释帧后必须逐字节一致\nwant %q\ngot  %q", baseBody, got)
+	}
+	// 心跳不得污染数据帧：帧数/正文与基线一致（上一条等式已覆盖，这里再显式断言
+	// 正文仍在，避免有人把"去掉后相等"改成"什么都不写"也能过）。
+	if !strings.Contains(body, "你好") && !(strings.Contains(body, "你") && strings.Contains(body, "好")) {
+		t.Fatalf("正文帧丢失: %q", body)
+	}
+}
+
+// TestSSEWriterClosedNeverWrites Close 之后所有写必须是 no-op，且不得 panic：
+// StreamHint 的 defer 收尾与主循环写若顺序错乱，这里能第一时间炸出来。
+func TestSSEWriterClosedNeverWrites(t *testing.T) {
+	rec := httptest.NewRecorder()
+	out := NewSSEWriterInterval(rec, rec, 20*time.Millisecond)
+	if _, err := io.WriteString(out, "data: x\n\n"); err != nil {
+		t.Fatalf("write before close: %v", err)
+	}
+	out.Close()
+	out.Close() // 幂等：重复 Close 不得 panic / 不得阻塞
+	if _, err := io.WriteString(out, "data: y\n\n"); err == nil {
+		t.Fatal("Close 之后的写必须报错（io.ErrClosedPipe）")
+	}
+	if got := rec.Body.String(); got != "data: x\n\n" {
+		t.Fatalf("Close 之后仍有字节写出: %q", got)
+	}
+}
+
+// abortingReader 吐完 data 后返回一个非 EOF 读错误：模拟「上游掐流 / 卡死被空闲
+// 看门狗 cancel context」造成的读中断。err 为 nil 时退化为干净 EOF。
+type abortingReader struct {
+	data string
+	err  error
+}
+
+func (a *abortingReader) Read(b []byte) (int, error) {
+	if a.data != "" {
+		n := copy(b, a.data)
+		a.data = a.data[n:]
+		return n, nil
+	}
+	if a.err != nil {
+		return 0, a.err
+	}
+	return 0, io.EOF
+}
+
+// brokenWriter 首次写就失败（模拟客户端断连：连接已断，任何写都报错）。
+type brokenWriter struct{ h http.Header }
+
+func (b *brokenWriter) Header() http.Header       { return b.h }
+func (b *brokenWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
+func (b *brokenWriter) WriteHeader(int)           {}
+
+// TestStreamHintUpstreamAbortIsRecognizable 上游中途读错误必须被 IsUpstreamAbortError
+// 识别（handler 据此判定「上游卡死」而不是「客户端断连」，不再误记成功），且与
+// 空流哨兵互不串味、上游原因保留在文案里便于排障。
+func TestStreamHintUpstreamAbortIsRecognizable(t *testing.T) {
+	head := "data: {\"id\":\"x1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"半\"}}]}\n\n"
+	r := &abortingReader{data: head, err: errors.New("unexpected EOF")}
+	rec := httptest.NewRecorder()
+	err := StreamHint(rec, r, nil)
+	if err == nil {
+		t.Fatal("读上游中断必须返回错误（否则调用方会当成功）")
+	}
+	if !IsUpstreamAbortError(err) {
+		t.Fatalf("读侧中断必须被 IsUpstreamAbortError 识别: %v", err)
+	}
+	if IsEmptyStreamError(err) {
+		t.Fatalf("中途断流不是空流，两个哨兵不得混淆: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Errorf("错误文案应保留上游原因（排障需要）: %v", err)
+	}
+	// 已经收到的帧照常落地——中断不回溯撤销已透传内容。
+	if !strings.Contains(rec.Body.String(), "半") {
+		t.Errorf("已读到的帧必须已透传: %q", rec.Body.String())
+	}
+}
+
+// TestStreamHintClientWriteErrorIsNotUpstreamAbort 反向断言：写客户端失败（真正的
+// 客户端断连）**不得**被识别为上游中断。两类语义相反（记成功 vs 罚号），混淆的
+// 任一个方向都有害：误罚健康号，或把卡死号记成成功（本次 P0）。
+func TestStreamHintClientWriteErrorIsNotUpstreamAbort(t *testing.T) {
+	w := &brokenWriter{h: http.Header{}}
+	err := StreamHint(w, strings.NewReader(sseFixture), nil)
+	if err == nil {
+		t.Fatal("写客户端失败必须返回错误")
+	}
+	if IsUpstreamAbortError(err) {
+		t.Fatalf("客户端写失败不得被识别为上游中断: %v", err)
+	}
+}
+
+// TestSSEWriterHeartbeatAtLineBoundary ext 渠道是「裸块透传」（Read(buf) → Write），
+// 块边界可能落在行中间。本用例锁住两个方向：
+//  1. 行边界静默（上游写完一整帧后卡住，最常见的静默点）必须照常补心跳——防止
+//     「行内不发」的守卫被过度收紧成「永不发」，让 ext 渠道重新退化成零字节；
+//  2. 去掉注释帧后必须与原始字节完全一致（心跳只在行边界、不切断任何行）。
+func TestSSEWriterHeartbeatAtLineBoundary(t *testing.T) {
+	const first = "data: {\"a\":1}\n\n"
+	const second = "data: {\"b\":2}\n\n"
+	r := &pacedReader{steps: []pacedStep{
+		{data: first},
+		{delay: 120 * time.Millisecond, data: second},
+	}}
+	rec := httptest.NewRecorder()
+	out := NewSSEWriterInterval(rec, rec, 20*time.Millisecond)
+	buf := make([]byte, 8) // 故意用小缓冲：模拟块边界频繁落在行中间
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				t.Fatalf("写失败: %v", werr)
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	out.Close()
+
+	body := rec.Body.String()
+	if strings.Count(body, sseHeartbeatFrame) < 1 {
+		t.Fatalf("行边界的静默期必须补心跳（否则 ext 渠道首帧前仍是零字节）: %q", body)
+	}
+	if got := strings.ReplaceAll(body, sseHeartbeatFrame, ""); got != first+second {
+		t.Fatalf("去掉注释帧后必须与上游原始字节一致\nwant %q\ngot  %q", first+second, got)
+	}
+}
+
+// TestSSEWriterNoHeartbeatMidLine 反向：上游卡在「半行中间」（末尾无换行）时**不得**
+// 发心跳——插进去会把半行 data 撑成坏 JSON（客户端解析失败、数据丢失）。这是 QA 用例
+// TestQA_ExtRelayHeartbeatMustNotSplitFrame 发现的缺陷的工程师侧回归。
+func TestSSEWriterNoHeartbeatMidLine(t *testing.T) {
+	half := "data: {\"a\":1}" // 故意不带换行
+	r := &pacedReader{steps: []pacedStep{
+		{data: half},
+		{delay: 120 * time.Millisecond, data: "\n\ndata: {\"b\":2}\n\n"},
+	}}
+	rec := httptest.NewRecorder()
+	out := NewSSEWriterInterval(rec, rec, 20*time.Millisecond)
+	buf := make([]byte, 32)
+	for {
+		n, rerr := r.Read(buf)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				t.Fatalf("写失败: %v", werr)
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+	out.Close()
+
+	body := rec.Body.String()
+	if strings.Contains(body, half+sseHeartbeatFrame) {
+		t.Fatalf("心跳被插进半行中间，破坏分帧: %q", body)
+	}
+	if got := strings.ReplaceAll(body, sseHeartbeatFrame, ""); got != half+"\n\ndata: {\"b\":2}\n\n" {
+		t.Fatalf("去掉注释帧后必须与上游原始字节一致\nwant %q\ngot  %q", half+"\n\ndata: {\"b\":2}\n\n", got)
 	}
 }
 

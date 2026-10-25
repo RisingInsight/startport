@@ -24,6 +24,23 @@ var errEmptyStream = errors.New("upstream stream contained no valid data events"
 // upstream_parse 同语义），与客户端断连类错误区分。
 func IsEmptyStreamError(err error) bool { return errors.Is(err, errEmptyStream) }
 
+// errUpstreamAbort 上游流「读侧中断」的哨兵：br.ReadString 返回非 EOF 错误，
+// 覆盖上游连接被对端重置、传输层读超时，以及 internal/upstream/idle.go 的空闲
+// 看门狗因静默超时 cancel 请求 context 导致的读中断（三类都表现为读中断）。
+//
+// 为什么必须与「写客户端失败」分开（P0 故障根因）：StreamHint 只有一条 error
+// 出口，此前调用方（handler 流式分支）把**所有**错误都当成「写失败 = 客户端已走」，
+// 于是无条件 NoteSuccess。上游卡死 → 空闲看门狗掐流 → 读侧报错 → 被记成成功 →
+// 账号健康度/熔断计数/连败降级全都不动 → 下一个请求继续选中这个卡死的号，形成
+// 无限重试，只能重启进程恢复。用哨兵把两类错误分开，调用方才能各按语义记账：
+// 写失败是人已走（记成功合理），读中断是上游故障（绝不能记成功）。
+var errUpstreamAbort = errors.New("upstream stream aborted")
+
+// IsUpstreamAbortError 报告错误是否为「读上游中断」（区别于「写客户端失败」）。
+// 与 IsEmptyStreamError 同构：包装后的错误用 errors.Is 识别，调用方不必解析文案。
+// 判定顺序建议：先 IsEmptyStreamError（空流有独立兜底语义），再本函数。
+func IsUpstreamAbortError(err error) bool { return errors.Is(err, errUpstreamAbort) }
+
 // Aggregate 读取完整 SSE 流，聚合 delta.content 为单个 OpenAI chat.completion 响应。
 // 分片/半行由 bufio.Reader.ReadString 处理；遇到 "data: [DONE]" 结束。
 // tool_calls 以流式 delta 到达（按 index 合并：首片带 id/type/name，后续只带 arguments 片段）。
@@ -469,6 +486,8 @@ func normalizeFrame(obj map[string]any) map[string]any {
 // Stream 透传上游 SSE 到 w（逐帧规范化后 flush），保证至少写一个 [DONE]。
 // 调用方必须先设置过 status 200；本函数自设 SSE headers。
 // 流式策略：逐帧透传（规范化已剥空 content 噪声），恢复与上游一致的平滑流式。
+// 空闲超过 streamHeartbeatInterval 时补写 `: keep-alive` 注释帧（见 sse_heartbeat.go），
+// 覆盖上游 200 之后迟迟不吐首帧的静默期——数据帧字节与顺序不受影响。
 //
 // StreamHint 变体（gateway_hint 任务）：上游 error 帧透传时附加
 // error.gateway_hint 字段——message 原文不动，hint 并列补充；hintFn 返回空串
@@ -479,12 +498,16 @@ func Stream(w http.ResponseWriter, r io.Reader) error {
 
 // StreamOption StreamHint 的可选行为开关。
 // WithErrorFrameObserver 只做旁路观测、不改透传字节；WithMarkupRepair 会改写出站
-// 帧（把正文里的原生工具调用标记还原成 delta.tool_calls，见 dsml.go）。
+// 帧（把正文里的原生工具调用标记还原成 delta.tool_calls，见 dsml.go）；
+// WithHeartbeatInterval 只调整保活心跳的阈值（默认值见 streamHeartbeatInterval）。
 type StreamOption func(*streamOptions)
 
 type streamOptions struct {
 	onErrorFrame func(payload string)
 	markup       *MarkupRepair
+	// heartbeat 客户端保活心跳间隔：0 = 用默认 streamHeartbeatInterval，
+	// 负数 = 关闭心跳（见 WithHeartbeatInterval）。
+	heartbeat time.Duration
 }
 
 // WithMarkupRepair 注册「模型原生工具调用标记」修复器（见 dsml.go）。
@@ -506,6 +529,16 @@ func WithErrorFrameObserver(fn func(payload string)) StreamOption {
 	return func(o *streamOptions) { o.onErrorFrame = fn }
 }
 
+// WithHeartbeatInterval 覆盖客户端保活心跳的空闲阈值（默认 streamHeartbeatInterval，
+// 见 sse_heartbeat.go）。只在两种场景用得到：
+//   - 测试：用毫秒级间隔在「上游迟迟不吐首帧」的夹具上断言心跳确实在首帧之前发出；
+//   - 逐字节比对：传负值关闭心跳，得到「无心跳」的基线字节。
+//
+// 生产路径不应传此选项——默认 15s 是按客户端 300s 空闲阈值留出来的安全余量。
+func WithHeartbeatInterval(d time.Duration) StreamOption {
+	return func(o *streamOptions) { o.heartbeat = d }
+}
+
 // StreamHint 同 Stream，但上游 error 帧透出前把 hintFn(payload) 的返回值写入
 // error.gateway_hint。hintFn 为 nil 或返回空串 → 原样透传（零改写）。
 // 空流兜底 error 帧（"empty upstream stream"）不带 hint（网关本地故障形态
@@ -524,6 +557,17 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
 	fl, _ := w.(http.Flusher)
+
+	// 客户端保活心跳（见 sse_heartbeat.go）：把 w 包成并发安全的 SSE 出口，由独立
+	// goroutine 在「距上次写出超过阈值」时补一帧注释（`: keep-alive\n\n`）。
+	// 本函数的主循环阻塞在 br.ReadString 上，上游 200 之后到首帧之间可能静默数十秒
+	// 到数分钟（数十万 token 上下文的 prefill），这段最长的静默期正是客户端
+	// 「stream idle timeout」触发的现场；流中间的长时间空闲由同一机制覆盖。
+	// 所有出站字节（writeSSE / 注释行透传 / 收尾 [DONE]）都经 out 单锁串行化，
+	// 避免心跳与数据帧交错；defer Close 覆盖正常结束、出错、客户端断连三条路径
+	// （停 ticker + 等 goroutine 退出），故不会有 goroutine 泄漏或 Close 后写。
+	out := NewSSEWriterInterval(w, fl, o.heartbeat)
+	defer out.Close()
 
 	// toolCallSeen 跨帧记录 delta.tool_calls 里已发过首片的 index，
 	// 供逐 chunk 透传时收敛 name 为「每 index 一次」（对齐 OpenAI 官方流）。
@@ -544,13 +588,10 @@ func StreamHint(w http.ResponseWriter, r io.Reader, hintFn func(string) string, 
 	maxToolIdx := -1
 	toolFinishSent := false
 
-	// writeSSE 原样写出一帧并 flush。
+	// writeSSE 原样写出一帧并 flush（经 out：加锁串行化 + 刷新心跳基准）。
 	writeSSE := func(payload string) error {
-		if _, werr := io.WriteString(w, "data: "+payload+"\n\n"); werr != nil {
+		if _, werr := io.WriteString(out, "data: "+payload+"\n\n"); werr != nil {
 			return werr
-		}
-		if fl != nil {
-			fl.Flush()
 		}
 		return nil
 	}
@@ -725,12 +766,10 @@ readLoop:
 				return werr
 			}
 		case trimmed != "":
-			// 注释/其他行：原样透传
-			if _, werr := io.WriteString(w, line); werr != nil {
+			// 注释/其他行：原样透传（同样经 out，否则心跳可能与这半行交错；
+			// 注释行本身就是合法 SSE 分帧边界，心跳插在它前后都不影响解析）
+			if _, werr := io.WriteString(out, line); werr != nil {
 				return werr
-			}
-			if fl != nil {
-				fl.Flush()
 			}
 		}
 		// 空行（帧分隔）吞掉：本函数自产 "\n\n"
@@ -738,7 +777,10 @@ readLoop:
 			if err == io.EOF {
 				break
 			}
-			return err
+			// 读上游中断（非 EOF）：上游掐流 / 传输层读超时 / 空闲看门狗 cancel
+			// context。用哨兵包裹后返回，调用方据此与「写客户端失败」区分
+			// （见 errUpstreamAbort；写侧错误保持原样返回，不做任何包装）。
+			return fmt.Errorf("%w: %v", errUpstreamAbort, err)
 		}
 	}
 	// 标记修复的尾部收尾：流结束时仍未判定的字节一律原文回吐（绝不吞字节，未闭合
@@ -772,11 +814,8 @@ readLoop:
 		_ = writeRaw(`{"error":{"message":"empty upstream stream","type":"upstream_error","code":"upstream_parse"}}`)
 	}
 	// 保证恰好写一个 [DONE]（上游漏发时兜底补上）。
-	if _, err := io.WriteString(w, "data: [DONE]\n\n"); err != nil {
+	if _, err := io.WriteString(out, "data: [DONE]\n\n"); err != nil {
 		return err
-	}
-	if fl != nil {
-		fl.Flush()
 	}
 	if validFrames == 0 {
 		return errEmptyStream

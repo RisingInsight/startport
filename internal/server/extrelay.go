@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strings"
@@ -24,8 +25,15 @@ import (
 	"github.com/RisingInsight/startport/internal/pool"
 	"github.com/RisingInsight/startport/internal/provider"
 	"github.com/RisingInsight/startport/internal/reqlog"
+	// 别名避免与本地变量 upstream（渠道内上游模型名）冲突；这里只取流式出口。
+	sseupstream "github.com/RisingInsight/startport/internal/upstream"
 	"github.com/RisingInsight/startport/internal/usage"
 )
+
+// sseHeartbeatInterval 流式出口的客户端保活阈值（extrelay / ext 的 messages、
+// responses 三处共用同一口径）。用包级变量而非直接引用 upstream 常量：测试需要
+// 毫秒级阈值才能在夹具里观察到心跳，生产值恒为 upstream.DefaultHeartbeatInterval。
+var sseHeartbeatInterval = sseupstream.DefaultHeartbeatInterval
 
 // handleExtChat 外部渠道聊天入口（chatCompletions 前缀路由短路后进到这里）。
 // body 为原始请求体（未做任何提示词改写）；model 为入站原始模型名。
@@ -95,29 +103,61 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
+		// 客户端保活心跳：与主链路（upstream.StreamHint）共用同一套 SSEWriter——
+		// 上游 200 之后到首帧之间同样可能长时间静默（大上下文 prefill / 上游排队），
+		// 期间一个字节都不写会被客户端按「流空闲超时」判死（dsh 实测 300s 后
+		// 反复重试，界面一直转圈）。`: keep-alive` 是 SSE 注释帧，客户端解析器一律
+		// 忽略，数据帧字节与顺序零改动；所有写经同一把锁串行化，心跳不会插进帧内。
+		// defer Close 覆盖正常结束 / 上游断 / 客户端断连三条路径（停 ticker +
+		// 回收 goroutine），不会有 goroutine 泄漏或 Close 后写。
+		out := sseupstream.NewSSEWriterInterval(w, flusher, sseHeartbeatInterval)
+		defer out.Close()
 		stats := newChatStatsReaderSince(res.Reader, st.start)
 		buf := make([]byte, 32*1024)
-		var clientGone bool
+		var clientGone, upstreamAbort bool
 		for {
+			if herr := out.Err(); herr != nil {
+				// 心跳已在后台发现写失败（客户端断连）：不必等下一次 read 才收手。
+				clientGone = true
+				break
+			}
 			n, rerr := stats.Read(buf)
 			if n > 0 {
-				if _, werr := w.Write(buf[:n]); werr != nil {
+				if _, werr := out.Write(buf[:n]); werr != nil {
 					clientGone = true // 写失败 = 客户端断连；上游帧无恙
 					break
 				}
-				if flusher != nil {
-					flusher.Flush()
-				}
 			}
 			if rerr != nil {
-				break // EOF=正常结束；读错误=上游断（两种都停读）
+				// EOF = 上游正常收尾；其余读错误 = 上游中断（连接被掐 / 卡死被看门狗
+				// 掐流）。二者结局相反，此前一律落到 OutcomeSuccess——上游卡死的渠道
+				// 被记成成功，与主链路那次 P0 同源的误判。请求 ctx 已取消时读中断只是
+				// 客户端断连的连带（上游 body 随请求 ctx 取消），仍归 Interrupted。
+				if rerr != io.EOF && r.Context().Err() == nil {
+					upstreamAbort = true
+				}
+				break
 			}
 		}
 		delta := stats.Usage()
 		credit, hasCredit := stats.Credit()
-		if clientGone {
+		switch {
+		case clientGone:
 			st.outcome = reqlog.OutcomeInterrupted
-		} else if st.outcome == "" {
+		case upstreamAbort:
+			st.outcome = reqlog.OutcomeStreamError
+			// 渠道级记账（此前只记 outcome + 日志，渠道永不冷却 → 200 之后卡死的
+			// 渠道会被下一个请求继续选中，「越用越死」的闭环在 ext 侧没合上）。
+			// 与 Do 的传输失败同口径：凭证 + 渠道各记一次，阈值/熔断时长由 extchan
+			// 内部决定（server 侧不硬编码治理参数）。客户端主动断连不会走到这里
+			// （上面的 upstreamAbort 判定已排除 ctx 取消）。
+			if cred != nil {
+				cred.NoteFailure("stream aborted mid-stream")
+			}
+			ch2.NoteStreamAbort("stream aborted mid-stream")
+			log.Printf("WARN: [server] ext=%s model=%s: upstream aborted mid-stream (channel penalty noted)",
+				ch2.Name, upstream)
+		case st.outcome == "":
 			st.outcome = reqlog.OutcomeSuccess
 		}
 		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, delta, credit, hasCredit, true, attemptStarted, stats.TTFB(), display)

@@ -4,6 +4,7 @@
 package server
 
 import (
+	"reflect"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -289,5 +290,56 @@ func TestResponsesUnsupportedRejected(t *testing.T) {
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("case %d: status %d, want 400: %s", i, rec.Code, rec.Body.String())
 		}
+	}
+}
+
+// output_item.added 事件里的 output_index 序列（按事件顺序提取）。
+func responsesAddedIndexes(body string) []int {
+	var out []int
+	lines := strings.Split(body, "\n")
+	for i, ln := range lines {
+		if strings.TrimSpace(ln) != "event: response.output_item.added" || i+1 >= len(lines) {
+			continue
+		}
+		var ev struct {
+			OutputIndex int `json:"output_index"`
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(lines[i+1], "data: ")), &ev); err == nil {
+			out = append(out, ev.OutputIndex)
+		}
+	}
+	return out
+}
+
+// output_index 连续性回归：文本 item 与 function_call item 的 output_index 必须
+// 连续不跳号。曾有双重递增 bug——closeTextItem 已把 outIdx 前进一次，开新工具
+// 又预递增一次：文本后首个工具拿到 index 2（跳过 1），纯工具流则从 1 开始
+// （跳过 0），违反 Responses 事件序列的连续索引语义。
+func TestResponsesToolCallOutputIndexContiguous(t *testing.T) {
+	// 场景一：先文本后工具 → 文本 0、工具 1。
+	sse := "data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n" +
+		"data: [DONE]\n\n"
+	h := newResponsesHandler(t, func(r *http.Request) (int, string, bool) { return 200, sse, true })
+	rec := responsesPost(h, `{"model":"cn:glm-5.2","stream":true,"input":"hi"}`)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := responsesAddedIndexes(rec.Body.String()); !reflect.DeepEqual(got, []int{0, 1}) {
+		t.Errorf("文本→工具的 output_index 序列 = %v, want [0 1]\n完整输出:\n%s", got, rec.Body.String())
+	}
+
+	// 场景二：纯工具流（无文本）→ 工具 0 起步。
+	sse2 := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"shell\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"edit\",\"arguments\":\"{}\"}}]}}]}\n\n" +
+		"data: [DONE]\n\n"
+	h2 := newResponsesHandler(t, func(r *http.Request) (int, string, bool) { return 200, sse2, true })
+	rec2 := responsesPost(h2, `{"model":"cn:glm-5.2","stream":true,"input":"hi"}`)
+	if rec2.Code != 200 {
+		t.Fatalf("status %d: %s", rec2.Code, rec2.Body.String())
+	}
+	if got := responsesAddedIndexes(rec2.Body.String()); !reflect.DeepEqual(got, []int{0, 1}) {
+		t.Errorf("纯工具流的 output_index 序列 = %v, want [0 1]\n完整输出:\n%s", got, rec2.Body.String())
 	}
 }
