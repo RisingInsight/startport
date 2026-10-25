@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"net/http"
 	"strings"
 	"time"
@@ -263,7 +264,7 @@ func (c *autoclawChecker) userapiDo(ctx context.Context, method, token, path str
 	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%s请求失败（网络）", actionName(method))
+		return nil, fmt.Errorf("%s请求失败（网络）%s", actionName(method), netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"net/http"
 	"sort"
 	"strings"
@@ -477,7 +478,7 @@ func refreshQoderAt(ctx context.Context, base string, a *account.Account) (map[s
 	req.Header.Set("User-Agent", "qoder-local-proxy")
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("刷新请求失败（网络），请检查网络后重试")
+		return nil, fmt.Errorf("刷新请求失败（网络）%s，请检查网络后重试", netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	switch {

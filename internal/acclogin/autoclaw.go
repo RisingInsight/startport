@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"net/http"
 	"strings"
 	"time"
@@ -185,7 +186,7 @@ func (m *Manager) userapiPost(ctx context.Context, token, path string, body map[
 	}
 	resp, err := m.cfg.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("请求失败（网络），请检查网络后重试")
+		return nil, fmt.Errorf("请求失败（网络）%s，请检查网络后重试", netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

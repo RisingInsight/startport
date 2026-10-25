@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"net/http"
 	"strings"
 	"time"
@@ -66,7 +67,7 @@ func RefreshCodex(ctx context.Context, a *account.Account) (map[string]any, erro
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("刷新请求失败（网络）")
+		return nil, fmt.Errorf("刷新请求失败（网络）%s", netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	var result struct {

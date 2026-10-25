@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/RisingInsight/startport/internal/netdiag"
 	"net/http"
 	"sort"
 	"strings"
@@ -115,7 +116,7 @@ func autoclawBalanceGet(ctx context.Context, checker *autoclawChecker, token, pa
 	}
 	resp, err := checker.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("积分请求失败（网络）")
+		return nil, fmt.Errorf("积分请求失败（网络）%s", netdiag.ProxyHint(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
