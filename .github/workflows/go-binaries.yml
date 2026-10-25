@@ -37,6 +37,10 @@ jobs:
       # ubuntu runner 自带 node → panel 包的 JS 运行时冒烟测试（TestAppJSTopLevelSmoke）会真实执行
       - run: go vet ./...
       - run: go test ./...
+      # 覆盖率门禁：总语句覆盖率不得低于 scripts/coverage-baseline.txt 基线（防回退）。
+      # 基线更新流程见脚本头部注释。
+      - name: 覆盖率门禁（基线防回退）
+        run: bash scripts/coverage_gate.sh
 
   build:
     needs: test
