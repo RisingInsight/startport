@@ -32,7 +32,11 @@ const (
 	PlatformQoderIntl    = "qoder-intl"
 	PlatformTrae         = "trae"
 	PlatformCodex        = "codex"
-	PlatformCustom       = "custom"
+	// PlatformKuku 库库AI（百度 GenFlow）——**账号 / 额度型平台，无对话能力**。
+	// 它没有对外 API，凭证是网页版登录 Cookie；接进来的目的是把积分/额度纳入
+	// 账号中心统一看板与签到调度，而不是转发对话（见 PlatformSpec.AccountOnly）。
+	PlatformKuku   = "kuku"
+	PlatformCustom = "custom"
 )
 
 // ValidPlatform 报告 platform 是否受支持（注册表见 platform.go）。

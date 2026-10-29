@@ -84,6 +84,12 @@ func Sync(store *account.Store, loader Loader, save Saver, logf Loggerf) (string
 		if !account.NativePlatform(platform) {
 			continue
 		}
+		// 账号型平台（库库AI 一类）：没有对话 API，投影只会造出一条永远打不通的
+		// managed 渠道，污染路由表与模型探测。跳过即不投影——账号仍留在
+		// accounts.json，账号中心的额度/签到照常工作。
+		if s, ok := account.SpecOf(platform); ok && s.AccountOnly {
+			continue
+		}
 		idx, found := byName[platform]
 		switch {
 		case !found:

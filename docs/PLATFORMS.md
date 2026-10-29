@@ -182,6 +182,19 @@
 - **刷新**：`internal/checkin/codex_refresh.go` 实现 OAuth 刷新令牌换新令牌组；⚠ 契约来自公开参考实现，未用真实账号联调。
 - **接入方式**：当前经「外部渠道」向导手工接入（`adapter=codex`、`protocol=responses`，凭证填 `auth.json` 全文）；账号中心的粘贴即用在下一批开放。
 
+### 库库AI（百度 GenFlow）· 账号 / 额度型
+
+- **没有对话能力，也不打算有**：库库AI 是消费级智能体产品（`kuku.baidu.com`，前端 `pc-genflow-pro`），没有对外开发者 API；它的「对话」走 `/wenchain/genflowpro/sendmsg` + SSE 任务协议，背后是技能/工作区/多步任务，映射不成 Chat Completions。本项目只在账号中心接它的**积分 / 额度**，不参与聊天路由。
+- **凭证**：网页版登录 Cookie（`BDUSS` / `STOKEN` 为 httpOnly），没有 OAuth、没有 refresh——失效只能重新登录再粘贴。凭证 blob：`{"cookie":"BDUSS=…; STOKEN=…"}`（校验要求含 `BDUSS=`）。
+- **接口**（逆向自前端 bundle；⚠ 额度字段名待真实账号确认）：
+  - 积分首页 `GET /api/genflowpro/freepoint/homenew` → `{data, errno, show_msg}`；
+  - VIP 余量 `GET /bizapi/gfpro/getgfvipremain` → `{status:{code,msg}, data}`（另一套信封）；
+  - 资料 `GET /api/genflowpro/settings/profile`；签到/邀请 `freepoint/{taskComplete,rewardClaim,inviteCode,inviteBind}`（**未接线**）。
+  - `errno` 语义：`0` 成功 / `-6` 未登录 / `2` 参数错（未登录拿不到 uk 也报这个）/ `151004` 无活动。`-6`、`2`、HTTP 401/403 统一翻译成「登录态已失效」。
+- **`AccountOnly` 标记**：`platformSpecs` 里 `AccountOnly: true` 让 `acctchan` **跳过渠道投影**——否则会造出一条永远打不通的 managed 渠道，污染路由表与模型探测。`provider/kuku.go` 只做注册占位，任何出站方法都直接返回 `ErrKukuNoChat`（注册表一致性测试要求 Native 平台必须有同名适配器，无法省略）。
+- **契约状态**：⚠ 余额字段名未用真实账号验证，解析采用「候选键名宽松提取 + 提不到就报错并列出实际键」策略，绝不返回编造数字；`Checkin` 保持 `false`，待 `scripts/probe_kuku.py` 跑通签到链路后再开。
+- **已知边界**：`sendmsg` 侧完全未实现；Cookie 与账号密码同级，只存本地 `accounts.json`。
+
 ---
 
 ## 新增原生平台的成本
@@ -193,5 +206,7 @@
 3. `internal/acclogin/`：登录流程（如支持浏览器登录）
 4. `internal/checkin/`：签到 / 刷新 / 余额（如平台提供）
 5. `internal/account/platform.go`：`platformSpecs` 加一行
+
+只有账号/额度、没有对话 API 的平台（如库库AI）：第 1 步改成**只报错的占位适配器**，第 5 步加 `AccountOnly: true`（`acctchan` 据此跳过渠道投影），第 4 步只实现余额。
 
 漏改会红测试（`platform_test.go` 三向一致断言 + 面板 parity 测试），不会静默分叉。**能配置搞定的平台请走通用渠道，零 Go 代码。**

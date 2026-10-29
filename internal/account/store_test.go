@@ -213,6 +213,19 @@ func TestValidateCred(t *testing.T) {
 	if err := ValidateCred("bogus", loomyCred()); err == nil {
 		t.Error("未知平台应报错")
 	}
+	// 库库AI：凭证是网页登录 Cookie，必须带 BDUSS（登录态核心键）。
+	if err := ValidateCred(PlatformKuku, json.RawMessage(`{"cookie":""}`)); err == nil {
+		t.Error("空 cookie 应报错")
+	}
+	if err := ValidateCred(PlatformKuku, json.RawMessage(`{"cookie":"short"}`)); err == nil {
+		t.Error("过短 cookie 应报错")
+	}
+	if err := ValidateCred(PlatformKuku, json.RawMessage(`{"cookie":"foo=bar; baz=qux; longenough"}`)); err == nil {
+		t.Error("缺 BDUSS 的 cookie 应报错")
+	}
+	if err := ValidateCred(PlatformKuku, json.RawMessage(`{"cookie":"BDUSS=abcdefghijklmnop; STOKEN=xyz"}`)); err != nil {
+		t.Errorf("合法 kuku blob 报错: %v", err)
+	}
 }
 
 // PrimarySecret：qoder 产出适配器形态的账号 JSON（mode 按平台推导）。
