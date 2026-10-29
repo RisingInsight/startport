@@ -42,6 +42,14 @@ const (
 	ErrPromptTooLong                 // 11115「prompt is too long」→ 请求级错误（上下文超限是请求的问题非账号的问题）：不罚号、不轮转，末端透传原文
 	ErrImageInvalid                  // 图片请求格式/数据无效 → 请求级错误：不罚号、不轮转，末端透传原文
 	ErrClient                        // 其他 4xx / 业务错误
+	// ErrChannelReject 11128「request illegal」——渠道校验/反探测的**请求级**拒绝
+	// （displayTips："This call failed channel verification, possibly because it was
+	// not sent from an official client"）。同一文案也被账号级 11140 使用，但语义相反：
+	// 渠道校验由**出站指纹/路径**决定，换号结果完全一样，罚号纯属误杀。
+	// 不罚号、不轮转，末端 400 透传；chat 层对 global 先在候选路径间切换（见
+	// ChatStreamContext 的路径 fallback）。
+	// 追加在末尾：既有 Kind 的 iota 值保持不变（任何持久化/日志口径不受影响）。
+	ErrChannelReject
 )
 
 func (k ErrKind) String() string {
@@ -72,6 +80,8 @@ func (k ErrKind) String() string {
 		return "account_fault"
 	case ErrClient:
 		return "client"
+	case ErrChannelReject:
+		return "channel_reject"
 	default:
 		return "none"
 	}
@@ -135,10 +145,31 @@ var sessionDeadMarkers = []string{"Offline user session not found", "12153"}
 // is rate-limiting requests."），那种场景必须保持 ErrSoftRate（下方 softRateMarkers
 // 后判定）。故此处只收 msg 关键词 "request illegal"（auth_forbidden 的真实文案）。
 // 14017 文案唯一（无软限流歧义），可安全收录。
+//
+// "request illegal" 这句文案 **11128 也在用**（渠道校验/反探测），语义却是请求级。
+// 该歧义由 Classify 里更靠前的 hasBusinessCode(body,"11128") → ErrChannelReject 兜住：
+// 只要响应带结构化 code=11128 就走不到本表。本表只兜「无 code、只有文案」的形态。
 var accountFaultMarkers = []string{
 	"request illegal",
 	"trial not activated",
 	"trial version is not yet activated",
+}
+
+// channelRejectMarkers 11128 家族里属于「渠道校验/请求级」的文案（仅在该 code 命中
+// 时才按本表细分，见 Classify 的 11128 分支）。命中即 ErrChannelReject：不罚号、
+// 不轮转，由 chat 层换候选路径或末端 400 透传。
+//
+// 关键约束：本表只匹配**信封顶层的 msg 字段**（businessMsg），不匹配整包 body。
+// 原因：11128 的 displayTips 里固定带一句 "This call failed channel verification"，
+// 是这类错误的通用提示，对内容审核变体（"Illegal API invocation from an unapproved
+// channel"）同样会出现——按整包匹配会把内容误报也吞成渠道拒绝，从而跳过
+// ErrContentBlocked 的降级重试（2026-10-29 晚 DSH 请求全部 400 的直接原因）。
+//
+// 注意 "request illegal" 与 accountFaultMarkers 重叠：靠「先按 code 收窄」区分——
+// 带 code=11128 走本表（请求级），带 11140 或无 code 才落到账号级表。
+var channelRejectMarkers = []string{
+	"request illegal",
+	"first message is not system prompt",
 }
 
 // contentBlockedMarkers 内容策略拦截关键词（大小写不敏感子串匹配）。
@@ -290,6 +321,76 @@ func IsModelBlocked(status int, body string) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(msg), modelBlockMsgMarker)
+}
+
+// businessMsg 取上游错误信封里的 msg 原文（顶层优先，嵌套 error/data 兜底）。
+//
+// 只取 msg 字段、不取整包 body：11128 的 displayTips/displayMsg 是通用提示语
+// （固定带 "This call failed channel verification"），拿整包做关键词匹配会把
+// 内容审核变体误判成渠道拒绝（见 channelRejectMarkers 注释）。
+func businessMsg(body string) string {
+	var root any
+	if err := json.Unmarshal([]byte(body), &root); err != nil {
+		return ""
+	}
+	var walk func(any) string
+	walk = func(value any) string {
+		switch node := value.(type) {
+		case map[string]any:
+			if v, ok := node["msg"].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+			for _, child := range node {
+				if s := walk(child); s != "" {
+					return s
+				}
+			}
+		case []any:
+			for _, child := range node {
+				if s := walk(child); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	return walk(root)
+}
+
+// BusinessCode 从上游错误信封里取出业务码原文（"code" 字段，顶层或嵌套皆可）。
+// 取不到（非 JSON / 无 code 字段）返回空串。
+//
+// 用途：把真实业务码写进账号的禁用原因/日志，替代此前硬编码的 11140 —— 11128 与
+// 11140 共用 "request illegal" 文案，硬编码会让排查方向直接跑偏（以为是账号被封）。
+func BusinessCode(body string) string {
+	var root any
+	if err := json.Unmarshal([]byte(body), &root); err != nil {
+		return ""
+	}
+	var walk func(any) string
+	walk = func(value any) string {
+		switch node := value.(type) {
+		case map[string]any:
+			if code, ok := node["code"]; ok {
+				if s := strings.TrimSpace(fmt.Sprint(code)); s != "" && s != "<nil>" {
+					return s
+				}
+			}
+			for _, child := range node {
+				if s := walk(child); s != "" {
+					return s
+				}
+			}
+		case []any:
+			for _, child := range node {
+				if s := walk(child); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	return walk(root)
 }
 
 // hasBusinessCode reports whether a JSON error envelope contains an exact
@@ -463,7 +564,10 @@ func ParseRateReset(body string) (time.Time, bool) {
 //     "rate limit"（如网关错误页混排），归 session_dead：短冷却救不活失效 session，
 //     误判为限流会让该死号留在池中反复被选中；且此层 marker 是精确词（12153 等），
 //     比限流层的大范围子串更具体，具体优先于宽泛。
-//  3. accountFaultMarkers —— 账号级授权/配额故障（11140 request illegal auth 风控、
+//  3. 11128（ErrChannelReject）—— 渠道校验/反探测的请求级拒绝。必须**先于**
+//     accountFaultMarkers：两者共用 "request illegal" 文案，短语匹配会把请求级
+//     拒绝吞成账号级封禁（线上事故见下方代码注释）。
+//     3b. accountFaultMarkers —— 账号级授权/配额故障（11140 request illegal auth 风控、
 //     14017 trial not activated register 未完成）。必须先于 status==429 判定：
 //     14017 常带 429 状态码，若落到 status==429 会误归 soft_rate（"限流"语义不符：
 //     限流可指数退避等自愈，账号级故障等不来）。11140 的 model 级限流变体
@@ -505,6 +609,26 @@ func Classify(status int, body string) ErrKind {
 	for _, m := range sessionDeadMarkers {
 		if strings.Contains(body, m) {
 			return ErrSessionDead
+		}
+	}
+	// 11128 是上游「请求级非法」的家族码，同一 code 下至少三种文案，处置完全不同：
+	//   - "request illegal"（渠道校验："This call failed channel verification, possibly
+	//     because it was not sent from an official client"）→ 请求级，换号无效；
+	//   - "first message is not system prompt"（/console 域的格式前置条件）→ 请求级；
+	//   - "blocked by security policy"（内容安全）→ 仍是 ErrContentBlocked（下方
+	//     contentBlockedMarkers 负责，它有降级重试语义，不能混进本类）。
+	// 必须先按 code 收窄再按文案细分，否则 accountFaultMarkers 的短语匹配会把渠道
+	// 校验吞成账号级封禁。线上事故（2026-10-29）：国际版账号因 global /v2 关闸收到
+	// 11128 → 被判成 11140 → Pool.Disable 永久禁用，而账号本身完好（余额/目录/对话
+	// 在 /console 上全部正常）。
+	if hasBusinessCode(body, "11128") {
+		if msg := businessMsg(body); msg != "" {
+			low := strings.ToLower(msg)
+			for _, m := range channelRejectMarkers {
+				if strings.Contains(low, m) {
+					return ErrChannelReject
+				}
+			}
 		}
 	}
 	for _, m := range accountFaultMarkers {
@@ -735,15 +859,27 @@ func (c *Client) globalOn(a *auth.Auth) bool {
 	return c.GlobalEnabled && a != nil && a.Realm() == "global"
 }
 
-// 路径常量：CN 与 global 共用的 chat 出站路径（/v2 单路径）。
-const chatCompletionsPath = "/v2/chat/completions"
+// 路径常量：chat 出站的两条等价端点。
+const (
+	// chatCompletionsPath /v2 单路径（CN 现状；global 已在此路径上被渠道校验关闸）。
+	chatCompletionsPath = "/v2/chat/completions"
+	// consoleChatPath /console 路径（global 现役可用路径）。
+	consoleChatPath = "/console/chat/completions"
+)
 
 // chatPaths 返回按 realm 的 chat 路径候选序列：
-// global → [/v2]（#119 固定单路径：/console 挂腾讯云 WAF body 内容规则，反引号
-// printf/whoami 等命令执行特征确定性 403；/v2 同 base 不挂该规则，实测等价端点。
-// 已知取舍：若上游未来关闭 /v2，global chat 整体不可用——届时应重新启用 /console
-// 路径，此注释即"坏了再说"的锚点）；cn → [/v2]（单元素，现状）。
+// global → [/console, /v2]（首选 /console：2026-10-29 实测 /v2 对 global 恒返回
+// 11128「request illegal / channel verification」，而 /console 同号同头正常出流；
+// /v2 留作兜底——上游若把闸门挪回去，第一个候选失败会自动换到第二个，不必再改代码）；
+// cn → [/v2]（单元素，现状不变）。
+//
+// 历史：#119 曾把 global 固定成 /v2，理由是 /console 挂腾讯云 WAF 的 body 内容规则
+// （反引号 printf/whoami 等命令执行特征会确定性 403），注释里写明「若上游关闭 /v2，
+// global chat 整体不可用——届时重新启用 /console」。本次即该场景触发。
 func (c *Client) chatPaths(a *auth.Auth) []string {
+	if c.globalOn(a) {
+		return []string{consoleChatPath, chatCompletionsPath}
+	}
 	return []string{chatCompletionsPath}
 }
 
@@ -1019,11 +1155,11 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta Cha
 // 原文）。判定为 ErrNone 的响应（理论上不存在，防御）err 为 nil，handler 按
 // respBody 自行兜底。
 //
-// global chat 自 #119 实测后固定走 /v2（chat 层无 fallback 链；billing 层的 404
-// fallback 独立存在，语义不受影响）。ensureConsoleSystem 在 prepareBody 后统一套用
-// 全局脚本：首条消息非 system 时前置兜底 system（防 console 域上游 code 11-128；
-// #119 后 global 出站固定 /v2，该兜底保留——上游对 /v2 是否需要 system 无实测
-// 反证，删了无回滚路径）。
+// global chat 走候选路径链（chatPaths：/console 首选、/v2 兜底；2026-10-29 起
+// /v2 对 global 被渠道校验关闸，见 chatPaths 注释）。ensureConsoleSystem 在
+// prepareBody 后统一套用全局脚本：首条消息非 system 时前置兜底 system——/console
+// 域强制要求首条是 system（否则 11128 "first message is not system prompt"），
+// 换路径后这层兜底从「防御」变成「必需」。
 func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byte, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1035,7 +1171,8 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。
-	for _, path := range c.chatPaths(a) {
+	paths := c.chatPaths(a)
+	for i, path := range paths {
 		endpoint := c.chatBase(a) + path
 		req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(prepared))
 		if err != nil {
@@ -1069,7 +1206,16 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 			kind := Classify(resp.StatusCode, string(raw))
 			log.Printf("WARN: [upstream] chat_stream acct=%s: upstream %d %s body=%s",
 				logfmt.Label(a.UID, a.Nickname), resp.StatusCode, kind, truncate(string(raw), 200))
-			// ≥400 直接返回（#119 后 global 单路径 /v2，chat 层无 fallback 链）。
+			// 路径级拒绝 → 换下一条候选路径重试（global 的 /console↔/v2 互为兜底）。
+			// 判定口径：11128 渠道校验/反探测 + 404 路径缺失，都是「这条路走不通」，
+			// 与「这个号不能用」正交——换号无用，换路径才有用。
+			// 账号级错误（11140/12153/402/429/5xx…）刻意不在此列：换路径对它们没意义，
+			// 照旧落到下方 return 交给 applyErrorPolicy 记账。
+			if i < len(paths)-1 && (kind == ErrChannelReject || kind == ErrNotFound) {
+				log.Printf("WARN: [upstream] chat_stream acct=%s: path %s rejected (%s), falling back to %s",
+					logfmt.Label(a.UID, a.Nickname), path, kind, paths[i+1])
+				continue
+			}
 			// 分类一次、随 Kind 信封返回（含 Retry-After 头解析）：
 			// ErrNone 是防御分支（≥400 不应产生 None），返回原文让 handler 兜底。
 			if kind == ErrNone {

@@ -630,6 +630,49 @@ func TestApplyErrorPolicySoftRateExponentialBackoff(t *testing.T) {
 	}
 }
 
+// TestApplyErrorPolicyChannelRejectDoesNotPunishAccount 11128 渠道校验是**请求级**
+// 拒绝：不冷却、不禁用、不计错。回归锚点——修复前该形态被当成 ErrAccountFault
+// 触发 Pool.Disable，把完好账号永久判死（2026-10-29 国际版事故）。
+func TestApplyErrorPolicyChannelRejectDoesNotPunishAccount(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p, SoftCooldown: 10 * time.Minute})
+
+	for i := 1; i <= 3; i++ {
+		h.applyErrorPolicy("u1", upstream.ErrChannelReject, `{"code":11128,"msg":"request illegal"}`, "glm-5.2", nil)
+		st, ok := p.Status("u1")
+		if !ok {
+			t.Fatal("账号应仍在池中")
+		}
+		if st.Cooling {
+			t.Fatalf("call %d: 渠道校验不应冷却账号: %+v", i, st)
+		}
+		if st.Disabled {
+			t.Fatalf("call %d: 渠道校验不应禁用账号: %+v", i, st)
+		}
+		if st.Reason != "" {
+			t.Errorf("call %d: 不应写入 reason, got %q", i, st.Reason)
+		}
+	}
+}
+
+// TestApplyErrorPolicyAccountFaultRecordsRealCode 账号级封禁的 reason 必须记**真实
+// 业务码**（此前硬编码 11140，遇到同文案的 11128 会把排查方向带偏）。
+func TestApplyErrorPolicyAccountFaultRecordsRealCode(t *testing.T) {
+	p := pool.New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	h := NewHandler(Config{Pool: p})
+
+	h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"code":11140,"msg":"request illegal"}`, "glm-5.2", nil)
+	st, _ := p.Status("u1")
+	if !st.Disabled {
+		t.Fatalf("11140 账号级封禁应禁用: %+v", st)
+	}
+	if !strings.Contains(st.Reason, "11140") {
+		t.Errorf("reason 应含真实业务码 11140, got %q", st.Reason)
+	}
+}
+
 func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 	// 404 分流：偶发上游 404 的冷却基数固定 60s（notFoundCooldown），不取 soft_rate
 	// 的 600s 基数，也不受其配置值影响。Cooldown 重构后 404 是固定时长冷却
