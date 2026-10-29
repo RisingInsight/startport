@@ -1110,6 +1110,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.outcome = reqlog.OutcomeHTTPError
 				return
 			}
+			// 11128 渠道校验/反探测（请求级）：候选路径 fallback 已在 ChatStreamContext
+			// 内走完（global 的 /console→/v2），到这里说明所有路径都被拒。渠道校验看的是
+			// 出站指纹与路径、不看账号，换号结果一模一样 → 立即 400 透传原文并终止轮转。
+			// 关键：**不罚号**（applyErrorPolicy 该分支零动作）。修复前这条错误被归成
+			// ErrAccountFault 触发 Pool.Disable，把完好账号永久判死。
+			if kind == upstream.ErrChannelReject {
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, uerr)
+				fail(acct.UID)
+				msg := string(respBody)
+				if strings.TrimSpace(msg) == "" {
+					msg = "request was rejected by upstream channel verification"
+				}
+				writeOpenAIErrorHint(w, http.StatusBadRequest, "channel_rejected", msg,
+					h.hintOf(upstream.ErrChannelReject, string(respBody), bareModel, reqHasImage, uerr))
+				st.status = http.StatusBadRequest
+				st.outcome = reqlog.OutcomeHTTPError
+				return
+			}
 			// lastErr 携带完整 body（uerr.Msg 在 upstream 侧截断 200 字符，透传语义
 			// 要求原文全量）+ Kind/RetryAfter（末端映射与冷却时长共用）。
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody), RetryAfter: uerr.RetryAfter}
@@ -1626,8 +1644,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
+		// 注：11128（渠道校验）也带同一句 "request illegal"，但已在 Classify 里按业务码
+		// 分流到 ErrChannelReject，走不到这里；这里的 disable 原因记**真实业务码**，
+		// 不再硬编码 11140（历史事故：reason 写着 11140，实际是 11128，排查被带偏）。
 		if strings.Contains(strings.ToLower(body), "request illegal") {
-			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
+			code := upstream.BusinessCode(body)
+			if code == "" {
+				code = "unknown"
+			}
+			h.cfg.Pool.Disable(uid, "account banned by upstream ("+code+" request illegal), re-login required")
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
@@ -1650,6 +1675,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；chatCompletions
 		// 已 fail-fast 400 透传原文、终止轮转——「换号可能有不同模型权限」属 11102
 		// （ErrModelBlocked）的分类域，与本类无关。
+	case upstream.ErrChannelReject:
+		// 11128 渠道校验/反探测：出站指纹或路径不对，换号结果一模一样。
+		// **零动作**（不冷却/不熔断/不 NoteError/不 Disable）——这是本分支存在的全部
+		// 理由：修复前该形态被 accountFaultMarkers 吞成 ErrAccountFault，触发
+		// Pool.Disable 把完好账号永久判死（2026-10-29 国际版事故）。
+		// 路径级 fallback 已在 ChatStreamContext 内完成；这里只剩「两条路都不通」，
+		// chatCompletions 直接 400 透传终止轮转。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），选号侧 healthyForModel 对该账号自动避开该模型。

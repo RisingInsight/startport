@@ -49,6 +49,9 @@ deliverables/gstack/
 /wb2api.exe
 /starport.exe
 /starport.exe~
+/starport-new.exe
+# 手工替换前的二进制回滚快照（体积大、可随时重建）
+/starport*.bak-*
 /login.exe
 /credit.exe
 

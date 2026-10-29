@@ -40,6 +40,22 @@ func TestClassify(t *testing.T) {
 		// 内容策略拦截（HTTP 400 + 审核文案）：误报信号，不罚账号，走降级重试。
 		{400, `Illegal API invocation from an unapproved channel`, ErrContentBlocked},
 		{400, `{"code":11128,"msg":"blocked by security policy"}`, ErrContentBlocked},
+		// 11128 的渠道校验变体与内容安全变体共用同一个 code，处置相反：
+		// 渠道校验是**请求级**拒绝（换号无效、绝不罚号），内容安全仍走降级重试。
+		// 回归锚点：修复前 "request illegal" 被 accountFaultMarkers 短语匹配吞成
+		// ErrAccountFault → Pool.Disable 把完好账号永久判死（2026-10-29 国际版事故）。
+		{400, `{"code":11128,"msg":"request illegal","displayTips":{"en":"This call failed channel verification"}}`, ErrChannelReject},
+		{403, `{"code":11128,"msg":"request illegal"}`, ErrChannelReject},
+		{400, `{"error":{"data":{"code":11128,"msg":"request illegal"}}}`, ErrChannelReject},
+		{400, `{"code":11128,"msg":"first message is not system prompt"}`, ErrChannelReject},
+		// 11128 的内容审核变体：displayTips 里同样带 "channel verification"，但 msg 是
+		// 内容指纹拦截 → 必须保持 ErrContentBlocked（有降级重试语义）。
+		// 回归锚点：2026-10-29 晚按整包匹配把 DSH 的请求全判成渠道拒绝，跳过了重试。
+		{400, `{"code":11128,"msg":"Illegal API invocation from an unapproved channel","displayTips":{"en":"This call failed channel verification, possibly because it was not sent from an official client."}}`, ErrContentBlocked},
+		// 11140 同文案仍是账号级（按 code 收窄，不会被上面那条规则误吞）。
+		{403, `{"code":11140,"msg":"request illegal"}`, ErrAccountFault},
+		// 无 code 只有文案：保持账号级兜底（无法区分，宁可保守）。
+		{403, `{"msg":"request illegal"}`, ErrAccountFault},
 		{400, `unapproved channel`, ErrContentBlocked},
 		// 通用 4xx（非审核文案）：仍判 ErrClient，只换号不罚。
 		{400, `bad request`, ErrClient},
