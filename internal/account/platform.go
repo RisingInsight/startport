@@ -39,6 +39,16 @@ type PlatformSpec struct {
 	Refresh bool `json:"refresh"`
 	// Balance 平台有余额/额度查询实现（面板「余额」动作与 Hero 积分列）。
 	Balance bool `json:"balance"`
+	// AccountOnly 账号型平台：**只做账号 / 额度 / 签到，不转发对话**。
+	//
+	// 为什么需要这个开关：原生平台的通用语义是「账号 → 投影成一条 managed ext
+	// 渠道 → 参与聊天路由」。但库库AI 这类消费级产品没有对话 API（只有智能体
+	// 任务接口），硬投影会造出一条永远打不通的渠道，污染路由表与模型探测。
+	// 置 true 时：acctchan 跳过投影，provider 侧注册的是**只报错的 stub 适配器**
+	// （注册表一致性测试要求 Native 平台必须有同名适配器，无法省略）。
+	//
+	// 零值 false = 既有语义（有对话能力），新增平台不受影响。
+	AccountOnly bool `json:"account_only,omitempty"`
 }
 
 // platformSpecs 平台清单（顺序即面板展示顺序；custom 恒在末尾）。
@@ -97,6 +107,16 @@ var platformSpecs = []PlatformSpec{
 		// 无签到 / 无余额（ChatGPT 订阅无积分体系）；账号中心的凭证校验与投影
 		// 接线在下一批打开（届时粘贴 auth.json 即用）。
 		Refresh: true,
+	},
+	{
+		Key: PlatformKuku, Name: "库库AI（百度 GenFlow）", Native: true, Adapter: PlatformKuku,
+		DefaultBaseURL: "https://kuku.baidu.com",
+		// 账号 / 额度型：没有对话 API，只做凭证 + 余额（后续接签到）。
+		// 凭证是网页版登录 Cookie（BDUSS/STOKEN），没有 OAuth 流程 → LoginNone。
+		// Checkin 暂不开：签到接口（freepoint/taskComplete、rewardClaim）的请求体
+		// 契约尚未用真实账号验证，等 scripts/probe_kuku.py 跑通再翻 true。
+		Balance:     true,
+		AccountOnly: true,
 	},
 	{
 		Key: PlatformCustom, Name: "通用平台",

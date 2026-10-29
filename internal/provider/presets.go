@@ -94,6 +94,17 @@ var presetList = []Preset{
 		DocsURL: "https://www.trae.cn/",
 	},
 	{
+		Key: "kuku", Name: "库库AI（百度 GenFlow）", Vendor: "百度",
+		Aliases:  []string{"kuku", "genflow", "库库", "库库ai"},
+		Protocol: ProtocolOpenAI, Adapter: KukuAdapterName,
+		// 需要原生适配器：凭证是网页登录 Cookie（BDUSS/STOKEN），且**没有对话 API**。
+		NativeRequired: true,
+		Note: "账号 / 额度型平台：库库AI 没有对外对话 API（只有智能体任务接口），" +
+			"adapter=kuku 只做注册占位、任何转发都会直接报错。请改用账号中心添加：" +
+			"粘贴网页版登录 Cookie，即可查询积分/额度；不要在「外部渠道」里把它当模型渠道接入。",
+		DocsURL: "https://kuku.baidu.com/",
+	},
+	{
 		Key: "autoclaw", Name: "AutoClaw（智谱 · 国内版）", Vendor: "智谱 AI",
 		Aliases: []string{"autoclaw", "auto claw", "autoglm"},
 		// 原生适配器（国内版）：认证头是 X-Authorization（不是 Authorization）、

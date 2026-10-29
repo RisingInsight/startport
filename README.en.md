@@ -157,6 +157,8 @@ Eight native platforms (each with a dedicated adapter) plus generic channels (co
 | **Generic** (custom) | `ext:c-<id>/` | paste `base_url` + secret | — | — | — | available |
 
 > ⏳ = implemented with contract tests, gated until validated against a real account. ⚠️ = contract derived from a public reference implementation, not yet validated with a live account; failures surface loudly in the panel ledger rather than silently.
+>
+> There is also an **account/balance-only** platform: **Kuku AI** (Baidu GenFlow). It only contributes a credits dashboard — it has **no chat API and takes no part in routing** (`AccountOnly`), and its credential is a browser login cookie. Contract status in **[docs/PLATFORMS.md](docs/PLATFORMS.md)**.
 > Per-platform auth headers, request shapes, error codes, and known limits live in **[docs/PLATFORMS.md](docs/PLATFORMS.md)** (Chinese).
 
 ## Protocols and routing

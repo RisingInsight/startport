@@ -307,3 +307,25 @@ func TestChannelDefFor(t *testing.T) {
 		t.Errorf("custom 探测草稿异常: %+v", def2)
 	}
 }
+
+// 账号型平台（库库AI）**不投影**：它没有对话 API，投影只会造出一条永远打不通的
+// managed 渠道（污染路由表与模型探测）。账号仍留在 accounts.json，额度照常可查。
+func TestSyncSkipsAccountOnlyPlatform(t *testing.T) {
+	ts := newTestSync(t)
+	if _, err := ts.store.Add(account.PlatformKuku,
+		json.RawMessage(`{"cookie":"BDUSS=abcdefghijklmnop; STOKEN=xyz"}`), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// 同一批里放一个正常平台，确认"跳过"只作用于账号型平台、不影响其它投影。
+	if _, err := ts.store.Add(account.PlatformLoomy, loomyCred(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	ts.run(t)
+
+	if _, ok := ts.byName(account.PlatformKuku); ok {
+		t.Fatal("kuku 是账号型平台，不应生成托管渠道")
+	}
+	if _, ok := ts.byName(account.PlatformLoomy); !ok {
+		t.Fatal("loomy 应照常投影（跳过逻辑不能误伤普通平台）")
+	}
+}

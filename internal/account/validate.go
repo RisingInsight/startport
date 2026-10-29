@@ -91,6 +91,22 @@ func ValidateCred(platform string, cred json.RawMessage) error {
 			return errField("variant", "国际版暂未接入（当前仅支持国内 SOLO 通道）")
 		}
 		return nil
+	case PlatformKuku:
+		// 库库AI 的凭证是**网页版登录 Cookie**（BDUSS/STOKEN 为 httpOnly，只有
+		// 浏览器里那份完整 Cookie 能用），没有 OAuth 流程。
+		// 这里只做形态校验：非空 + 长度下限 + 必须带 BDUSS（百度登录态的核心键）。
+		// 不做联网校验——账号中心允许先入库、后点「余额」再验证登录态。
+		cookie := blobString(m, "cookie")
+		if cookie == "" {
+			return errField("cookie", "不能为空（浏览器里复制的整串 Cookie，需含 BDUSS=…）")
+		}
+		if len(cookie) < 16 {
+			return errField("cookie", "过短（长度 ≥16，应是完整 Cookie 串）")
+		}
+		if !strings.Contains(cookie, "BDUSS=") {
+			return errField("cookie", "缺少 BDUSS（百度登录态的核心 Cookie，请复制完整串）")
+		}
+		return nil
 	case PlatformCustom:
 		base := blobString(m, "base_url")
 		if base == "" {
@@ -135,6 +151,13 @@ func PrimarySecret(platform string, cred json.RawMessage) (string, error) {
 			return s, nil
 		}
 		return "", errField("token", "不能为空")
+	case PlatformKuku:
+		// 账号型平台（AccountOnly）不投影成聊天渠道，本函数实际不会被投影链路
+		// 调用；仍然返回 cookie 以保持"主凭证"语义完整（面板/导出需要它）。
+		if s := blobString(m, "cookie"); s != "" {
+			return s, nil
+		}
+		return "", errField("cookie", "不能为空")
 	case PlatformQoder, PlatformQoderIntl:
 		token := blobString(m, "access_token", "accessToken")
 		if token == "" {

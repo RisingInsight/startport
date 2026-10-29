@@ -159,6 +159,8 @@ flowchart LR
 | **通用平台**（custom） | `ext:c-<id>/` | 粘贴 `base_url` + secret | — | — | — | 可用 |
 
 > ⏳ = 实现与契约测试已就位，等待真实账号验收后一次性打开；⚠️ = 契约来自公开参考实现，未用真实账号联调，失败会在面板台账显式报错（可观测，不静默）。
+>
+> 另有**账号 / 额度型**平台 **库库AI**（百度 GenFlow）：只做积分/额度看板，**没有对话 API、不参与路由**（`AccountOnly`），凭证为网页登录 Cookie。契约状态见 **[docs/PLATFORMS.md](docs/PLATFORMS.md)**。
 > 各平台的鉴权头、请求形态、错误码与已知边界见 **[docs/PLATFORMS.md](docs/PLATFORMS.md)**。
 
 ## 协议与模型路由

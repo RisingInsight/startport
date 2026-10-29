@@ -60,6 +60,13 @@ const ACCT_PLATFORMS = {
     schema: '⚠ 账号中心添加下一批开放（服务端凭证校验未接线）。当前请经「外部渠道」向导手工接入：adapter=codex、protocol=responses，凭证填 auth.json 全文；令牌过期由刷新机自动续期。',
     required: []
   },
+  kuku: {
+    name: '库库AI（百度 GenFlow）',
+    sample: '{\n  "cookie": "BDUSS=…; STOKEN=…; （浏览器里复制的整串 Cookie）"\n}',
+    schema: '必填 cookie（网页版登录后 F12 → Network 里复制的整串 Cookie，必须含 BDUSS=…）。' +
+      '库库AI 没有对话 API，本平台只用于查积分/额度；Cookie 失效时点「余额」会提示重新粘贴。',
+    required: ['cookie']
+  },
   custom: {
     name: '通用平台',
     sample: '{\n  "base_url": "https://api.example.com",\n  "secret": "<API key>",\n  "protocol": "openai",\n  "auth": { "mode": "bearer" }\n}',
@@ -487,6 +494,7 @@ function acctHeroMark(platform) {
     'trae-pool': ['T', '#e5e7eb'],
     'custom-pool': ['C', '#94a3b8'],
     codex: ['X', '#10a37f'],
+    kuku: ['K', '#2468f2'],
     trae: ['T', '#e5e7eb'],
     autoclaw: ['A', '#a78bfa'], 'autoclaw-intl': ['A', '#a78bfa'],
     loomy: ['L', '#2dd4bf'],
@@ -1311,6 +1319,9 @@ function acctValidateBlob(platform, obj) {
   }
   if (platform === 'loomy' && String(obj.session).trim().length < 16) {
     return '凭证字段 session: 过短（长度 ≥16）';
+  }
+  if (platform === 'kuku' && !String(obj.cookie).includes('BDUSS=')) {
+    return '凭证字段 cookie: 缺少 BDUSS（百度登录态的核心 Cookie，请复制完整串）';
   }
   if (platform === 'codex') {
     return 'Codex 账号中心添加下一批开放（服务端凭证校验未接线）；当前请经「外部渠道」向导手工接入（adapter=codex）。';
