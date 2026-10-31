@@ -8,8 +8,9 @@
      - 添加账号向导：选平台 → 按平台 schema 粘贴凭证 JSON → POST /api/accounts
        （服务端 account.ValidateCred 是权威校验，报错带字段名；前端只做同口径
        预检，减少一次往返）；
-     - 签到：单账号 + 全平台（T3 契约：POST /api/accounts/{id}/checkin 与
-       POST /api/accounts/checkin_all；T3 未上线时 404 优雅降级，不报错轰炸）；
+     - 签到：单账号 + 一键签到（范围随页签：全部平台账号 = 全量；平台/池页签 =
+       当前平台。契约：POST /api/accounts/{id}/platform_checkin 与
+       POST /api/accounts/platform_checkin_all；T3 未上线时 404 优雅降级，不报错轰炸）；
      - 「渠道设置」高级抽屉：原「外部渠道」页全部能力（DOM 原样搬入，内部 id
        不变，ext.js/extwiz.js 零改动），主导航入口移除，#extchan 锚点重定向。
 
@@ -780,6 +781,7 @@ function renderAcctUnified() {
     counts[st] = (counts[st] || 0) + 1;
   });
   const platforms = new Set(scope.map(a => a.platform)).size;
+  syncAcctCheckinAllBtn(scope);
 
   if ($('acctAllTitle')) {
     $('acctAllTitle').textContent = acctTab === 'all' ? '全部平台账号'
@@ -1212,12 +1214,49 @@ async function acctRefresh(id, btn) {
 
 /* ── 签到（T3 已实现契约；路由缺失时优雅降级） ──────────────────────
    单账号：POST /api/accounts/{id}/platform_checkin → {ok, result:{status,reward,message}}
-   全平台：POST /api/accounts/platform_checkin_all   → {ok, message}（串行执行）
+   一键签到：POST /api/accounts/platform_checkin_all（body 可选 {"platforms":[…]}）
+     → {ok, message, summary:{total,ok,already,failed,skipped}, results:[…]}
+     platforms 空 = 全部平台；特定平台/池页签传当前范围的平台键（同一端点两种
+     范围——「全部平台账号」页签是全量一键签到，平台页签是同平台一键签到）。
    501 = 调度器未注入；404 = 二进制里没有 T3 路由（旧版本面板/新配置混部）。 */
 
 function acctCheckinDegrade(e) {
   const m = (e && e.message) || '';
   return m === 'HTTP 404' || /404/.test(m) || /平台签到未启用/.test(m);
+}
+
+/* 一键签到的平台范围：全部页签 = 全部平台（空数组）；池页签 = 当前区域的
+   平台集合（AutoClaw「全部」= 国内 + 国际）；平台页签 = 该平台。 */
+function acctCheckinBatchPlatforms() {
+  if (acctTab === 'all') return [];
+  const pool = ACCT_POOLS[acctTab];
+  if (pool) return acctPoolPlatforms(pool, acctPoolRegion);
+  return [acctTab];
+}
+
+/* 一键签到按钮随视图范围联动（文字/悬停说明/无可签账号时置灰）。
+   scope 由 renderAcctUnified 传入（避免再算一遍）。 */
+function syncAcctCheckinAllBtn(scope) {
+  const btn = $('btnAcctCheckinAll');
+  if (!btn) return;
+  if (btn.disabled && btn.textContent === '签到中…') return; // 一键签到进行中：不打断按钮态
+  const plats = acctCheckinBatchPlatforms();
+  const names = plats.length
+    ? plats.map(p => (ACCT_PLATFORMS[p] || {}).name || p).join(' / ')
+    : '';
+  const capable = scope.filter(a => (a.capabilities && a.capabilities.checkin)
+    || (a.checkin && a.checkin.supported));
+  btn.textContent = '一键签到';
+  if (!capable.length) {
+    btn.disabled = true;
+    btn.title = '当前范围没有支持签到的账号'
+      + (scope.length ? '（平台无签到活动或账号未支持）' : '（先添加账号）');
+    return;
+  }
+  btn.disabled = false;
+  btn.title = names
+    ? '对 ' + names + ' 的 ' + capable.length + ' 个支持签到的账号执行一次签到（已停用 / 无签到活动的自动跳过）'
+    : '对全部平台 ' + capable.length + ' 个支持签到的账号执行一次签到（已停用 / 无签到活动的自动跳过）';
 }
 
 async function acctCheckin(id, btn) {
@@ -1240,12 +1279,34 @@ async function acctCheckin(id, btn) {
   }
 }
 
+/* 一键签到：范围随页签（全部平台账号 = 全量；平台/池页签 = 当前平台集合）。
+   汇总 toast 直接给结论，失败带前两个账号的原因；逐账号结果落在签到状态列。 */
 async function acctCheckinAll(btn) {
   const old = btn ? btn.textContent : '';
   if (btn) { btn.disabled = true; btn.textContent = '签到中…'; }
   try {
-    const d = await api('accounts/platform_checkin_all', { method: 'POST' });
-    toast(d.message || '全平台签到已执行；逐账号结果见签到状态列', 'ok');
+    const platforms = acctCheckinBatchPlatforms();
+    const d = await api('accounts/platform_checkin_all', {
+      method: 'POST',
+      body: JSON.stringify(platforms.length ? { platforms: platforms } : {})
+    });
+    const s = d.summary || {};
+    const parts = [];
+    if (s.ok) parts.push('成功 ' + s.ok);
+    if (s.already) parts.push('已签 ' + s.already);
+    if (s.failed) parts.push('失败 ' + s.failed);
+    if (s.skipped) parts.push('跳过 ' + s.skipped);
+    const summary = parts.length ? '：' + parts.join(' · ') : '';
+    const fails = (d.results || []).filter(r => r.status === 'failed');
+    if (s.failed) {
+      toast('一键签到' + summary + ' — '
+        + fails.slice(0, 2).map(r => (r.label || r.id) + '：' + (r.message || '未知原因')).join('；'),
+        'bad');
+    } else if ((s.ok || 0) + (s.already || 0) > 0) {
+      toast('一键签到' + summary, 'ok');
+    } else {
+      toast(d.message || '当前范围没有可签到的账号（停用 / 平台无签到活动）', 'mute');
+    }
     await loadAcctAccounts();
   } catch (e) {
     if (acctCheckinDegrade(e)) toast('签到服务尚未启用（后端签到子系统未部署）', 'mute');

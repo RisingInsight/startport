@@ -10,10 +10,16 @@
 package panel
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/checkin"
 )
 
@@ -52,16 +58,54 @@ func (p *Panel) platformCheckinOne(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// checkinBatchReq 一键签到的范围过滤（v1.7.4）：platforms 空/缺省 = 全部支持
+// 签到的账号；否则只签这些平台（面板「全部平台账号」页签传空，特定平台页签
+// 传当前平台键）。body 可整体缺省——旧前端的裸 POST 继续兼容。
+type checkinBatchReq struct {
+	Platforms []string `json:"platforms"`
+}
+
 // platformCheckinAll POST /startport/api/accounts/platform_checkin_all
-// 手动触发全平台签到（串行逐账号；停用账号与无签到平台自动跳过）。
+// 一键签到（串行逐账号）：请求体 {"platforms":["loomy",…]} 可选过滤平台；
+// 响应带逐账号结果与汇总（成功/已签/失败/跳过），面板直接拿去拼摘要提示。
+// 停用账号与无签到活动的平台自动跳过（skipped，不算失败）。
 func (p *Panel) platformCheckinAll(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Checkin == nil {
 		writeErr(w, http.StatusNotImplemented, "平台签到未启用")
 		return
 	}
-	p.cfg.Checkin.RunAll(r.Context())
+	var req checkinBatchReq
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&req)
+	}
+	// 平台键显性校验：前端传错（拼错/大小写）立刻 400，而不是"悄悄全量签到"。
+	for _, pl := range req.Platforms {
+		if !account.ValidPlatform(pl) {
+			writeErr(w, http.StatusBadRequest, "未知平台 "+pl+"（可用键见 GET /startport/api/platforms）")
+			return
+		}
+	}
+	// 单账号签到 ≤20s（Checker 契约），串行大批量可能顶到 server 读超时——
+	// 280s 封顶，超时后的账号记 skipped 并在 message 里说明可单独重试。
+	ctx, cancel := context.WithTimeout(r.Context(), 280*time.Second)
+	defer cancel()
+	results, sum := p.cfg.Checkin.RunBatch(ctx, req.Platforms...)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"message": "全平台签到已执行；逐账号结果见账号列表的签到状态",
+		"ok":      sum.Failed == 0,
+		"message": checkinBatchMessage(sum),
+		"summary": sum,
+		"results": results,
 	})
+}
+
+// checkinBatchMessage 汇总的人话一行（面板 toast 直接展示）。
+func checkinBatchMessage(sum checkin.BatchSummary) string {
+	if sum.Total == 0 {
+		return "当前范围没有账号"
+	}
+	if sum.OK+sum.Already+sum.Failed == 0 {
+		return fmt.Sprintf("没有可签到的账号（%d 个全部跳过：停用 / 平台无签到活动）", sum.Skipped)
+	}
+	return fmt.Sprintf("一键签到完成：成功 %d · 已签过 %d · 失败 %d · 跳过 %d",
+		sum.OK, sum.Already, sum.Failed, sum.Skipped)
 }

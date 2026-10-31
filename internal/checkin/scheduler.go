@@ -1,11 +1,13 @@
 // scheduler.go 平台签到调度器（账号中心 v1.6.0 · T3；架构 §5.1）。
 //
-//   - 每小时对表：本地小时数命中 Hours（默认 [9]）且当天未跑 → 全账号一轮；
+//   - 对表：本地时间过了 Hours（默认 [9]）的最早窗口且当天未跑 → 全账号一轮
+//     （窗口小时内没在运行也不再漏签——runDailyIfDue 注释）；
 //   - 失败重试（PRD §8 默认）：30 分钟后重试，最多 2 次；仍失败 → 该账号
 //     CheckinRecord{failed} + 面板账号行标红（不引入通知通道）；
 //   - 并发：逐账号串行（平台账号个位数；串行天然限频，满足"频率与官方客户端
 //     一致"红线）；账号级 TryLock 防手动 + 定时双跑；
-//   - 手动触发：panel API 立即执行，绕过小时窗口。
+//   - 手动触发：panel API 立即执行，绕过小时窗口；一键签到走 RunBatch（带
+//     逐账号结果返回），定时轮走 RunAll（失败进重试队列）。
 //
 // 与 CodeBuddy 的 internal/scheduler 完全独立（两套语义命名强区分，架构 §11
 // 风险 2）：本包日志前缀 `[checkin:<platform>]`。
@@ -14,7 +16,9 @@ package checkin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -104,7 +108,7 @@ func (s *Scheduler) Close() {
 	s.mu.Unlock()
 }
 
-// loop 对表循环（每分钟醒一次；对表逻辑幂等——同一天同一小时只跑一轮）。
+// loop 对表循环（每分钟醒一次；对表逻辑幂等——同一天只跑一轮，见 runDailyIfDue）。
 func (s *Scheduler) loop() {
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
@@ -115,11 +119,7 @@ func (s *Scheduler) loop() {
 		case <-tick.C:
 			now := s.cfg.Now()
 			s.runRetries()
-			for _, hour := range s.cfg.Hours {
-				if now.Hour() == hour {
-					s.runDailyIfDue(now)
-				}
-			}
+			s.runDailyIfDue(now)
 		}
 	}
 }
@@ -127,12 +127,34 @@ func (s *Scheduler) loop() {
 // dayKey 当天日期键。
 func dayKey(now time.Time) string { return now.Format("2006-01-02") }
 
-// runDailyIfDue 当天未跑过 → 全账号一轮（跨重启漏跑一天就错过了——与源实现
-// 的"每天一次"口径一致，重试只覆盖当天内的失败）。
+// earliestHour 触发窗口里最早的小时（Hours 可能乱序——用户手填逗号分隔）。
+func (s *Scheduler) earliestHour() int {
+	earliest := s.cfg.Hours[0]
+	for _, h := range s.cfg.Hours {
+		if h < earliest {
+			earliest = h
+		}
+	}
+	return earliest
+}
+
+// runDailyIfDue 当天未跑过且已到最早触发窗口 → 全账号一轮。
+//
+// v1.7.4 修正（"很多账号没自动签到"的根因）：旧实现只在「当前小时恰好命中
+// Hours」的对表 tick 上触发——进程在窗口小时内没在运行（服务器 17 点重启、
+// 当天开机晚于 9 点），当天就整轮错过（实测 2026-10-30 重启后 AutoClaw/Qoder
+// 连续两天无自动签到）。签到幂等（已签过 → already），改为「过了最早窗口后的
+// 第一个对表 tick 就跑」，漏签从"重启即必然"变"不可能"。重启丢 lastRunDay
+// 会在启动后补跑一轮：多一次幂等的 already 查询，换当天必签。
 func (s *Scheduler) runDailyIfDue(now time.Time) {
 	s.mu.Lock()
 	today := dayKey(now)
 	if s.lastRunDay == today {
+		s.mu.Unlock()
+		return
+	}
+	if h := now.Hour(); h < s.earliestHour() {
+		// 还没到窗口：不抢跑（凌晨启动的进程等到窗口再签）。
 		s.mu.Unlock()
 		return
 	}
@@ -215,9 +237,27 @@ func (s *Scheduler) tryLock(id string) (func(), bool) {
 	return m.Unlock, true
 }
 
-// RunAll 全账号串行一轮（定时触发 / 手动全量）。失败进重试队列。
-func (s *Scheduler) RunAll(ctx context.Context) {
+// targets 批量目标账号（platforms 空 = 全部；去重，未知平台键自然过滤为空）。
+func (s *Scheduler) targets(platforms ...string) []*account.Account {
+	want := map[string]bool{}
+	for _, p := range platforms {
+		if p != "" {
+			want[p] = true
+		}
+	}
+	var out []*account.Account
 	for _, a := range s.cfg.Store.List("") {
+		if len(want) > 0 && !want[a.Platform] {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// RunAll 全账号串行一轮（定时触发）。失败进重试队列。
+func (s *Scheduler) RunAll(ctx context.Context) {
+	for _, a := range s.targets() {
 		if a.Disabled {
 			continue // 停用账号跳过（与 CodeBuddy 口径一致）
 		}
@@ -226,6 +266,71 @@ func (s *Scheduler) RunAll(ctx context.Context) {
 		}
 		_, _ = s.checkinAccount(ctx, a.ID, true)
 	}
+}
+
+// BatchResult 一键签到里单个账号的 outcome（JSON 直出面板）。
+type BatchResult struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Platform string `json:"platform"`
+	Status   string `json:"status"`            // ok / already / failed / skipped
+	Reward   string `json:"reward,omitempty"`  // ok 时领到的额度描述
+	Message  string `json:"message,omitempty"` // 失败原因 / 跳过说明 / 已签过文案
+}
+
+// BatchSummary 一键签到汇总（与 results 逐项对得上）。
+type BatchSummary struct {
+	Total   int `json:"total"`   // 目标账号数（含跳过）
+	OK      int `json:"ok"`      // 本次签到成功
+	Already int `json:"already"` // 已签过（登录态活着，算成功侧）
+	Failed  int `json:"failed"`
+	Skipped int `json:"skipped"` // 停用 / 平台无签到 / 正在执行 / 批次超时
+}
+
+// RunBatch 一键签到（面板手动触发）：platforms 空 = 全部平台，否则只签这些
+// 平台的账号。与 RunAll（定时）的差异：不进重试队列（重试是定时路径语义，
+// 手动失败由用户看结果后自行决定）；停用账号与无签到能力的平台**不报错**、
+// 记 skipped；ctx 取消/超时后剩余账号记 skipped（不写台账——没执行就没有记录）。
+func (s *Scheduler) RunBatch(ctx context.Context, platforms ...string) ([]BatchResult, BatchSummary) {
+	var results []BatchResult
+	sum := BatchSummary{}
+	for _, a := range s.targets(platforms...) {
+		r := BatchResult{ID: a.ID, Label: a.Label, Platform: a.Platform}
+		sum.Total++
+		switch {
+		case a.Disabled:
+			r.Status, r.Message = StatusSkipped, "账号已停用"
+			sum.Skipped++
+		case ctx.Err() != nil:
+			r.Status, r.Message = StatusSkipped, "批次已超时或取消，未执行（可稍后单独重试）"
+			sum.Skipped++
+		default:
+			res, err := s.checkinAccount(ctx, a.ID, false)
+			switch {
+			case err == nil:
+				r.Status, r.Reward, r.Message = res.Status, res.Reward, res.Message
+				switch res.Status {
+				case StatusOK:
+					sum.OK++
+				case StatusAlready:
+					sum.Already++
+				default: // StatusFailed：业务失败（HTTP 层成功），原因在 Message
+					sum.Failed++
+				}
+			case errors.Is(err, ErrPlatformNotSupported):
+				r.Status, r.Message = StatusSkipped, "平台无签到活动"
+				sum.Skipped++
+			case strings.Contains(err.Error(), "正在执行中"):
+				r.Status, r.Message = StatusSkipped, "该账号的签到正在执行中，请稍后查看结果"
+				sum.Skipped++
+			default:
+				r.Status, r.Message = StatusFailed, err.Error()
+				sum.Failed++
+			}
+		}
+		results = append(results, r)
+	}
+	return results, sum
 }
 
 // CheckinAccount 手动单账号签到（绕过小时窗口；不进重试队列——重试是定时

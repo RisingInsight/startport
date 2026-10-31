@@ -31,10 +31,13 @@ import (
 )
 
 // 签到结果状态（对齐 internal/pool 的签到记录语义 + 账号中心三态）。
+// skipped 只出现在批量结果里（停用 / 平台无签到 / 批次超时），不落签到台账
+// ——没执行就没有记录，写进台账会把账号行标红误导用户。
 const (
 	StatusOK      = "ok"
 	StatusAlready = "already"
 	StatusFailed  = "failed"
+	StatusSkipped = "skipped"
 )
 
 // ErrAuthExpired 登录态失效（401/业务码）。调度器据此记录失败原因；
