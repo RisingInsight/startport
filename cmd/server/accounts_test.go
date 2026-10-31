@@ -19,6 +19,7 @@ import (
 	"github.com/RisingInsight/startport/internal/acctchan"
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/livecfg"
+	"github.com/RisingInsight/startport/internal/modelgroup"
 	"github.com/RisingInsight/startport/internal/pool"
 	"github.com/RisingInsight/startport/internal/scheduler"
 	"github.com/RisingInsight/startport/internal/upstream"
@@ -35,6 +36,7 @@ type acctTestEnv struct {
 	up     *upstream.Client
 	sch    *scheduler.Scheduler
 	extMgr *extchan.Manager
+	grpMgr *modelgroup.Manager
 }
 
 func newAcctTestEnv(t *testing.T) *acctTestEnv {
@@ -57,6 +59,7 @@ func newAcctTestEnv(t *testing.T) *acctTestEnv {
 		up:     upstream.New(),
 		sch:    scheduler.New(scheduler.Config{}),
 		extMgr: extchan.New(extchan.Config{TimeoutSeconds: 5}),
+		grpMgr: modelgroup.New(),
 	}
 	// 初始热应用（与启动同链）。
 	if _, err := env.save([]byte(base)); err != nil {
@@ -67,12 +70,12 @@ func newAcctTestEnv(t *testing.T) *acctTestEnv {
 
 // save 走真实 saveConfig（面板 POST config 的同一条入口）。
 func (e *acctTestEnv) save(raw []byte) ([]string, error) {
-	return saveConfig(raw, e.path, e.live, e.pool, e.up, e.sch, e.extMgr)
+	return saveConfig(raw, e.path, e.live, e.pool, e.up, e.sch, e.extMgr, e.grpMgr)
 }
 
 // saveChannels 走账号中心投影入口（与 saveConfig 共用 applyConfig）。
 func (e *acctTestEnv) saveChannels(defs []extchan.ChannelDef) error {
-	return saveChannelsAccounts(defs, e.path, e.live, e.pool, e.up, e.sch, e.extMgr)
+	return saveChannelsAccounts(defs, e.path, e.live, e.pool, e.up, e.sch, e.extMgr, e.grpMgr)
 }
 
 // loadDefs 读当前盘上的渠道定义（acctchan.Loader 的真实实现）。

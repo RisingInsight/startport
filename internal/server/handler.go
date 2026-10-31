@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"sync"
@@ -22,6 +23,7 @@ import (
 	"github.com/RisingInsight/startport/internal/httpauth"
 	"github.com/RisingInsight/startport/internal/livecfg"
 	"github.com/RisingInsight/startport/internal/logfmt"
+	"github.com/RisingInsight/startport/internal/modelgroup"
 	"github.com/RisingInsight/startport/internal/pool"
 	"github.com/RisingInsight/startport/internal/prompt"
 	"github.com/RisingInsight/startport/internal/reqlog"
@@ -81,6 +83,10 @@ type Config struct {
 	// 请求 model 带 "ext:<channel>/<model>" 前缀（或裸名在渠道间唯一匹配）时
 	// 短路轮转，直接转发到该渠道——不占账号池在途名额、不喂池熔断器。
 	Ext *extchan.Manager
+
+	// ModelGroups 路由组管理器（可选；nil = group/ 前缀不解析、400 未知路由段）。
+	// group/<name> 在请求入口改写为成员规范模型名后走既有链路（见 modelgroup.go）。
+	ModelGroups *modelgroup.Manager
 
 	// RequestLog 请求指标与脱敏 JSONL 归档（可选；nil = 不记录）。
 	RequestLog *reqlog.Recorder
@@ -492,6 +498,26 @@ func (h *Handler) modelList() []map[string]any {
 
 func (h *Handler) modelListFor(r *http.Request) []map[string]any {
 	out := make([]map[string]any, 0)
+	// 路由组（借鉴 magpie：组暴露为可选模型，agent 才能选中它）。排在最前——
+	// 组是"最聪明的名字"，选它 = 让网关按健康快照挑成员。元数据带成员与策略，
+	// 供客户端提示；字段名 x_ 前缀（OpenAI schema 允许附加字段）。
+	if h.cfg.ModelGroups != nil {
+		groups := h.cfg.ModelGroups.List()
+		sort.Slice(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
+		for _, g := range groups {
+			if g.Disabled {
+				continue
+			}
+			out = append(out, map[string]any{
+				"id":        "group/" + g.Name,
+				"object":    "model",
+				"created":   1753600000,
+				"owned_by":  "starport-group",
+				"x_routing": modelgroup.NormalizeRouting(g.Routing),
+				"x_members": g.Members,
+			})
+		}
+	}
 	// 外部渠道模型（ext:<channel>/<model>）：带上适配器目录元数据（上下文/输出上限/
 	// 视觉/思考档位）。目录结果在 extchan 内缓存 10 分钟，避免每次客户端拉目录都
 	// 打上游元数据接口；自动发现失败时回退显式配置/ID 清单。
@@ -717,6 +743,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	defer st.done()
 
+	// 路由组解析（借鉴 magpie routing groups）：group/<name> → 按策略选出的成员
+	// 规范模型名。放在 ext 短路之前——成员既可能是 ext: 也可能是池模型，改写后
+	// 让下方既有控制流自然分流；选号/body 重写/记账全部只消费改写后的 peek.Model。
+	// grpTag 进 st.pick 前缀：运行日志能看到"这条请求是经哪个组落到该成员的"。
+	grpTag := ""
+	if strings.HasPrefix(peek.Model, "group/") {
+		member, g, gerr := h.resolveGroupModel(peek.Model)
+		if gerr != nil {
+			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", gerr.Error())
+			return
+		}
+		peek.Model = member
+		grpTag = "组" + g.Name + "→"
+	}
+
 	// 外部渠道短路（多平台阶段一）：model 带 "ext:<channel>/<model>" 前缀（或裸名
 	// 在渠道间唯一匹配）时走独立转发链路——不进 CodeBuddy 轮转、不占在途租约、
 	// 不喂池熔断器。Ext 为 nil（未配置任何外部渠道）时零开销跳过。
@@ -724,6 +765,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 选号路径处理不了它）——裸名消歧放在 modelList/文档层约定，前缀是权威路由协议。
 	if h.cfg.Ext != nil {
 		if _, _, isExt := h.cfg.Ext.HasPrefix(peek.Model); isExt {
+			if grpTag != "" {
+				st.pick = grpTag + peek.Model
+			}
 			h.handleExtChat(w, r, st, body, peek.Model, apiKeyName)
 			return
 		}
@@ -983,7 +1027,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
-		st.pick = pickReason
+		st.pick = grpTag + pickReason
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。

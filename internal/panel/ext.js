@@ -43,6 +43,7 @@ async function loadExt() {
     const box = $('ecCards');
     if (box) box.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
   }
+  loadExtGroups();
   try {
     const d = await api('ext_intel');
     extIntelData = d;
@@ -52,6 +53,146 @@ async function loadExt() {
     if (body) body.innerHTML = '<tr><td colspan="9" class="empty">情报读取失败：' + esc(e.message) + '</td></tr>';
   }
 }
+
+/* ── 路由组（借鉴 magpie routing groups）────────────────────────────
+   group/<name> 把多个上游模型合成一个可选名；准入时按健康快照选成员。
+   写路径与渠道同一条：POST config {model_groups:[...]}（数组整体替换，
+   其他配置键不动）。组定义无 secret，GET config 原样回显。 */
+
+let extGroups = [];
+
+async function loadExtGroups() {
+  try {
+    const d = await api('config');
+    extGroups = ((d && d.config && d.config.model_groups) || []);
+    if (!Array.isArray(extGroups)) extGroups = [];
+  } catch (e) {
+    extGroups = [];
+  }
+  renderExtGroups();
+}
+
+const MG_ROUTING_CN = { order: '首个可用', rotate: '轮转' };
+
+function renderExtGroups() {
+  const note = $('mgNote'), box = $('mgCards');
+  if (!box) return;
+  const active = extGroups.filter(g => !g.disabled);
+  if (note) note.textContent = extGroups.length
+    ? active.length + ' / ' + extGroups.length + ' 个组启用中' : '';
+  if (!extGroups.length) {
+    box.innerHTML = '<div class="empty">还没有路由组——点右上角「新建组」把多个模型合成一个'
+      + ' <code>group/组名</code>，成员冷却/停用时请求自动落到下一个可用成员。</div>';
+    return;
+  }
+  box.innerHTML = extGroups.map(g => {
+    const st = g.disabled ? '<span class="tag mute">已停用</span>' : '<span class="tag ok">启用中</span>';
+    const members = (g.members || []).map(m => '<code>' + esc(m) + '</code>').join('、');
+    const routing = MG_ROUTING_CN[g.routing] || '首个可用';
+    const noteTxt = g.note ? '<div class="note">' + esc(g.note) + '</div>' : '';
+    return '<div class="ec-card">'
+      + '<div class="ec-hd">'
+      + '<b><code>group/' + esc(g.name) + '</code></b>'
+      + '<span class="tag mute">' + esc(routing) + '</span>'
+      + st
+      + '<span class="grow"></span>'
+      + '<button type="button" class="xs" data-mg="toggle" data-name="' + esc(g.name) + '">'
+      + (g.disabled ? '启用' : '停用') + '</button>'
+      + '<button type="button" class="xs" data-mg="edit" data-name="' + esc(g.name) + '">编辑</button>'
+      + '<button type="button" class="xs" data-mg="del" data-name="' + esc(g.name) + '">删除</button>'
+      + '</div>'
+      + '<div class="note ec-meta">' + (g.members || []).length + ' 个成员 · ' + members + '</div>'
+      + noteTxt
+      + '</div>';
+  }).join('');
+}
+
+if ($('mgCards')) {
+  $('mgCards').onclick = async e => {
+    const b = e.target.closest('button[data-mg]');
+    if (!b) return;
+    const name = b.dataset.name;
+    const g = extGroups.find(x => x && x.name === name);
+    if (!g) return;
+    if (b.dataset.mg === 'edit') {
+      openMgForm(g);
+    } else if (b.dataset.mg === 'toggle') {
+      try {
+        await extMutateGroups(list => list.map(x => (x && x.name === name) ? Object.assign({}, x, { disabled: !x.disabled }) : x));
+        toast(g.disabled ? '路由组 ' + name + ' 已启用' : '路由组 ' + name + ' 已停用（group/ 名将报 400）', 'ok');
+        loadExtGroups();
+      } catch (e2) {
+        toast('保存失败：' + e2.message, 'bad');
+      }
+    } else if (b.dataset.mg === 'del') {
+      if (!confirm('删除路由组 ' + name + '？使用 group/' + name + ' 的 agent 会开始收到 400。')) return;
+      try {
+        await extMutateGroups(list => list.filter(x => (x && x.name) !== name));
+        toast('已删除路由组 ' + name, 'ok');
+        loadExtGroups();
+      } catch (e2) {
+        toast('删除失败：' + e2.message, 'bad');
+      }
+    }
+  };
+}
+
+if ($('btnMgNew')) $('btnMgNew').onclick = () => openMgForm(null);
+
+/* mgForm 编辑弹窗（new = 新建；g = 编辑既有组，按 name 替换）。 */
+let mgFormEditing = null;
+function openMgForm(g) {
+  mgFormEditing = g ? g.name : null;
+  $('mgFormTitle').textContent = g ? '编辑路由组 ' + g.name : '新建路由组';
+  $('mgNameInput').value = g ? g.name : '';
+  $('mgRoutingSelect').value = g ? (g.routing || 'order') : 'order';
+  $('mgMembersInput').value = g ? (g.members || []).join('\n') : '';
+  $('mgNoteInput').value = g ? (g.note || '') : '';
+  $('mgFormErr').hidden = true;
+  $('mgFormVeil').classList.add('on');
+  setTimeout(() => $('mgNameInput').focus(), 60);
+}
+function closeMgForm() { $('mgFormVeil').classList.remove('on'); mgFormEditing = null; }
+
+async function submitMgForm() {
+  const name = $('mgNameInput').value.trim();
+  const routing = $('mgRoutingSelect').value;
+  const members = $('mgMembersInput').value.split('\n').map(s => s.trim()).filter(Boolean);
+  const note = $('mgNoteInput').value.trim();
+  const err = msg => { $('mgFormErr').textContent = msg; $('mgFormErr').hidden = false; };
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)) { err('组名须为小写字母/数字开头的 1-64 位 [a-z0-9_-]'); return; }
+  if (!members.length) { err('至少一个成员（每行一个）'); return; }
+  if (members.some(m => m === name || m.indexOf('group/') === 0)) { err('成员不能再指向路由组（不支持嵌套）'); return; }
+  const nextList = (await extRawGroups()).filter(x => (x && x.name) !== name);
+  const list = nextList.slice();
+  list.push(Object.assign({ name: name, members: members, routing: routing }, note ? { note: note } : {}));
+  try {
+    await api('config', { method: 'POST', body: JSON.stringify({ model_groups: list }) });
+    closeMgForm();
+    loadExtGroups();
+    toast(mgFormEditing === null ? '路由组 group/' + name + ' 已创建（热生效）' : '路由组 group/' + name + ' 已保存（热生效）', 'ok');
+  } catch (e) {
+    err(e.message || '保存失败');
+  }
+}
+
+async function extRawGroups() {
+  const d = await api('config');
+  const cfg = (d && d.config) || {};
+  return Array.isArray(cfg.model_groups) ? JSON.parse(JSON.stringify(cfg.model_groups)) : [];
+}
+
+/* extMutateGroups 与 extwiz 的 extMutateChannels 同构：读整表 → fn 变换 →
+   POST 只提交 model_groups 键（数组整体替换，其他配置键不动）。 */
+async function extMutateGroups(fn) {
+  const list = await extRawGroups();
+  const next = fn(list) || list;
+  await api('config', { method: 'POST', body: JSON.stringify({ model_groups: next }) });
+}
+
+if ($('btnMgFormCancel')) $('btnMgFormCancel').onclick = closeMgForm;
+if ($('btnMgFormOk')) $('btnMgFormOk').onclick = submitMgForm;
+if ($('mgFormVeil')) $('mgFormVeil').addEventListener('click', e => { if (e.target === $('mgFormVeil')) closeMgForm(); });
 
 /* ── 渠道卡片 ─────────────────────────────────────────────────────── */
 

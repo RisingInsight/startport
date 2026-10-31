@@ -123,6 +123,15 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeResponsesError(w, http.StatusBadRequest, "model 不能为空")
 		return
 	}
+	// 路由组解析（与 /v1/messages 同构）：ext 成员走 RouteModel，池成员回落主池。
+	if strings.HasPrefix(req.Model, "group/") {
+		member, _, gerr := h.resolveGroupModel(req.Model)
+		if gerr != nil {
+			writeResponsesError(w, http.StatusBadRequest, gerr.Error())
+			return
+		}
+		req.Model = member
+	}
 	if h.cfg.Ext != nil {
 		ch2, upstream, display, rerr := h.cfg.Ext.RouteModel(req.Model)
 		switch {

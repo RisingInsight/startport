@@ -2351,6 +2351,24 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
         <div id="ecCards" style="padding:0 20px 18px;color:var(--ink-3)">加载中…</div>
       </div>
 
+      <!-- 路由组（借鉴 magpie routing groups）：多个模型合成一个 group/<name> 可选名，
+           准入时按健康快照选成员。写路径与渠道同一条：POST config {model_groups:[...]}。 -->
+      <div class="box">
+        <header>
+          <h3>路由组</h3>
+          <span class="grow"></span>
+          <span class="note" id="mgNote">—</span>
+          <button type="button" class="xs" id="btnMgNew">新建组</button>
+        </header>
+        <div class="hint" style="padding:12px 20px 0">
+          把 <code>cn:x</code> / <code>global:x</code> / <code>ext:渠道/模型</code> 合成一个
+          <code>group/组名</code>。请求按策略落到可用成员：<b>order</b>=首个可用；
+          <b>rotate</b>=可用成员间轮转。成员冷却/停用时自动避开；网关在
+          <code>/v1/models</code> 暴露组名，agent 可直接选。
+        </div>
+        <div id="mgCards" style="padding:12px 20px 18px;color:var(--ink-3)">加载中…</div>
+      </div>
+
       <div class="box">
         <header>
           <h3>额度情报<span class="hint" title="数据源：token-fbi.com 开放数据，每日人工复核">免费额度汇总 · 仅供发现新平台，领取一律走各平台官方入口</span></h3>
@@ -2867,6 +2885,35 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
     <footer>
       <span class="grow"></span>
       <button class="primary" id="btnAkShowDone">我已保存</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 路由组编辑弹窗（新建/编辑共用；成员一行一个） -->
+<div class="veil" id="mgFormVeil">
+  <div class="dlg" style="width:520px">
+    <header>
+      <h3 id="mgFormTitle">新建路由组</h3>
+      <div class="hint">组名即对外模型名 <code>group/&lt;组名&gt;</code>（小写字母/数字开头）。
+        成员一行一个，须带 <code>cn:</code> / <code>global:</code> / <code>ext:渠道/</code> 前缀；
+        渠道成员要求该渠道已存在。保存即热生效。</div>
+    </header>
+    <div class="body">
+      <div class="inline" style="margin-bottom:10px">
+        <input type="text" id="mgNameInput" maxlength="64" placeholder="组名，例如 deepseek-any" style="flex:1" autocomplete="off">
+        <select id="mgRoutingSelect" style="flex:0 0 auto">
+          <option value="order">order · 首个可用</option>
+          <option value="rotate">rotate · 轮转</option>
+        </select>
+      </div>
+      <textarea id="mgMembersInput" rows="5" placeholder="每行一个成员模型，例如：&#10;cn:deepseek-v4.1-flash&#10;ext:qoder/DeepSeek-V4-Pro" style="width:100%;font-family:var(--mono);font-size:12px"></textarea>
+      <input type="text" id="mgNoteInput" maxlength="120" placeholder="备注（可选）" style="width:100%;margin-top:10px" autocomplete="off">
+      <div class="state err" id="mgFormErr" hidden style="margin-top:10px"></div>
+    </div>
+    <footer>
+      <button class="ghost" id="btnMgFormCancel">取消</button>
+      <span class="grow"></span>
+      <button class="primary" id="btnMgFormOk">保存</button>
     </footer>
   </div>
 </div>

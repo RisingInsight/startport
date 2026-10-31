@@ -248,6 +248,13 @@ type Config struct {
 	// 面板接口不回显（哨兵脱敏，与 device_token 同一套）。
 	ExtChannels []ExtChannel `json:"ext_channels"`
 
+	// ModelGroups 路由组（借鉴 magpie routing groups）：把多个上游模型合成一个
+	// 可选名 "group/<name>"。成员是既有路由协议的规范模型名（cn:x / global:x /
+	// ext:<ch>/<model>），组只在请求入口做一次"名字 → 成员"的改写，选号/凭证
+	// 轮换/冷却仍由池与渠道各自承接。注意 "group/" 前缀为协议保留：成员与
+	// 裸名模型都不能以它开头（校验期拒绝）。
+	ModelGroups []ModelGroupDef `json:"model_groups"`
+
 	// ExtIntel 额度情报拉取（token-fbi data.json 定时快照，仅面板展示）。
 	ExtIntel struct {
 		// Enabled 缺省 true；false 时不发起任何情报请求（离线/隐私场景）。
@@ -330,6 +337,21 @@ type ExtChannel struct {
 	Origin string `json:"origin,omitempty"`
 	// Accounts 账号 ID → 凭证 label 的映射（当前 label == account.ID）。
 	Accounts map[string]string `json:"accounts,omitempty"`
+}
+
+// ModelGroupDef 路由组定义（model_groups 数组行；语义见 internal/modelgroup）。
+type ModelGroupDef struct {
+	// Name 组名：与渠道名同一字符集（小写字母/数字开头，禁 '/'）——
+	// "group/<name>" 解析时按第一个 '/' 切分，名字含 '/' 会破坏协议。
+	Name string `json:"name"`
+	// Members 成员模型名（1..16），必须是带前缀的规范名：cn:<model> / global:<model> /
+	// ext:<channel>/<model>。裸名歧义（池/渠道同名的解析顺序）不进组协议。
+	Members []string `json:"members"`
+	// Routing 选员策略：order（缺省，首个可用成员）| rotate（可用成员间轮转）。
+	Routing string `json:"routing,omitempty"`
+	// Disabled 停用：group/<name> 解析报 400，/v1/models 不暴露。
+	Disabled bool   `json:"disabled,omitempty"`
+	Note     string `json:"note,omitempty"`
 }
 
 // ExtAuth 鉴权规格（mode: bearer / x-api-key / query / custom）。
@@ -428,6 +450,7 @@ func Default() *Config {
 	c.Update.CheckIntervalHours = 6
 	// 外部渠道默认无（纯 CodeBuddy 部署零行为变化）；情报默认开、指向 token-fbi。
 	c.ExtChannels = []ExtChannel{}
+	c.ModelGroups = []ModelGroupDef{}
 	c.ExtIntel.Enabled = true
 	c.ExtIntel.URL = "https://token-fbi.com/data.json"
 	c.ExtIntel.Hours = 12
@@ -745,7 +768,76 @@ func (c *Config) normalize() error {
 	if err := c.validateExtChannels(); err != nil {
 		return err
 	}
+	if err := c.validateModelGroups(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// validateModelGroups 路由组静态校验（fail fast，同渠道校验口径）。
+// ext 成员的渠道存在性在这里一并校验——渠道与组同在一份配置里，交叉检查
+// 能把"组指到不存在的渠道"提前到保存/启动期，而不是请求期才 400。
+func (c *Config) validateModelGroups() error {
+	if len(c.ModelGroups) > 20 {
+		return fmt.Errorf("model_groups: 组数过多（%d > 20）", len(c.ModelGroups))
+	}
+	seen := map[string]bool{}
+	for i := range c.ModelGroups {
+		g := &c.ModelGroups[i]
+		if !extChannelNameRe.MatchString(g.Name) {
+			return fmt.Errorf("model_groups[%d]: 组名 %q 须为小写字母/数字开头的 1-64 位 [a-z0-9_-]", i, g.Name)
+		}
+		if seen[g.Name] {
+			return fmt.Errorf("model_groups[%d]: 组名 %q 重复", i, g.Name)
+		}
+		seen[g.Name] = true
+		switch g.Routing {
+		case "", "order", "rotate":
+		default:
+			return fmt.Errorf("model_groups[%d] %q: routing 仅支持 order / rotate", i, g.Name)
+		}
+		if len(g.Members) == 0 {
+			return fmt.Errorf("model_groups[%d] %q: 至少一个成员", i, g.Name)
+		}
+		if len(g.Members) > 16 {
+			return fmt.Errorf("model_groups[%d] %q: 成员数过多（%d > 16）", i, g.Name, len(g.Members))
+		}
+		members := map[string]bool{}
+		for _, m := range g.Members {
+			if members[m] {
+				return fmt.Errorf("model_groups[%d] %q: 成员 %q 重复", i, g.Name, m)
+			}
+			members[m] = true
+			switch {
+			case strings.HasPrefix(m, "group/"):
+				return fmt.Errorf("model_groups[%d] %q: 成员 %q 不能再指向路由组（不支持嵌套）", i, g.Name, m)
+			case strings.HasPrefix(m, "cn:") || strings.HasPrefix(m, "global:"):
+				if strings.TrimSpace(m[strings.IndexByte(m, ':')+1:]) == "" {
+					return fmt.Errorf("model_groups[%d] %q: 成员 %q 模型名为空", i, g.Name, m)
+				}
+			case strings.HasPrefix(m, "ext:"):
+				rest := m[len("ext:"):]
+				slash := strings.IndexByte(rest, '/')
+				if slash <= 0 || slash == len(rest)-1 {
+					return fmt.Errorf("model_groups[%d] %q: ext 成员 %q 须为 ext:<channel>/<model>", i, g.Name, m)
+				}
+				chName := rest[:slash]
+				found := false
+				for k := range c.ExtChannels {
+					if c.ExtChannels[k].Name == chName {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("model_groups[%d] %q: ext 成员 %q 指向不存在的渠道 %q", i, g.Name, m, chName)
+				}
+			default:
+				return fmt.Errorf("model_groups[%d] %q: 成员 %q 须带 cn: / global: / ext:<channel>/ 前缀（裸名歧义不进组协议）", i, g.Name, m)
+			}
+		}
+	}
+	return nil
 }
 
 // validateExtChannels 外部渠道静态校验（fail fast：配置错了启动期即报，不带病路由）。

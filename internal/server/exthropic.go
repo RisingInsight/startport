@@ -100,6 +100,16 @@ func (h *Handler) handleExtMessages(w http.ResponseWriter, r *http.Request) {
 		writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", "parse body: "+err.Error())
 		return
 	}
+	// 路由组解析：成员是 ext 模型 → RouteModel 直接服务；池成员（cn:/global:）→
+	// ErrModelNotExt 回落主池，fallback 重进 chatCompletions 时自行解析 realm 前缀。
+	if strings.HasPrefix(areq.Model, "group/") {
+		member, _, gerr := h.resolveGroupModel(areq.Model)
+		if gerr != nil {
+			writeAnthropicError(w, http.StatusBadRequest, "invalid_request_error", gerr.Error())
+			return
+		}
+		areq.Model = member
+	}
 	if h.cfg.Ext != nil {
 		ch2, upstream, display, rerr := h.cfg.Ext.RouteModel(areq.Model)
 		switch {

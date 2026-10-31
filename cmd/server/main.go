@@ -29,6 +29,7 @@ import (
 	"github.com/RisingInsight/startport/internal/checkin"
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/livecfg"
+	"github.com/RisingInsight/startport/internal/modelgroup"
 	"github.com/RisingInsight/startport/internal/panel"
 	"github.com/RisingInsight/startport/internal/pool"
 	"github.com/RisingInsight/startport/internal/redisstore"
@@ -277,6 +278,11 @@ func main() {
 		}
 	}
 	extMgr.ReplaceAll(extChannelDefs(cfg.ExtChannels))
+
+	// 路由组（借鉴 magpie routing groups）：group/<name> → 成员模型的准入改写层。
+	// 无路由状态（选号/冷却都在池与渠道），ReplaceAll 即热生效。
+	grpMgr := modelgroup.New()
+	grpMgr.ReplaceAll(modelGroupDefs(cfg.ModelGroups))
 	extIntelStop := extMgr.StartIntel(cfg.ExtIntel.URL,
 		time.Duration(cfg.ExtIntel.Hours)*time.Hour, cfg.ExtIntel.Enabled)
 	defer extIntelStop()
@@ -481,7 +487,7 @@ func main() {
 	// 热重载各只有一份实现）。以 accounts.json 为准修齐 managed 渠道（用户误删
 	// 渠道 / 崩溃漂移都在这里修回；无账号 = 无操作，老配置零变化）。
 	saveChannels = func(defs []extchan.ChannelDef) error {
-		return saveChannelsAccounts(defs, *cfgPath, live, p, up, sch, extMgr)
+		return saveChannelsAccounts(defs, *cfgPath, live, p, up, sch, extMgr, grpMgr)
 	}
 	if summary, serr := acctchan.Sync(acctStore, acctLoader, saveChannels, log.Printf); serr != nil {
 		log.Printf("[acctchan] 启动同步失败（账号未投影，转发不受影响）: %v", serr)
@@ -524,7 +530,7 @@ func main() {
 			return Load(*cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch, extMgr)
+			return saveConfig(raw, *cfgPath, live, p, up, sch, extMgr, grpMgr)
 		},
 		// 账号中心（v1.6.0 · T2）：账号存储 + 投影落盘闭包（saveConfig 同一条链）。
 		Accounts:     acctStore,
@@ -568,6 +574,8 @@ func main() {
 		GlobalEnabled: cfg.Global.Enabled,
 		// 外部渠道（多平台阶段一）：nil 形态（extMgr 内部无渠道）对外等效关闭。
 		Ext: extMgr,
+		// 路由组（group/<name> 准入改写）：nil = 功能关闭。
+		ModelGroups: grpMgr,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -805,7 +813,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -838,14 +846,14 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	}
 
 	// 2) 校验 + 落盘 + 热应用（与账号中心投影共用同一条内部链——applyConfig）。
-	return applyConfig(merged, path, live, p, up, sch, extMgr)
+	return applyConfig(merged, path, live, p, up, sch, extMgr, grpMgr)
 }
 
 // applyConfig 校验 + 原子写 + 热应用（saveConfig 的内部函数化，架构 §4.2）：
 // 输入是"已合并/已脱敏"的完整配置 map。账号中心的写操作
 // （saveChannelsAccounts）与面板表单（saveConfig）共用这一份实现——
 // 校验/SSRF/原子写/热重载各只有一份代码。
-func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager) ([]string, error) {
+func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager) ([]string, error) {
 	// 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
@@ -939,6 +947,9 @@ func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *po
 	// 丢缓存。新增/删除渠道即时生效，无需重启。
 	extMgr.ReplaceAll(extChannelDefs(newCfg.ExtChannels))
 
+	// 路由组热重载：无运行态可复用，整表替换即生效（轮转计数按组名沿用）。
+	grpMgr.ReplaceAll(modelGroupDefs(newCfg.ModelGroups))
+
 	return restartRequiredFieldsChanged(prevCfg, newCfg), nil
 }
 
@@ -951,7 +962,7 @@ func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *po
 //     出过接口），没有"回填"一说；
 //   - 不做托管凭证差异检查：本次变更本身就是账号中心的合法写入（托管保护只
 //     拦"用户经表单改 managed 渠道凭证"这一条路径，见 saveConfig 的 1.5 步）。
-func saveChannelsAccounts(defs []extchan.ChannelDef, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager) error {
+func saveChannelsAccounts(defs []extchan.ChannelDef, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager) error {
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read current config: %w", err)
@@ -972,7 +983,7 @@ func saveChannelsAccounts(defs []extchan.ChannelDef, path string, live *livecfg.
 		channels = append(channels, channelDefToMap(def))
 	}
 	cur["ext_channels"] = channels
-	_, err = applyConfig(cur, path, live, p, up, sch, extMgr)
+	_, err = applyConfig(cur, path, live, p, up, sch, extMgr, grpMgr)
 	return err
 }
 
@@ -1069,6 +1080,24 @@ func channelDefToMap(def extchan.ChannelDef) map[string]any {
 		m["accounts"] = def.Accounts
 	}
 	return m
+}
+
+// modelGroupDefs Config.ModelGroups → modelgroup.Def 映射（装配/热重载共用）。
+// routing 空值回落 order（modelgroup.NormalizeRouting 的同口径规范化）。
+func modelGroupDefs(src []ModelGroupDef) []modelgroup.Def {
+	out := make([]modelgroup.Def, 0, len(src))
+	for _, g := range src {
+		members := make([]string, len(g.Members))
+		copy(members, g.Members)
+		out = append(out, modelgroup.Def{
+			Name:     g.Name,
+			Members:  members,
+			Routing:  modelgroup.NormalizeRouting(g.Routing),
+			Disabled: g.Disabled,
+			Note:     g.Note,
+		})
+	}
+	return out
 }
 
 // extChannelDefs Config.ExtChannels → extchan.ChannelDef 映射（装配/热重载共用）。
