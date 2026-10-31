@@ -2317,6 +2317,7 @@ func TestAccountCenterDOM(t *testing.T) {
 		"accAddMode", "accAddModeHint", "accAddBrowserPanel", "accAddPastePanel",
 		"abHint", "abSmsRow", "abPhone", "abSendCode", "abCode", "abSubmit",
 		"abUrlRow", "abUrl", "abCopyBtn", "abOpenBtn", "abStatus",
+		"abPasteRow", "abPasteUrl", "abPasteBtn", // TRAE 粘贴回调兜底
 		"abStart", "abRestart", "abCancelLogin",
 	} {
 		if !strings.Contains(html, `id="`+id+`"`) {
@@ -2337,6 +2338,7 @@ func TestAccountCenterDOM(t *testing.T) {
 		"accounts/login/sms/send",
 		"accounts/login/sms/verify",
 		"accounts/login/cancel",
+		"callback_paste",        // TRAE 粘贴回调兜底（规格 §2.4 submit_callback）
 		"等待授权完成，自动检测中",          // 轮询期 UI 文案
 		"acctBrowserSupported",  // 模式切换的平台支持判定
 		"acctLeaveCenterNotify", // 离开账号中心的会话提示钩子

@@ -570,6 +570,13 @@ legend { font-size: var(--fs-xs); color: var(--ink-3); font-weight: 700; padding
   padding: 11px 13px; font: 12px var(--mono); word-break: break-all; color: var(--accent);
   margin: 8px 0 12px; user-select: all;
 }
+/* 添加账号向导：授权链接限制高度内滚（TRAE 链接可达千字符，不能把弹窗撑高）。 */
+#abUrl { max-height: 96px; overflow: auto; font-size: var(--fs-sm); line-height: 1.5; }
+/* 登录失败态：从一行红字升为浅红提示块（错误 + 恢复建议要一眼可辨）。 */
+#abStatus.err {
+  background: var(--bad-soft); border-left: 2px solid var(--bad);
+  border-radius: 8px; padding: 8px 10px; align-items: flex-start;
+}
 .state { font-size: var(--fs-sm); color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .state.ok { color: var(--ok); } .state.err { color: var(--bad); }
 .dots::after { content: "…"; animation: blink 1.2s steps(4) infinite; }
@@ -2904,6 +2911,14 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           <div style="display:flex;gap:8px;margin-top:6px">
             <button type="button" class="xs" id="abCopyBtn">复制链接</button>
             <a class="xs" id="abOpenBtn" href="#" target="_blank" rel="noopener noreferrer" style="text-decoration:none;display:inline-block">在浏览器打开</a>
+          </div>
+        </div>
+        <!-- TRAE 粘贴回调兜底：浏览器无法回连 127.0.0.1 时，把登录后地址栏整段粘回 -->
+        <div id="abPasteRow" hidden style="margin:0 0 8px">
+          <div class="hint" style="margin-bottom:4px">浏览器打不开本地回调页？把登录后地址栏里的完整地址粘贴到这里（以 /authorize? 开头的那段）：</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input id="abPasteUrl" placeholder="http://127.0.0.1:…/authorize?authCode=…" autocomplete="off" style="flex:1;min-width:220px">
+            <button type="button" class="xs" id="abPasteBtn">提交回调</button>
           </div>
         </div>
         <div class="state" id="abStatus" hidden></div>

@@ -5,7 +5,8 @@
 //	① POST {guidance}/cloudide/api/v3/trae/GetLoginGuidance → LoginHost（失败兜底 api.trae.cn）
 //	② 浏览器打开 {loginHost}/authorization?…（auth_callback_url 刻意不编码——
 //	   官方前端正则硬校验 ^http://127\.0\.0\.1:<port>/authorize$，其余形态直接渲染登录失败）
-//	③ 回调 GET http://127.0.0.1:<port>/authorize?authCode|refreshToken|loginHost|userInfo…
+//	③ 回调 GET http://127.0.0.1:<port>/authorize?authCode|authCodeInfo|refreshToken|loginHost|userInfo…
+//	   浏览器回连失败时可把地址栏整段粘回（SubmitCallback，规格 §2.4 submit_callback）
 //	④ POST {api}/trae/api/v3/oauth/ExchangeToken（P-256 SPKI 公钥进 DeviceInfo；
 //	   空公钥 = HTTP 401 业务码 20405）→ token → GetUserInfo 补身份 → blob 入池
 //
@@ -560,6 +561,187 @@ func traeIdentityFromJSON(raw string, depth int) (uid, nickname string) {
 		pick([]string{"ScreenName", "screenName", "Nickname", "nickname", "Name", "name", "displayName"})
 }
 
+// traeSessionState 一轮 TRAE 登录的服务端材料（HTTP 回调与「粘贴回调」共用）。
+// 只存内存：verifier/密钥对不落日志、不回显。
+type traeSessionState struct {
+	ident      traeDeviceIdentity
+	verifier   string
+	loginHost  string
+	dispatched bool // 已开始换证（两种投递方式只认第一次）
+}
+
+// traeCallbackMaterial 一次回调里可用的材料（键名候选顺序即优先级，
+// 与参考实现 oauth.rs:349-389 对齐）。
+type traeCallbackMaterial struct {
+	AuthCode     string
+	AuthCodeFrom string // 命中的键名（诊断用；只记键不记值）
+	RefreshToken string
+	LoginHost    string
+	UID          string
+	Nickname     string
+	ErrMsg       string
+}
+
+// traeParseCallback 解析回调 query。error 分支先返回；authCode 直接键优先，
+// `authCodeInfo`（值是 URL 编码过的 JSON）作兜底递归提取——2026-10 实测上游
+// 有两种回调形态，只认 authCode 会把后一种误判成「没有授权码」。
+func traeParseCallback(q url.Values) traeCallbackMaterial {
+	var m traeCallbackMaterial
+	for _, k := range []string{"error", "error_code", "err", "errorCode"} {
+		if v := strings.TrimSpace(q.Get(k)); v != "" {
+			m.ErrMsg = "授权失败：" + v
+			return m
+		}
+	}
+	if q.Get("isRedirect") == "false" {
+		m.ErrMsg = "授权失败：登录页未完成跳转（isRedirect=false）"
+		return m
+	}
+	m.LoginHost = traeFirstValue(q, "loginHost", "login_host", "LoginHost", "host", "consoleHost")
+	for _, k := range []string{"authCode", "auth_code", "AuthCode", "authorization_code", "code"} {
+		if v := strings.TrimSpace(q.Get(k)); v != "" {
+			m.AuthCode, m.AuthCodeFrom = v, k
+			break
+		}
+	}
+	if m.AuthCode == "" {
+		for _, k := range []string{"authCodeInfo", "auth_code_info", "AuthCodeInfo"} {
+			if raw := strings.TrimSpace(q.Get(k)); raw != "" {
+				if code := traeExtractAuthCodeInfo(raw); code != "" {
+					m.AuthCode, m.AuthCodeFrom = code, k
+					break
+				}
+			}
+		}
+	}
+	m.RefreshToken = traeFirstValue(q, "refreshToken", "refresh_token", "RefreshToken", "refresh-token")
+	m.UID, m.Nickname = traeParseCallbackIdentity(q)
+	return m
+}
+
+func traeFirstValue(q url.Values, keys ...string) string {
+	for _, k := range keys {
+		if v := strings.TrimSpace(q.Get(k)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// traeExtractAuthCodeInfo 解 `authCodeInfo`：值是 URL 编码过的 JSON（Go 的
+// Query() 已还原一层；这里再兜底一次，兼容双重编码），递归找内部 authCode。
+func traeExtractAuthCodeInfo(raw string) string {
+	candidates := []string{raw}
+	if s, err := url.QueryUnescape(raw); err == nil && s != raw {
+		candidates = append(candidates, s)
+	}
+	for _, c := range candidates {
+		var v any
+		if json.Unmarshal([]byte(c), &v) != nil {
+			continue
+		}
+		if code := traeFindAuthCodeJSON(v, 0); code != "" {
+			return code
+		}
+	}
+	return ""
+}
+
+func traeFindAuthCodeJSON(v any, depth int) string {
+	if depth > 6 {
+		return ""
+	}
+	switch node := v.(type) {
+	case string:
+		// Result 直接是授权码字符串的形态（JSON.stringify("…")）也要接。
+		return strings.TrimSpace(node)
+	case map[string]any:
+		for _, k := range []string{"authCode", "auth_code", "AuthCode", "AuthCodeToken", "code"} {
+			if s, ok := node[k].(string); ok && strings.TrimSpace(s) != "" {
+				return strings.TrimSpace(s)
+			}
+		}
+		for _, child := range node {
+			switch child.(type) {
+			case map[string]any, []any:
+				if code := traeFindAuthCodeJSON(child, depth+1); code != "" {
+					return code
+				}
+			}
+		}
+	case []any:
+		for _, item := range node {
+			if code := traeFindAuthCodeJSON(item, depth+1); code != "" {
+				return code
+			}
+		}
+	}
+	return ""
+}
+
+// traeQueryKeys 取回调参数名（诊断用：只记键不记值——授权码/续期串都可能出现）。
+func traeQueryKeys(rawQuery string) []string {
+	if rawQuery == "" {
+		return nil
+	}
+	parts := strings.Split(rawQuery, "&")
+	keys := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		k := p
+		if i := strings.IndexByte(k, '='); i >= 0 {
+			k = k[:i]
+		}
+		if d, err := url.QueryUnescape(k); err == nil {
+			k = d
+		}
+		if k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// traeLooksLikeLoginCallback 带身份/宿主回显说明这是登录页发来的真回调，只是
+// 没带授权材料——要落失败并把参数名报出来，不能当浏览器噪音 404 吞掉。其余
+// （favicon / preconnect / 随机探测）继续等下一个请求。
+func traeLooksLikeLoginCallback(q url.Values) bool {
+	for _, k := range []string{"userInfo", "user_info", "UserInfo", "userinfo",
+		"loginHost", "login_host", "LoginHost", "login_trace_id", "loginTraceID",
+		"userTag", "user_tag", "UserTag"} {
+		if strings.TrimSpace(q.Get(k)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// traePastedQuery 把「粘贴的回调地址」归一成 query 串：整段 URL / 带 ? 的片段 /
+// 裸 query 都接；空内容直接报人话。
+func traePastedQuery(raw string) (string, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", fmt.Errorf("粘贴内容为空：请把浏览器地址栏里的完整回调地址粘进来")
+	}
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		u, err := url.Parse(s)
+		if err != nil || u.RawQuery == "" {
+			return "", fmt.Errorf("粘贴的地址没有查询参数（应形如 http://127.0.0.1:<端口>/authorize?authCode=…）")
+		}
+		return u.RawQuery, nil
+	}
+	if i := strings.IndexByte(s, '?'); i >= 0 {
+		s = s[i+1:]
+	}
+	s = strings.TrimPrefix(s, "?")
+	if s == "" {
+		return "", fmt.Errorf("粘贴内容没有查询参数（应形如 …/authorize?authCode=…）")
+	}
+	return s, nil
+}
+
 // startTrae 发起 TRAE 浏览器登录：回环监听 + 授权 URL；回调协程完成换证入池。
 func (m *Manager) startTrae(ctx context.Context) (*StartResult, error) {
 	ident, err := m.traeIdentity()
@@ -585,13 +767,18 @@ func (m *Manager) startTrae(ctx context.Context) (*StartResult, error) {
 		status:    StatusPending,
 		loginURL:  verificationURI,
 		done:      make(chan struct{}),
+		trae: &traeSessionState{
+			ident:     ident,
+			verifier:  verifier,
+			loginHost: loginHost,
+		},
 	}
 	if err := m.registerSession(s); err != nil {
 		_ = ln.Close()
 		return nil, err
 	}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.handleTraeCallback(s, ident, verifier, loginHost, w, r)
+		m.handleTraeCallback(s, w, r)
 	})}
 	s.httpSrv = srv
 	go func() { _ = srv.Serve(ln) }()
@@ -623,9 +810,21 @@ func htmlEscapeStr(s string) string {
 	return r.Replace(s)
 }
 
-// handleTraeCallback GET /authorize?…：浏览器噪音（无参数）回 404 不投递；
-// error/isRedirect=false 直接失败；authCode/refreshToken → 后台换证入池。
-func (m *Manager) handleTraeCallback(s *Session, ident traeDeviceIdentity, codeVerifier, loginHost string, w http.ResponseWriter, r *http.Request) {
+// traeWaitingPage 尚未收到授权材料的中间页（状态码 200）：会话保持 pending，
+// 面板继续轮询/可粘贴回调。标题刻意不是 Login failed——这一轮还没定论。
+func traeWaitingPage(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = fmt.Fprintf(w, "<html><head><meta charset=\"utf-8\"><title>%s</title></head>"+
+		"<body style=\"font-family:sans-serif;text-align:center;padding-top:60px\">"+
+		"<h2>%s</h2><p>%s</p></body></html>",
+		htmlEscapeStr("Waiting for authorization"), htmlEscapeStr("Waiting for authorization"), htmlEscapeStr(msg))
+}
+
+// handleTraeCallback GET /authorize?…：无参数/纯噪音回 404 不投递；error 落失败；
+// 「有身份回显但没授权材料」回中间页并继续等（不误杀可能存在的下一次回调）；
+// authCode|authCodeInfo|refreshToken → 换证。
+func (m *Manager) handleTraeCallback(s *Session, w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != traeCallbackPath {
 		http.NotFound(w, r)
 		return
@@ -636,51 +835,68 @@ func (m *Manager) handleTraeCallback(s *Session, ident traeDeviceIdentity, codeV
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
+	mat := traeParseCallback(q)
+	hasMaterial := mat.ErrMsg != "" || mat.AuthCode != "" || mat.RefreshToken != ""
+	if !hasMaterial && !traeLooksLikeLoginCallback(q) {
+		// 认不出登录材料的探测请求：回 404 继续等下一个请求（ref callback_server.rs:158-180）。
+		m.cfg.Logf("[acclogin:trae] 忽略回调噪音（参数 %v）", traeQueryKeys(r.URL.RawQuery))
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	accepted, msg := m.traeDispatch(s, r.URL.RawQuery, mat)
+	if !hasMaterial {
+		// 有身份回显但没授权材料：不终结会话（可能是上游的中间跳转），
+		// 面板继续等；用户也可把地址栏整段粘回「提交回调」。
+		traeWaitingPage(w, msg)
+		return
+	}
+	traeCallbackPage(w, accepted && mat.ErrMsg == "", msg)
+}
+
+// traeDispatch 投递一次回调（HTTP 回调与粘贴回调共用同一套解析与幂等）。
+// 返回 (是否已投递, 页面要显示的文案)：成功投递 = 后台换证已启动（文案为空）。
+func (m *Manager) traeDispatch(s *Session, rawQuery string, mat traeCallbackMaterial) (bool, string) {
+	hasMaterial := mat.ErrMsg == "" && (mat.AuthCode != "" || mat.RefreshToken != "")
 	s.mu.Lock()
-	ready := s.loginURL != ""
-	status := s.status
+	pending := s.status == StatusPending && s.trae != nil
+	already, started := false, false
+	if pending && hasMaterial {
+		if s.trae.dispatched {
+			already = true
+		} else {
+			s.trae.dispatched = true
+			started = true
+		}
+	}
+	st := s.trae
 	s.mu.Unlock()
-	if !ready || status != StatusPending {
-		traeCallbackPage(w, false, "登录会话已结束，请回到面板重新发起。")
-		return
+
+	if !pending {
+		return false, "登录会话已结束，请回到面板重新发起。"
 	}
-	fail := func(msg string) {
-		traeCallbackPage(w, false, msg)
-		s.finish(StatusFailed, msg, "")
+	if mat.ErrMsg != "" {
+		m.cfg.Logf("[acclogin:trae] 回调失败：%s（参数 %v）", mat.ErrMsg, traeQueryKeys(rawQuery))
+		s.finish(StatusFailed, mat.ErrMsg, "")
 		time.AfterFunc(2*time.Second, s.closeHTTP)
+		return true, mat.ErrMsg
 	}
-	for _, k := range []string{"error", "error_code", "err", "errorCode"} {
-		if v := strings.TrimSpace(q.Get(k)); v != "" {
-			fail("授权失败：" + v)
-			return
-		}
+	if !hasMaterial {
+		return false, "还没有收到授权码（收到的参数：" + strings.Join(traeQueryKeys(rawQuery), "、") +
+			"）。请继续在浏览器完成登录；若页面已停在这里，请回到 StarPort 面板把地址栏整段粘贴到「提交回调」"
 	}
-	if q.Get("isRedirect") == "false" {
-		fail("授权失败：登录页未完成跳转（isRedirect=false）")
-		return
+	if already {
+		return true, "已收到授权，正在换证，请回到面板查看结果。"
 	}
-	cbUID, cbNickname := traeParseCallbackIdentity(q)
-	authCode := ""
-	for _, k := range []string{"authCode", "auth_code", "AuthCode", "authorization_code", "code"} {
-		if v := strings.TrimSpace(q.Get(k)); v != "" {
-			authCode = v
-			break
-		}
+	if !started || st == nil {
+		return false, "登录会话已结束，请回到面板重新发起。"
 	}
-	refreshToken := ""
-	for _, k := range []string{"refreshToken", "refresh_token", "RefreshToken", "refresh-token"} {
-		if v := strings.TrimSpace(q.Get(k)); v != "" {
-			refreshToken = v
-			break
-		}
+	loginHost := mat.LoginHost
+	if loginHost == "" {
+		loginHost = st.loginHost
 	}
-	if authCode == "" && refreshToken == "" {
-		fail("回调链接中没有授权码参数——请回到面板重新发起登录（若浏览器无法回连，可改用粘贴凭证）")
-		return
-	}
-	traeCallbackPage(w, true, "")
+	m.cfg.Logf("[acclogin:trae] 回调命中授权材料（键 %s；参数 %v）", mat.AuthCodeFrom, traeQueryKeys(rawQuery))
 	go func() {
-		blob, xerr := m.traeExchange(ident, codeVerifier, loginHost, authCode, refreshToken, cbUID, cbNickname)
+		blob, xerr := m.traeExchange(st.ident, st.verifier, loginHost, mat.AuthCode, mat.RefreshToken, mat.UID, mat.Nickname)
 		if xerr != nil {
 			s.finish(StatusFailed, xerr.Error(), "")
 			time.AfterFunc(2*time.Second, s.closeHTTP)
@@ -696,6 +912,40 @@ func (m *Manager) handleTraeCallback(s *Session, ident traeDeviceIdentity, codeV
 		}
 		time.AfterFunc(2*time.Second, s.closeHTTP)
 	}()
+	return true, ""
+}
+
+// SubmitCallback 粘贴回调兜底（规格 §2.4 submit_callback）：浏览器无法回连
+// 127.0.0.1 时，把登录后地址栏里的整段回调地址粘回面板。
+func (m *Manager) SubmitCallback(sessionID, raw string) error {
+	s := m.getSession(strings.TrimSpace(sessionID))
+	if s == nil {
+		return fmt.Errorf("登录会话不存在（已取消、被顶替或已超时清理）")
+	}
+	if s.Platform != account.PlatformTrae {
+		return fmt.Errorf("该平台不支持粘贴回调地址")
+	}
+	rawQuery, err := traePastedQuery(raw)
+	if err != nil {
+		return err
+	}
+	q, perr := url.ParseQuery(rawQuery)
+	if perr != nil || len(q) == 0 {
+		return fmt.Errorf("粘贴内容里没有可解析的回调参数")
+	}
+	mat := traeParseCallback(q)
+	if mat.ErrMsg == "" && mat.AuthCode == "" && mat.RefreshToken == "" {
+		return fmt.Errorf("回调地址没有携带可用的授权信息（收到的参数：%s）", strings.Join(traeQueryKeys(rawQuery), "、"))
+	}
+	accepted, msg := m.traeDispatch(s, rawQuery, mat)
+	if !accepted {
+		if msg == "" {
+			msg = "登录会话已结束，请回到面板重新发起。"
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	m.cfg.Logf("[acclogin:trae] 已接受粘贴回调（%s）", s.ID)
+	return nil
 }
 
 // traeExchange 回调产物 → token → blob。refreshToken 分支优先（授权码一次性；

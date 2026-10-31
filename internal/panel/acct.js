@@ -1731,10 +1731,11 @@ if ($('accAddVeil')) {
      POST /api/accounts/login/sms/send       {session_id}  → 200=已重发；400=频控/错误
      POST /api/accounts/login/sms/verify     {session_id, code}  → 200（凭证入池）/ 4xx
      POST /api/accounts/login/cancel         {session_id}  （取消后 wait 404）
+     POST /api/accounts/login/{sid}/callback_paste {query} （trae 粘贴回调兜底）
    降级：501（acclogin 未启用）/ 404（旧二进制无路由）→ 提示改用粘贴凭证。
-   平台支持面（spec §4 首批）：qoder / qoder-intl（授权链接+轮询）、
-   autoclaw（手机验证码两步）、autoclaw-intl（阿里云滑块 + 回环 OAuth）；
-   loomy / custom 仅粘贴。 */
+   平台支持面（spec §2.4 / §4）：qoder / qoder-intl（授权链接+轮询）、
+   autoclaw（手机验证码两步）、autoclaw-intl（阿里云滑块 + 回环 OAuth）、
+   trae（回环回调 + 粘贴回调兜底）；loomy / custom 仅粘贴。 */
 
 const ACCT_BROWSER_PLATFORMS = {
   qoder: 'Qoder 国内',
@@ -1871,6 +1872,7 @@ function acctBrowserUIReset() {
   const isSms = platform === 'autoclaw';
   const isIntl = platform === 'autoclaw-intl';
   const isCodeBuddy = platform === 'codebuddy';
+  const isTrae = platform === 'trae';
   if ($('abHint')) {
     $('abHint').textContent = isCodeBuddy
       ? '将打开 CodeBuddy 登录窗口（国内 / 国际版可在其中选择）；完成登录后账号自动入池并投影为托管渠道。'
@@ -1883,7 +1885,14 @@ function acctBrowserUIReset() {
   }
   if ($('abSmsRow')) $('abSmsRow').hidden = !isSms;
   if ($('abUrlRow')) $('abUrlRow').hidden = true;
-  if ($('abStatus')) { $('abStatus').hidden = true; $('abStatus').textContent = ''; $('abStatus').style.color = ''; }
+  if ($('abPasteRow')) $('abPasteRow').hidden = !isTrae; // 仅 TRAE：本机回环回调有回连风险
+  if ($('abPasteUrl')) $('abPasteUrl').value = '';
+  if ($('abStatus')) {
+    $('abStatus').hidden = true;
+    $('abStatus').textContent = '';
+    $('abStatus').style.color = '';
+    if ($('abStatus').classList) $('abStatus').classList.remove('err');
+  }
   if ($('abStart')) {
     $('abStart').hidden = false;
     $('abStart').textContent = isCodeBuddy ? '打开 CodeBuddy 登录窗口'
@@ -1926,6 +1935,7 @@ function acctLoginStatus(msg, color) {
   el.hidden = !msg;
   el.textContent = msg || '';
   el.style.color = color || '';
+  if (el.classList) el.classList.toggle('err', color === 'var(--bad)');
 }
 
 /* 登录服务不可用（501 = acclogin 未启用；404 = 旧二进制无路由）。 */
@@ -2009,6 +2019,7 @@ async function acctLoginStart() {
 /* wait 轮询（2s；pending 续轮；success/failed 终态；404 = 会话被取消或过期）。 */
 function acctLoginStartTimer() {
   if (!accLogin) return;
+  if (accLogin.timer) clearInterval(accLogin.timer); // 幂等：粘贴回调/验证码后不叠第二条轮询
   accLogin.timer = setInterval(() => acctLoginPoll(), ACCT_LOGIN_POLL_MS);
   acctLoginPoll();
 }
@@ -2188,6 +2199,39 @@ async function acctCopyLoginUrl() {
   }
 }
 
+/* TRAE 粘贴回调兜底（规格 §2.4 submit_callback）：浏览器无法回连 127.0.0.1 时，
+   把登录后地址栏里的整段地址投递到后端；换证结果仍由 wait 轮询展示。 */
+async function acctCallbackPaste() {
+  const raw = ($('abPasteUrl') ? $('abPasteUrl').value : '').trim();
+  if (!raw) {
+    acctLoginStatus('请先粘贴浏览器地址栏里的完整回调地址', 'var(--bad)');
+    return;
+  }
+  if (!accLogin || !accLogin.session) {
+    acctLoginStatus('请先点击「获取授权链接」建立登录会话', 'var(--bad)');
+    return;
+  }
+  const btn = $('abPasteBtn');
+  if (btn) btn.disabled = true;
+  try {
+    await api('accounts/login/' + encodeURIComponent(accLogin.session) + '/callback_paste', {
+      method: 'POST',
+      body: JSON.stringify({ query: raw })
+    });
+    acctLoginStatus('回调已提交，正在换证…');
+    acctLoginStartTimer(); // 立即探一次 wait，再进入 2s 轮询
+  } catch (e) {
+    const m = e.message || '';
+    if (acctLoginDegrade(m)) {
+      acctLoginStopWithError('浏览器登录服务未启用（后端 acclogin 未部署）；可改用「粘贴凭证」导入', true);
+    } else {
+      acctLoginStatus('回调提交失败：' + (m || '原因未明'), 'var(--bad)');
+    }
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 /* 用户主动取消登录（向导内按钮）。 */
 function acctLoginCancel() {
   stopAccLogin(true);
@@ -2229,6 +2273,7 @@ if ($('abCancelLogin')) $('abCancelLogin').onclick = acctLoginCancel;
 if ($('abSendCode')) $('abSendCode').onclick = acctSmsSendOrResend; // 首发=start；重发=sms/send（60s 限频）
 if ($('abSubmit')) $('abSubmit').onclick = acctSmsVerify;
 if ($('abCopyBtn')) $('abCopyBtn').onclick = acctCopyLoginUrl;
+if ($('abPasteBtn')) $('abPasteBtn').onclick = acctCallbackPaste; // TRAE 粘贴回调兜底
 
 /* 账号列表静默轮询（只读本地状态，不打上游）：后台签到/余额刷新后最多 1 分钟
    反映到页面；从后台切回时立即刷新，避免隔天回来仍看到昨天的签到结果。 */

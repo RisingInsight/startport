@@ -236,3 +236,13 @@ func TestAcctSyncUsesAcctchan(t *testing.T) {
 		t.Fatalf("投影 defs 异常: %+v", e.defs)
 	}
 }
+
+// TRAE 粘贴回调端点必须已注册：未注入 acclogin 时应回 501（而非 404 路由缺失）。
+func TestAcctLoginCallbackPasteRouteRegistered(t *testing.T) {
+	e := newAcctEnv(t)
+	rec := e.do("POST", "/startport/api/accounts/login/lgn-abcdef/callback_paste",
+		`{"query":"http://127.0.0.1:1/authorize?authCode=x"}`)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d（路由未注册会 404）: %s", rec.Code, rec.Body.String())
+	}
+}

@@ -206,13 +206,14 @@ type Session struct {
 	status      string
 	errMsg      string
 	accountID   string
-	loginURL    string       // qoder：给用户浏览器打开
-	phone       string       // autoclaw：归一化后的手机号
-	deviceID    string       // autoclaw：两跳一致
-	vendor      string       // autoclaw-intl：zai / google
-	navigateURI string       // autoclaw-intl：OAuth 回环回调
-	httpSrv     *http.Server // autoclaw-intl：本机回环监听
-	blob        jsonRawMap   // 登录产出（入池前驻留；Never logged）
+	loginURL    string            // qoder：给用户浏览器打开
+	phone       string            // autoclaw：归一化后的手机号
+	deviceID    string            // autoclaw：两跳一致
+	vendor      string            // autoclaw-intl：zai / google
+	navigateURI string            // autoclaw-intl：OAuth 回环回调
+	httpSrv     *http.Server      // autoclaw-intl / trae：本机回环监听
+	trae        *traeSessionState // TRAE：回调材料与换证幂等标记
+	blob        jsonRawMap        // 登录产出（入池前驻留；Never logged）
 	label       string
 	cancelled   bool
 	terminalAt  time.Time          // 终态时刻（reapLoop 延迟清理，Wait 可观察 expired）

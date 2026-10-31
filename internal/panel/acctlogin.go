@@ -18,6 +18,8 @@
 //	GET  /startport/api/accounts/login/{sid}/wait
 //	POST /startport/api/accounts/login/{sid}/cancel
 //	POST /startport/api/accounts/login/{sid}/sms_verify   {code}
+//	POST /startport/api/accounts/login/{sid}/callback_paste {query|url}
+//	  （trae 粘贴回调兜底：浏览器无法回连 127.0.0.1 时把地址栏整段粘回）
 //
 // 另有 `GET /startport/api/accounts/login/capabilities` 下发支持平台清单
 // （规格 §3.4：前端不硬编码）。入池走既有 Accounts.Add + 投影（Manager.AfterPool
@@ -46,6 +48,7 @@ func (p *Panel) registerLoginRoutes() {
 	p.mux.HandleFunc("POST /startport/api/accounts/login/sms/send", p.withAuth(p.platformLoginSMSSend))
 	p.mux.HandleFunc("POST /startport/api/accounts/login/sms/verify", p.withAuth(p.platformLoginSMSVerify))
 	p.mux.HandleFunc("POST /startport/api/accounts/login/{sid}/sms_verify", p.withAuth(p.platformLoginSMSVerifyPath))
+	p.mux.HandleFunc("POST /startport/api/accounts/login/{sid}/callback_paste", p.withAuth(p.platformLoginCallbackPaste))
 	p.mux.HandleFunc("GET /startport/api/accounts/login/capabilities", p.withAuth(p.platformLoginCapabilities))
 	p.mux.HandleFunc("GET /startport/api/accounts/login/captcha", p.withAuth(p.platformLoginCaptcha))
 }
@@ -224,6 +227,34 @@ func (p *Panel) platformLoginSMSVerifyPath(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	p.verifyByID(w, r.Context(), r.PathValue("sid"), body.Code)
+}
+
+// platformLoginCallbackPaste POST /startport/api/accounts/login/{sid}/callback_paste
+// TRAE 粘贴回调兜底（规格 §2.4 submit_callback）：body 接受 `query` 或 `url`
+// 两种键（值可以是整段回调地址，也可以是裸 query）。投递后仍由 /wait 轮询
+// 展示最终成败——换证是后台异步完成的。
+func (p *Panel) platformLoginCallbackPaste(w http.ResponseWriter, r *http.Request) {
+	if !p.loginReady() {
+		writeErr(w, http.StatusNotImplemented, "登录式添加未启用")
+		return
+	}
+	var body struct {
+		Query string `json:"query"`
+		URL   string `json:"url"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析请求体失败: "+err.Error())
+		return
+	}
+	raw := strings.TrimSpace(body.Query)
+	if raw == "" {
+		raw = strings.TrimSpace(body.URL)
+	}
+	if err := p.cfg.Login.SubmitCallback(r.PathValue("sid"), raw); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // flexCode 验证码字段的**数字/字符串双兼容**形态（v1.7.0 冒烟修复）：
