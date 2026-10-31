@@ -124,6 +124,44 @@ func (p *Panel) keysSetDisabled(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"key": k})
 }
 
+// keysSetLimit POST /startport/api/keys/{id}/limit {limit_tokens, period}。
+// 设置/清除密钥的 token 用量限额（period: day|week|month；limit_tokens<=0 = 清除）。
+// 执行在 /v1 准入（server.keyOverBudget），超限 429 insufficient_quota。
+func (p *Panel) keysSetLimit(w http.ResponseWriter, r *http.Request) {
+	st := p.keysStore()
+	if st == nil {
+		writeErr(w, http.StatusNotImplemented, "api keys not enabled")
+		return
+	}
+	var body struct {
+		LimitTokens int64  `json:"limit_tokens"`
+		Period      string `json:"period"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid json body")
+		return
+	}
+	k, err := st.SetLimit(r.PathValue("id"), body.LimitTokens, body.Period)
+	if err != nil {
+		writeKeysErr(w, err)
+		return
+	}
+	log.Printf("panel: agent 密钥 %q 限额=%d tokens/%s", k.Name, k.LimitTokens, periodLabelCN(k.Period))
+	writeJSON(w, http.StatusOK, map[string]any{"key": k})
+}
+
+// periodLabelCN 限额周期中文短名（日志与前端共用口径）。
+func periodLabelCN(p string) string {
+	switch p {
+	case "week":
+		return "周"
+	case "month":
+		return "月"
+	default:
+		return "日"
+	}
+}
+
 // keysDelete POST /startport/api/keys/{id}/delete → 立即失效。
 func (p *Panel) keysDelete(w http.ResponseWriter, r *http.Request) {
 	st := p.keysStore()
@@ -144,6 +182,8 @@ func writeKeysErr(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusNotFound, "key not found")
 	case errors.Is(err, apikeys.ErrBadName):
 		writeErr(w, http.StatusBadRequest, "名称须为 1-40 个字符")
+	case errors.Is(err, apikeys.ErrBadPeriod):
+		writeErr(w, http.StatusBadRequest, "限额周期仅支持 day / week / month")
 	default:
 		writeErr(w, http.StatusInternalServerError, err.Error())
 	}

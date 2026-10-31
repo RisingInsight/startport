@@ -255,6 +255,28 @@ func (r *Recorder) Add(now time.Time, realm, uid, model string, d Delta, ok bool
 	r.dirty = true
 }
 
+// KeyWindow 汇总某密钥名自 from（含）起的 token 总量与请求数。kn 走与桶键
+// 相同的竖线转义口径（apikeys.Create 侧已拦，这里兜底）。桶按各自起点入窗：
+// from 取周期零点（server.periodStart）时小时桶与 Rollup 折叠出的日桶边界
+// 天然对齐，不重算也不漏算。供 agent 密钥的用量配额判断（server.keyOverBudget）。
+func (r *Recorder) KeyWindow(kn string, from time.Time) (tokens, reqs int64) {
+	kn = strings.ReplaceAll(kn, "|", "_")
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, b := range r.buckets {
+		if b.KN != kn {
+			continue
+		}
+		ts, ok := bucketTime(b.Scope)
+		if !ok || ts.Before(from) {
+			continue
+		}
+		tokens += b.TT
+		reqs += b.Req
+	}
+	return tokens, reqs
+}
+
 // Rollup 把超出 hourlyKeep 的小时桶折叠为日桶（按本地日历日）。
 // 幂等：同一小时反复折叠不会重复计数（先累加再删源桶）。
 func (r *Recorder) Rollup(now time.Time) {

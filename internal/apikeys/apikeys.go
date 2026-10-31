@@ -38,33 +38,43 @@ const (
 )
 
 var (
-	ErrNotFound = errors.New("key not found")
-	ErrLimit    = errors.New("key limit reached")
-	ErrBadName  = errors.New("invalid key name")
+	ErrNotFound  = errors.New("key not found")
+	ErrLimit     = errors.New("key limit reached")
+	ErrBadName   = errors.New("invalid key name")
+	ErrBadPeriod = errors.New("invalid limit period")
 )
 
 // Key 单把密钥的存储行。全钥永不落盘，只存 SHA-256 摘要；Prefix 保留明文
 // 前 12 位（"sp-xxxxxxxx"）供列表辨认。
+//
+// 限额（借鉴 magpie 的 per-client budget）：LimitTokens>0 时，该密钥在当前
+// Period（本地时区的日/周/月周期）内累计的 token 总量达到上限即被 /v1 入口
+// 429 拒绝（used/limit 口径见 server.keyOverBudget 与 usage.KeyWindow）。
+// 执行点在请求准入：在途请求可能越过上限一小截，与 magpie 行为一致。
 type Key struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Hash      string    `json:"hash"` // SHA-256 hex（全钥）
-	Prefix    string    `json:"prefix"`
-	CreatedAt time.Time `json:"created_at"`
-	LastUsed  time.Time `json:"last_used,omitempty"`
-	UsedCount int64     `json:"used_count,omitempty"`
-	Disabled  bool      `json:"disabled,omitempty"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Hash        string    `json:"hash"` // SHA-256 hex（全钥）
+	Prefix      string    `json:"prefix"`
+	CreatedAt   time.Time `json:"created_at"`
+	LastUsed    time.Time `json:"last_used,omitempty"`
+	UsedCount   int64     `json:"used_count,omitempty"`
+	Disabled    bool      `json:"disabled,omitempty"`
+	LimitTokens int64     `json:"limit_tokens,omitempty"`
+	Period      string    `json:"period,omitempty"` // "day"|"week"|"month"（LimitTokens>0 时有意义）
 }
 
 // Public 列表/响应里对外暴露的行：不带摘要（摘要虽不可逆，也不必下发）。
 type Public struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Prefix    string    `json:"prefix"`
-	CreatedAt time.Time `json:"created_at"`
-	LastUsed  time.Time `json:"last_used,omitempty"`
-	UsedCount int64     `json:"used_count,omitempty"`
-	Disabled  bool      `json:"disabled,omitempty"`
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Prefix      string    `json:"prefix"`
+	CreatedAt   time.Time `json:"created_at"`
+	LastUsed    time.Time `json:"last_used,omitempty"`
+	UsedCount   int64     `json:"used_count,omitempty"`
+	Disabled    bool      `json:"disabled,omitempty"`
+	LimitTokens int64     `json:"limit_tokens,omitempty"`
+	Period      string    `json:"period,omitempty"`
 }
 
 func (k Key) public() Public {
@@ -72,7 +82,17 @@ func (k Key) public() Public {
 		ID: k.ID, Name: k.Name, Prefix: k.Prefix,
 		CreatedAt: k.CreatedAt, LastUsed: k.LastUsed,
 		UsedCount: k.UsedCount, Disabled: k.Disabled,
+		LimitTokens: k.LimitTokens, Period: k.Period,
 	}
+}
+
+// ValidPeriod 报告限额周期是否受支持（"" = 不限额）。
+func ValidPeriod(p string) bool {
+	switch p {
+	case "", "day", "week", "month":
+		return true
+	}
+	return false
 }
 
 // APIKeys 密钥存储。并发安全；零值不可用，经 New 构建。
@@ -234,6 +254,31 @@ func (st *APIKeys) SetDisabled(id string, disabled bool) (Public, error) {
 	return Public{}, ErrNotFound
 }
 
+// SetLimit 设置/清除密钥的 token 用量限额。limitTokens<=0 = 清除限额（period
+// 一并清空）；period 仅接受 "day"/"week"/"month"。
+func (st *APIKeys) SetLimit(id string, limitTokens int64, period string) (Public, error) {
+	if !ValidPeriod(period) {
+		return Public{}, ErrBadPeriod
+	}
+	if limitTokens < 0 {
+		limitTokens = 0
+	}
+	if limitTokens == 0 {
+		period = ""
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i := range st.keys {
+		if st.keys[i].ID == id {
+			st.keys[i].LimitTokens = limitTokens
+			st.keys[i].Period = period
+			st.persistLocked()
+			return st.keys[i].public(), nil
+		}
+	}
+	return Public{}, ErrNotFound
+}
+
 // Delete 删除（该密钥立即失效；接入方需换用其他密钥）。
 func (st *APIKeys) Delete(id string) error {
 	st.mu.Lock()
@@ -311,20 +356,24 @@ func (st *APIKeys) verify(full string) (Key, bool) {
 // AuthRequest 从请求的 Authorization: Bearer 提取全钥并校验。
 // 缺头/方案不对返回 false（不泄露耗时形状差异：Verify 对空串恒 false）。
 func (st *APIKeys) AuthRequest(r *http.Request) bool {
-	return st.AuthName(r) != ""
+	_, ok := st.AuthKey(r)
+	return ok
+}
+
+// AuthKey 同 AuthRequest，但返回命中的完整密钥行（含限额配置）——网关入口
+// 据此做 token 配额判断（server.keyOverBudget）。未命中返回 false。
+func (st *APIKeys) AuthKey(r *http.Request) (Key, bool) {
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, bearerPrefix) {
+		return st.verify("") // 全钥为空的命中只发生在「未启用鉴权」形态
+	}
+	return st.verify(authz[len(bearerPrefix):])
 }
 
 // AuthName 同 AuthRequest,但返回命中的密钥名——chatAuth 把它放进请求上下文,
 // 供用量记录按密钥归属。未命中返回空串。
 func (st *APIKeys) AuthName(r *http.Request) string {
-	authz := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authz, bearerPrefix) {
-		if st.Verify("") {
-			return "" // 全钥为空的命中只发生在「未启用鉴权」形态,无密钥名可归属
-		}
-		return ""
-	}
-	if k, ok := st.verify(authz[len(bearerPrefix):]); ok {
+	if k, ok := st.AuthKey(r); ok {
 		return k.Name
 	}
 	return ""
