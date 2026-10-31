@@ -70,7 +70,12 @@ type Event struct {
 	// Effort 客户端请求里声明的推理档位（reasoning_effort / reasoning.effort）。
 	// 只记录"客户端要了什么"——上游最终是否生效由适配器决定（如 Qoder 静态表
 	// Reasoning=false 时会丢弃档位）。未声明档位时为空并省略，旧归档不受影响。
-	Effort  string `json:"effort,omitempty"`
+	Effort string `json:"effort,omitempty"`
+	// Pick 选号理由（借鉴 magpie "who went first, and why"）：本次请求最终选中
+	// 该账号的原因——粘性会话 / 免费层·加权随机·权重N / LRU兜底 / 全冷却兜底 /
+	// 成本探索。理由短语由 pool 包生成，前缀稳定但不保证逐字跨版本兼容。
+	// 请求失败且从未选中账号时为空并省略。
+	Pick    string `json:"pick,omitempty"`
 	Status  int    `json:"status"`
 	OK      bool   `json:"ok"`
 	Outcome string `json:"outcome"`

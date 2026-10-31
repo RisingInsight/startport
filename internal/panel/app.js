@@ -1067,7 +1067,9 @@ function renderRequestTable() {
       '<td>' + (e && e.effort
         ? '<span class="clip" title="' + esc(e.effort) + '">' + esc(e.effort) + '</span>'
         : '<span class="muted">—</span>') + '</td>' +
-      '<td>' + esc(e && e.account || '—') + '</td>' +
+      '<td>' + esc(e && e.account || '—') + (e && e.pick
+        ? '<div class="note">选号 ' + esc(e.pick) + '</div>'
+        : '') + '</td>' +
       '<td>' + (ip ? '<span class="clip ip" title="' + esc(ip) + '">' + esc(ip) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td>' + (ua ? '<span class="clip" title="' + esc(ua) + '">' + esc(ua) + '</span>' : '<span class="muted">—</span>') + '</td>' +
       '<td class="num">' + fmtMs(e && e.duration_ms) + '</td>' +
@@ -1124,6 +1126,7 @@ function requestLogText(e) {
     e && e.model || '—',
     e && e.effort ? '档位 ' + e.effort : '',
     e && e.account || '—',
+    e && e.pick ? '选号 ' + e.pick : '',
     e && e.client_ip || '—',
     e && e.user_agent || '—',
     fmtMs(e && e.duration_ms),

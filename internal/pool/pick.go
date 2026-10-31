@@ -1,7 +1,13 @@
 // 选号：Pick 簇（healthy 成本分层 + 快过期虚拟实例权重 + 全冷却兜底 + 在途占满过滤）。
+//
+// 选号理由（*Reason 变体，借鉴 magpie 的 "who went first, and why"）：每次选中
+// 附带一个人类可读的理由串，随请求日志落档——面板「运行日志」能回答"这条请求
+// 为什么打到这个号"（免费层加权随机 / LRU 兜底 / 全冷却兜底 / 粘性会话 / 成本探索）。
+// 理由是稳定的前缀式短语，供面板与测试做前缀匹配；不保证跨版本逐字兼容。
 package pool
 
 import (
+	"fmt"
 	"log"
 	"math/rand/v2"
 	"sort"
@@ -15,34 +21,45 @@ import (
 // Pick 单一选号入口（无请求级轮换、无 realm 过滤，模型感知缺省账号级）。
 // 需要请求级轮换（tried）或分池（realm）时用 PickExcludingForRealm。
 func (p *Pool) Pick() *auth.Auth {
-	return p.pick(nil, "", "")
+	a, _ := p.pick(nil, "", "")
+	return a
 }
 
 // PickExcluding 同上，但跳过 tried 中的 uid（请求级轮换）。
 // 挑选策略：healthy 账号中按权重取前 5 名，再在 Top5 内按同一权重加权随机抽签，
 // 意图是打散热点，避免永远打同一个账号。
 func (p *Pool) PickExcluding(tried map[string]bool) *auth.Auth {
-	return p.pick(tried, "", "")
+	a, _ := p.pick(tried, "", "")
+	return a
 }
 
 // PickExcludingForModel 模型感知选号：等同 PickExcluding，但对「6004 模型级冷却中的
 // 账号」进行模型豁免——请求模型与其 trigger 模型不同时视为可用（issue #31）。
 // reqModel 为空时即普通 PickExcluding（不影响既有调用语义）。
 func (p *Pool) PickExcludingForModel(tried map[string]bool, reqModel string) *auth.Auth {
-	return p.pick(tried, reqModel, "")
+	a, _ := p.pick(tried, reqModel, "")
+	return a
 }
 
 // PickExcludingForRealm 模型感知 + 分池选号：候选集先按 Realm()==realm 过滤
 // （realm 空 = 不过滤，退化为 PickExcludingForModel），再按模型健康口径判定。
 // 供 handler 在 global/cn 双域下分流（global 模型请求只路由 global 账号）。
 func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm string) *auth.Auth {
+	a, _ := p.PickExcludingForRealmReason(tried, reqModel, realm)
+	return a
+}
+
+// PickExcludingForRealmReason 同 PickExcludingForRealm，并返回选中理由
+// （acct 为 nil 时理由为空串）。理由短语清单见包注释。
+func (p *Pool) PickExcludingForRealmReason(tried map[string]bool, reqModel, realm string) (*auth.Auth, string) {
 	return p.pick(tried, reqModel, realm)
 }
 
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
-func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
+// 返回选中理由（见包注释；acct 为 nil 时理由为空串）。
+func (p *Pool) pick(tried map[string]bool, reqModel, realm string) (*auth.Auth, string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	now := time.Now()
@@ -78,8 +95,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
 		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
-	}
-	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
+	} // top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
 	// maxCredits 统一用**全集口径**（tier 过滤前的全部 healthy 候选）：截断排序与
 	// 抽签权重共享同一基准，两个阶段权重可比。
@@ -221,6 +237,33 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	} else {
 		e = p.pickWeighted(eligible) // eligible 保序 = top5 降序子集
 	}
+	// 选号理由（magpie "who went first, and why" 的对应物）：优先级 探索 > LRU >
+	// 层标签。探索是本次 pick 最反常的事实（主动改道给未知号），必须盖过层信息；
+	// 权重只在该账号进过短名单（ws）时附上，兜底路径无权重可报。
+	reason := ""
+	if explored {
+		reason = "成本探索·试无观测号"
+	} else if len(eligible) == 0 {
+		reason = "LRU兜底·top5刚用"
+	} else {
+		if reqModel != "" {
+			switch bestTier {
+			case 0:
+				reason = "免费层·"
+			case 1:
+				reason = "无观测层·"
+			default:
+				reason = "收费层·"
+			}
+		}
+		reason += "加权随机"
+		for _, c := range ws {
+			if c.e == e {
+				reason += fmt.Sprintf("·权重%.1f", c.w)
+				break
+			}
+		}
+	}
 	if explored {
 		// 探索事件日志（可观测性）：选中号此时才确定，故在选中点打出。
 		// 毕业结果由相邻的既有日志闭环（免费号无日志、收费号走 NoteModelCost
@@ -231,7 +274,7 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	e.lastUsed = now // 锁内即时标记：下一个进入 pick 的 goroutine 立即看到本号已用
 	p.pickSeq++
 	e.usedSeq = p.pickSeq // 单调序号：保证 usedSeq 严格全序（防惊群/LRU 的权威依据）
-	return e.a
+	return e.a, reason
 }
 
 // floorBlockedForModel 积分保底拦截判定（pick 普通轮换与 PickByUIDForModel 粘性
@@ -295,7 +338,7 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // 这里，若兜底不看保底，触底号会被「捞回来」继续接收费模型——表现为同一条
 // floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
 // 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) (*auth.Auth, string) {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
@@ -325,7 +368,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 		}
 	}
 	if best == nil {
-		return nil
+		return nil, ""
 	}
 	// 日志去重：同一账号同一冷却周期只报一次（账号持续冷却时兜底可能逐请求触发，
 	// 不去重会刷屏）。换账号或冷却截止时间推进（退避升档/自然恢复）时再报。
@@ -341,7 +384,7 @@ func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, re
 	// 防集中/防惊群失效（entry.usedSeq 契约：每次被选中时取 p.pickSeq 自增值）。
 	p.pickSeq++
 	best.usedSeq = p.pickSeq
-	return best.a
+	return best.a, "全冷却兜底(" + best.fallbackKind(now) + ")·" + exp.Format("15:04") + "解冻"
 }
 
 // inFlightFull 报告账号是否已占满在途名额（上限按 realm 分档，见 inFlightLimit；

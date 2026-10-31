@@ -59,9 +59,9 @@ func newCheckinEnv(t *testing.T) *acctEnv {
 }
 
 type checkinBatchOut struct {
-	OK      bool                 `json:"ok"`
-	Message string               `json:"message"`
-	Summary checkin.BatchSummary `json:"summary"`
+	OK      bool                  `json:"ok"`
+	Message string                `json:"message"`
+	Summary checkin.BatchSummary  `json:"summary"`
 	Results []checkin.BatchResult `json:"results"`
 }
 

@@ -47,6 +47,7 @@ type chatStat struct {
 	mode             string // "stream" | "sync"
 	uid              string // 完整 uid，展示时只取前 8 位
 	nick             string // 账号昵称（随选号同步），流水行经 logfmt.Label 拼成 "昵称(uid8)"
+	pick             string // 选号理由（最后一次选中该号的那次尝试；粘性会话/免费层·加权随机/全冷却兜底…）
 	ttfb             time.Duration
 	toks             int // <0 表示 usage 缺失 → 显示 "-"
 	status           int
@@ -441,6 +442,7 @@ func (t *requestTrace) event(status int) reqlog.Event {
 		e.Account = logfmt.Label(s.uid, s.nick)
 		e.Model = s.model
 		e.Effort = s.effort
+		e.Pick = s.pick
 		e.Outcome = s.outcome
 		e.ErrorCode = s.errCode
 		e.Error = s.errMsg

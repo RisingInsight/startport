@@ -217,13 +217,63 @@ func (h *Handler) chatAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if h.cfg.APIKeys != nil {
-			if name := h.cfg.APIKeys.AuthName(r); name != "" {
-				r = r.WithContext(context.WithValue(r.Context(), apiKeyNameKey{}, name))
+			if k, ok := h.cfg.APIKeys.AuthKey(r); ok {
+				// token 用量配额（借鉴 magpie per-key budget）：超限 429 拒绝，
+				// 提示周期与 used/limit。管理密钥（api_key）不受限——它本来就是
+				// 管理员自己的钥匙，限制它只会把运维锁在门外。
+				if used, limit, over := h.keyOverBudget(k); over {
+					writeOpenAIError(w, http.StatusTooManyRequests, "insufficient_quota",
+						fmt.Sprintf("agent 密钥 %q 本%s token 额度已用尽（%d/%d），等待周期重置或调高上限", k.Name, periodLimitLabel(k.Period), used, limit))
+					return
+				}
+				r = r.WithContext(context.WithValue(r.Context(), apiKeyNameKey{}, k.Name))
 				next(w, r)
 				return
 			}
 		}
 		writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+	}
+}
+
+// keyOverBudget 报告密钥当期 token 用量是否已到上限（used >= limit）。
+// limit<=0 = 未设限；usage 未接线（防御路径）按不限处理。
+func (h *Handler) keyOverBudget(k apikeys.Key) (used, limit int64, over bool) {
+	if k.LimitTokens <= 0 || h.cfg.Usage == nil {
+		return 0, 0, false
+	}
+	used, _ = h.cfg.Usage.KeyWindow(k.Name, periodStart(k.Period))
+	return used, k.LimitTokens, used >= k.LimitTokens
+}
+
+// periodStart 本地时区的当期起点：day=今日零点；week=本周一零点（ISO 周，周日
+// 归属上一周）；month=本月 1 日零点。其他脏值按 day 兜底——限额开着但 period
+// 解析不了时宁可从严，不能退化成不限。
+func periodStart(p string) time.Time {
+	now := time.Now()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	switch p {
+	case "week":
+		wd := int(now.Weekday())
+		if wd == 0 {
+			wd = 7
+		}
+		return midnight.AddDate(0, 0, -(wd - 1))
+	case "month":
+		return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	default: // "day" 与脏值兜底
+		return midnight
+	}
+}
+
+// periodLimitLabel 限额周期的中文短名（429 文案与面板用）。
+func periodLimitLabel(p string) string {
+	switch p {
+	case "week":
+		return "周"
+	case "month":
+		return "月"
+	default:
+		return "日"
 	}
 }
 
@@ -895,7 +945,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
+		// pickReason 随每次尝试覆盖写入 st.pick：最终值即"产出结果的那次尝试"的选号理由。
 		var acct *auth.Auth
+		pickReason := ""
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
 			if acct == nil || (realm != "" && acct.Realm() != realm) {
@@ -903,12 +955,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// 本次回落普通轮换。
 				unbindSticky()
 				acct = nil
+			} else {
+				pickReason = "粘性会话"
 			}
 		}
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			acct, pickReason = h.cfg.Pool.PickExcludingForRealmReason(tried, bareModel, realm)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -929,6 +983,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		st.uid = acct.UID
 		// 同步昵称：请求流水行只写 uid8 时无法直观看是哪一号，昵称随本次选号带入日志行。
 		st.nick = acct.Nickname
+		st.pick = pickReason
 		tried[acct.UID] = true
 
 		// 占用在途名额：Pick 已跳过满额账号，此处 CAS 兜底并发抢名额的竞态。

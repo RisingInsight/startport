@@ -4,6 +4,7 @@
 //   - acctCheckinAll 的请求形态（platforms 过滤）与结果 toast（成功汇总 / 失败
 //     带账号与原因）；
 //   - 一键签到按钮随范围联动（无可签账号置灰）。
+//
 // 用 node-vm 沙箱执行合并后的面板脚本（不触网；node 缺失则跳过）。
 // 装置：argv[2] = 合并面板 JS，argv[3] = 测试片段（第二个脚本执行，覆盖
 // api/toast 后驱动 acctCheckinAll，结果写回 this.__out）。
