@@ -54,6 +54,11 @@ type Pool struct {
 	// 循环依赖与分层破坏），nil 时倍率兜底不生效（退化为仅本地台账判定）。
 	// 仅在持 p.mu 时由 floorBlockedForModel 调用；回调不得反向调用 Pool 方法。
 	modelRateOf func(realm, model string) string
+	// OnDisabled 账号被禁用（disableLocked 唯一入口，含 12153 达阈、面板手工、
+	// 上游封禁各路径）后的通知钩子；nil = 静默。main 注入告警推送用。
+	// 回调在持有 p.mu 的调用方栈上执行——必须快速返回、不得反向调用 Pool 方法
+	// （会死锁），耗时动作请自行转异步。
+	OnDisabled func(uid, nickname, reason string)
 	// 加权路由的闲置补偿调优（SetWeights 注入；默认值见 defaultIdle*）。
 	idleWeightPerHour float64
 	idleWeightMax     float64

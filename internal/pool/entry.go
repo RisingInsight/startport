@@ -252,6 +252,11 @@ type entry struct {
 	// 重学（再吃 2 次失败才禁用，期间每次都白打一轮上游）；清零点（refresh/chat 成功、
 	// 手工复活）同样落盘，重启后不残留旧计数。
 	sessionDeadFails int
+	// notifiedDisabled 该账号是否已通知过 OnDisabled 钩子（告警去重的运行态位，
+	// 不持久化）：disableLocked 只在首次转为 disabled 时通知一次，已禁用号的
+	// 重复 Disable（面板手点/applyErrorPolicy 重入）不重复推送。Revive 后清零，
+	// 再次判死会再通知——「死了又死」值得知道。
+	notifiedDisabled bool
 	// consecutiveFails 连续失败计数（连败降权，issue #114）——「不知道原因的兜底」：
 	// 覆盖 ErrClient（未知 4xx）与传输层失败（连不上上游）这类 applyErrorPolicy
 	// default 分支不罚号的形态。与 sessionDeadFails 同构但独立计数：12153 的终态

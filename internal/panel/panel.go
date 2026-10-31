@@ -24,6 +24,7 @@ import (
 
 	"github.com/RisingInsight/startport/internal/acclogin"
 	"github.com/RisingInsight/startport/internal/account"
+	"github.com/RisingInsight/startport/internal/alert"
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
 	"github.com/RisingInsight/startport/internal/checkin"
@@ -80,6 +81,11 @@ type Config struct {
 	// APIKeys 「agent 接入密钥」存储（nil = 密钥管理端点返回 501）。
 	// 端点只对管理密钥(api_key)开放;agent 密钥仅在 /v1/* 生效（见 server.chatAuth）。
 	APIKeys *apikeys.APIKeys
+
+	// Alert 告警管理器（nil = 测试端点返回 501）。配置本体在 config.alert 节，
+	// 面板保存走 SaveConfig → applyConfig → Manager.Reconfigure 热生效；
+	// 这里注入管理器只为「发送测试」端点复用当前生效配置。
+	Alert *alert.Manager
 
 	// ExtChan 外部渠道管理器（多平台阶段一；nil = 未启用，端点返回空集）。
 	// 只读观测：渠道快照 + 额度情报。管理面走配置接口（ext_channels 数组提交）。
@@ -210,6 +216,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /startport/api/keys/{id}/delete", p.withAuth(p.keysDelete))
 	p.mux.HandleFunc("POST /startport/api/keys/hidden", p.withAuth(p.keysSetHidden))
 	p.mux.HandleFunc("GET /startport/api/wizard/agents", p.withAuth(p.wizardAgents))
+	p.mux.HandleFunc("POST /startport/api/alert/test", p.withAuth(p.alertTest))
 	p.mux.HandleFunc("POST /startport/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /startport/api/login/poll", p.withAuth(p.loginPoll))
 	p.mux.HandleFunc("GET /startport/api/login/regions", p.withAuth(p.loginRegions))

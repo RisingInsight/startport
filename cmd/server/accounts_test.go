@@ -17,6 +17,7 @@ import (
 
 	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/acctchan"
+	"github.com/RisingInsight/startport/internal/alert"
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/livecfg"
 	"github.com/RisingInsight/startport/internal/modelgroup"
@@ -28,15 +29,16 @@ import (
 
 // acctTestEnv 可变配置落盘链的完整环境（真实依赖，临时目录）。
 type acctTestEnv struct {
-	t      *testing.T
-	dir    string
-	path   string
-	live   *livecfg.Holder
-	pool   *pool.Pool
-	up     *upstream.Client
-	sch    *scheduler.Scheduler
-	extMgr *extchan.Manager
-	grpMgr *modelgroup.Manager
+	t        *testing.T
+	dir      string
+	path     string
+	live     *livecfg.Holder
+	pool     *pool.Pool
+	up       *upstream.Client
+	sch      *scheduler.Scheduler
+	extMgr   *extchan.Manager
+	grpMgr   *modelgroup.Manager
+	alertMgr *alert.Manager
 }
 
 func newAcctTestEnv(t *testing.T) *acctTestEnv {
@@ -51,15 +53,16 @@ func newAcctTestEnv(t *testing.T) *acctTestEnv {
 		t.Fatal(err)
 	}
 	env := &acctTestEnv{
-		t:      t,
-		dir:    dir,
-		path:   path,
-		live:   livecfg.New(livecfg.Snapshot{}),
-		pool:   pool.New(filepath.Join(dir, "state.json")),
-		up:     upstream.New(),
-		sch:    scheduler.New(scheduler.Config{}),
-		extMgr: extchan.New(extchan.Config{TimeoutSeconds: 5}),
-		grpMgr: modelgroup.New(),
+		t:        t,
+		dir:      dir,
+		path:     path,
+		live:     livecfg.New(livecfg.Snapshot{}),
+		pool:     pool.New(filepath.Join(dir, "state.json")),
+		up:       upstream.New(),
+		sch:      scheduler.New(scheduler.Config{}),
+		extMgr:   extchan.New(extchan.Config{TimeoutSeconds: 5}),
+		grpMgr:   modelgroup.New(),
+		alertMgr: alert.New(alert.Config{}, nil),
 	}
 	// 初始热应用（与启动同链）。
 	if _, err := env.save([]byte(base)); err != nil {
@@ -70,12 +73,12 @@ func newAcctTestEnv(t *testing.T) *acctTestEnv {
 
 // save 走真实 saveConfig（面板 POST config 的同一条入口）。
 func (e *acctTestEnv) save(raw []byte) ([]string, error) {
-	return saveConfig(raw, e.path, e.live, e.pool, e.up, e.sch, e.extMgr, e.grpMgr)
+	return saveConfig(raw, e.path, e.live, e.pool, e.up, e.sch, e.extMgr, e.grpMgr, e.alertMgr)
 }
 
 // saveChannels 走账号中心投影入口（与 saveConfig 共用 applyConfig）。
 func (e *acctTestEnv) saveChannels(defs []extchan.ChannelDef) error {
-	return saveChannelsAccounts(defs, e.path, e.live, e.pool, e.up, e.sch, e.extMgr, e.grpMgr)
+	return saveChannelsAccounts(defs, e.path, e.live, e.pool, e.up, e.sch, e.extMgr, e.grpMgr, e.alertMgr)
 }
 
 // loadDefs 读当前盘上的渠道定义（acctchan.Loader 的真实实现）。

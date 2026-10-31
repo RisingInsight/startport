@@ -2689,6 +2689,33 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
           </div>
         </div>
 
+        <div class="box">
+          <header><h3>异常告警</h3></header>
+          <div class="pad">
+            <div class="switch"><span class="lb">启用告警推送（账号判死 / 每日签到失败 / 网关无健康账号）</span>
+              <input type="checkbox" name="alert_enabled"></div>
+            <div class="grid2" style="margin-top:10px">
+              <label class="fld"><span class="lb">渠道模板</span>
+                <select name="alert_webhook_type">
+                  <option value="feishu">feishu — 飞书自定义机器人</option>
+                  <option value="dingtalk">dingtalk — 钉钉自定义机器人</option>
+                  <option value="serverchan">serverchan — Server酱（微信）</option>
+                  <option value="generic">generic — 通用 JSON POST</option>
+                </select>
+                <span class="hint">即时生效</span></label>
+              <label class="fld"><span class="lb">冷却分钟（同一事件最小重发间隔）</span>
+                <input type="number" name="alert_cooldown_minutes" min="0" placeholder="30">
+                <span class="hint">缺省 30 分钟</span></label>
+            </div>
+            <div class="inline" style="margin-top:10px">
+              <input name="alert_webhook_url" placeholder="Webhook 地址（内嵌 token，保存后不回显）" style="flex:1" autocomplete="off">
+              <button type="button" class="xs" id="btnAlertTest">发送测试</button>
+            </div>
+            <div class="hint" style="margin-top:8px">三类事件各有独立去重键：同一事件在冷却窗口内只推第一条，恢复通知用独立键不受压制。
+              「发送测试」绕过冷却，按当前已保存的配置真实发一条。改动即时生效，无需重启。</div>
+          </div>
+        </div>
+
         <div class="savebar">
           <span class="grow"></span>
           <span class="restart-note" id="cfgNote"></span>

@@ -18,12 +18,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/RisingInsight/startport/internal/acclogin"
 	"github.com/RisingInsight/startport/internal/account"
 	"github.com/RisingInsight/startport/internal/acctchan"
+	"github.com/RisingInsight/startport/internal/alert"
 	"github.com/RisingInsight/startport/internal/apikeys"
 	"github.com/RisingInsight/startport/internal/auth"
 	"github.com/RisingInsight/startport/internal/checkin"
@@ -122,25 +124,51 @@ func stateSibling(stateFile, name string) string {
 	return filepath.Join(dir, name)
 }
 
+// serviceMode 服务宿主标记（service_windows.go 的 Execute 置位）：serverMain
+// 据此把日志落文件而不是 stderr/stdout。非 Windows / 控制台运行恒 false。
+var serviceMode atomic.Bool
+
 func main() {
+	// service 子命令（Windows 服务安装/卸载/启停/状态）先于一切 flag 解析分流。
+	if len(os.Args) > 1 && os.Args[1] == "service" {
+		runServiceCommand(os.Args[2:])
+		return
+	}
 	cfgPath := flag.String("config", "config.json", "配置文件路径（默认当前目录 config.json；不存在时自动生成推荐配置）")
-	openBrowserFlag := flag.Bool("open", true,
+	openBrowser := flag.Bool("open", true,
 		"启动后自动打开默认浏览器到管理面板（Docker 容器内自动跳过；-open=false 关闭）")
+	serviceFlag := flag.Bool("service", false, "(内部) 由 Windows 服务控制管理器拉起，不单独使用")
 	flag.Parse()
 
-	cfg, err := Load(*cfgPath)
+	// Windows 服务模式：SCM 拉起时走 svc.Run（service_windows.go），停止/崩溃
+	// 恢复由服务管理器接管。非 Windows 上 isWindowsService() 恒 false，直接普通运行。
+	if *serviceFlag && isWindowsService() {
+		runWindowsService(*cfgPath)
+		return
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	serverMain(ctx, *cfgPath, *openBrowser)
+}
+
+// serverMain 服务主体（控制台与 Windows 服务两种宿主共用；ctx 由宿主提供——
+// 控制台 = 信号上下文，服务 = SCM 停止请求触发的 cancel）。
+// openBrowser=false 时不弹浏览器（服务无桌面会话，也用于 Docker/自动化）。
+func serverMain(ctx context.Context, cfgPath string, openBrowser bool) {
+	cfg, err := Load(cfgPath)
 	if err != nil {
 		// errors.Is 才能看穿 Load 里 fmt.Errorf("%w") 的包装；os.IsNotExist 不行。
 		if errors.Is(err, fs.ErrNotExist) {
 			// 首次运行：目录下没有配置 → 自动落一份推荐配置（含随机 api_key）再加载。
 			// 双击 exe / 裸跑 docker 即开，无需先手工复制样例。
-			if key, werr := WriteDefault(*cfgPath); werr == nil {
-				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，完整值记录在该文件里，可自行修改）", *cfgPath, maskKeyForLog(key))
-				cfg, err = Load(*cfgPath)
+			if key, werr := WriteDefault(cfgPath); werr == nil {
+				log.Printf("config %s 不存在，已生成推荐配置（api_key=%s，完整值记录在该文件里，可自行修改）", cfgPath, maskKeyForLog(key))
+				cfg, err = Load(cfgPath)
 			}
 			if err != nil {
 				// 生成失败（目录只读等）：退回纯默认 + env（旧行为兜底），不阻塞启动。
-				log.Printf("config %s not found (auto-generate failed), using defaults+env: %v", *cfgPath, err)
+				log.Printf("config %s not found (auto-generate failed), using defaults+env: %v", cfgPath, err)
 				cfg, err = Load("")
 			}
 		}
@@ -169,6 +197,20 @@ func main() {
 		p.Close()
 		_ = store.Close()
 	}()
+
+	// ── 异常告警推送（运维闭环）────────────────────────────────
+	// config.alert 未启用时是零请求的静默管理器。三类事件：账号判死（池钩子）、
+	// 每日定时签到失败（调度器汇总钩子）、池无可服务账号（下方 watcher 边沿检测）。
+	// 同键冷却（默认 30 分钟）防风暴；推送失败只记日志不阻塞任何主流程。
+	alertMgr := alert.New(alertConfig(cfg), log.Printf)
+	p.OnDisabled = func(uid, nickname, reason string) {
+		uid8 := uid
+		if len(uid8) > 8 {
+			uid8 = uid8[:8]
+		}
+		alertMgr.Send("acct-disabled:"+uid, "StarPort：账号被禁用",
+			fmt.Sprintf("账号 %s（%s）已被禁用，不再参与路由。\n原因：%s\n处理：面板「账号中心」核实后可复活。", nickname, uid8, reason))
+	}
 
 	// Agent 接入密钥：与 state 文件同目录（data/apikeys.json），只存 SHA-256 摘要。
 	// 面板创建/管理；/v1/* 鉴权接受（chatAuth），面板与 /status 不接受。
@@ -304,7 +346,7 @@ func main() {
 	// 账号投影闭包（登录入池 / 签到刷新 / 启动 Reconcile 共用同一条写路径）。
 	// saveChannels 在下方 live/sch 装配完成后赋值；闭包捕获变量，调用时已就位。
 	acctLoader := func() []extchan.ChannelDef {
-		cur, lerr := Load(*cfgPath)
+		cur, lerr := Load(cfgPath)
 		if lerr != nil {
 			log.Printf("[acclogin] 读取当前配置失败: %v", lerr)
 			return nil
@@ -340,6 +382,16 @@ func main() {
 			if serr := syncAccounts(); serr != nil {
 				log.Printf("[checkin] 账号 %s 刷新后投影失败（accounts.json 已更新，下次 Reconcile 修齐）: %v", accountID, serr)
 			}
+		},
+		// 每日定时签到轮的失败汇总（手动一键签到不打扰）。每天至多一条：
+		// 同键冷却 30 分钟 > 重试间隔内不再重复，重试轮本身不走本钩子。
+		OnDailySweep: func(sum checkin.BatchSummary, failures []string) {
+			if sum.Failed == 0 {
+				return
+			}
+			alertMgr.Send("checkin-daily", "StarPort：平台签到有失败",
+				fmt.Sprintf("成功 %d · 已签过 %d · 失败 %d · 跳过 %d\n%s",
+					sum.OK, sum.Already, sum.Failed, sum.Skipped, strings.Join(failures, "\n")))
 		},
 		Logf: log.Printf,
 	})
@@ -487,7 +539,7 @@ func main() {
 	// 热重载各只有一份实现）。以 accounts.json 为准修齐 managed 渠道（用户误删
 	// 渠道 / 崩溃漂移都在这里修回；无账号 = 无操作，老配置零变化）。
 	saveChannels = func(defs []extchan.ChannelDef) error {
-		return saveChannelsAccounts(defs, *cfgPath, live, p, up, sch, extMgr, grpMgr)
+		return saveChannelsAccounts(defs, cfgPath, live, p, up, sch, extMgr, grpMgr, alertMgr)
 	}
 	if summary, serr := acctchan.Sync(acctStore, acctLoader, saveChannels, log.Printf); serr != nil {
 		log.Printf("[acctchan] 启动同步失败（账号未投影，转发不受影响）: %v", serr)
@@ -520,17 +572,18 @@ func main() {
 		Live:        live,
 		Update:      upd,
 		APIKeys:     keyStore,
+		Alert:       alertMgr,
 		// 外部渠道只读观测（多平台阶段一）：渠道快照 + 额度情报端点。
 		ExtChan: extMgr,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
 		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
-		ConfigPath: *cfgPath,
+		ConfigPath: cfgPath,
 		LoadConfig: func() (any, error) {
-			return Load(*cfgPath)
+			return Load(cfgPath)
 		},
 		SaveConfig: func(raw []byte) ([]string, error) {
-			return saveConfig(raw, *cfgPath, live, p, up, sch, extMgr, grpMgr)
+			return saveConfig(raw, cfgPath, live, p, up, sch, extMgr, grpMgr, alertMgr)
 		},
 		// 账号中心（v1.6.0 · T2）：账号存储 + 投影落盘闭包（saveConfig 同一条链）。
 		Accounts:     acctStore,
@@ -538,7 +591,7 @@ func main() {
 		Checkin:      chkSched,
 		Login:        acctLoginMgr,
 		LoadChannelDefs: func() []extchan.ChannelDef {
-			cur, err := Load(*cfgPath)
+			cur, err := Load(cfgPath)
 			if err != nil {
 				return nil
 			}
@@ -548,8 +601,21 @@ func main() {
 	// 成长任务队列每日自动执行（与「执行全部待办」同管线）：Sequential 族零点解锁后
 	// 无需手动扫描；hook 返回即启动（异步执行），已在跑时内部跳过。
 	sch.SetGrowthHook(pn.RunGrowthQueueOnce)
-	log.SetOutput(io.MultiWriter(os.Stderr, pn.Logs()))
-	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
+	// 服务模式下 stdout/stderr 不存在：日志落到配置目录的 starport-service.log
+	//（简单尺寸轮转）。控制台模式维持原样。
+	logSinks := []io.Writer{pn.Logs()}
+	chatSinks := []io.Writer{pn.Logs()}
+	if serviceMode.Load() {
+		if w := serviceLogFile(filepath.Dir(cfgPath)); w != nil {
+			logSinks = append(logSinks, w)
+			chatSinks = append(chatSinks, w)
+		}
+	} else {
+		logSinks = append(logSinks, os.Stderr)
+		chatSinks = append(chatSinks, os.Stdout)
+	}
+	log.SetOutput(io.MultiWriter(logSinks...))
+	server.SetChatLogOutput(io.MultiWriter(chatSinks...))
 
 	h := server.NewHandler(server.Config{
 		Pool:         p,
@@ -578,8 +644,31 @@ func main() {
 		ModelGroups: grpMgr,
 	})
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// 池健康边沿检测（告警事件之三）：没有任何健康账号 → 推一条；恢复 → 再推一条。
+	// 只看 healthy==0（真停摆），不看在途占满（突发并发是正常负载，冷却去重兜不住它）。
+	go func() {
+		wasDown := false
+		t := time.NewTicker(time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			total, healthy, _, _, _ := p.CountsDetailed()
+			down := total > 0 && healthy == 0
+			switch {
+			case down && !wasDown:
+				alertMgr.Send("pool-down", "StarPort：网关没有任何健康账号",
+					fmt.Sprintf("全部 %d 个账号均处于冷却/禁用状态，/v1 请求将 503。恢复后会再通知一条。", total))
+			case !down && wasDown:
+				alertMgr.Send("pool-recovered", "StarPort：网关已恢复",
+					fmt.Sprintf("健康账号 %d/%d，/v1 恢复服务。", healthy, total))
+			}
+			wasDown = down
+		}
+	}()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	upd.Start(ctx)
@@ -631,7 +720,7 @@ func main() {
 		if isAddrInUse(err) && ourServiceRunning(cfg.Listen) {
 			url := panelURL(cfg.Listen)
 			log.Printf("检测到网关已在运行（%s），直接打开管理面板", url)
-			if shouldAutoOpen(*openBrowserFlag) {
+			if shouldAutoOpen(openBrowser) {
 				autoOpenPanel(url) // 同步：确保浏览器已唤起再退出
 			}
 			return
@@ -645,7 +734,7 @@ func main() {
 	}
 	log.Printf("starport %s listening on %s (api_key=%v)，管理面板 %s",
 		versionString(), cfg.Listen, cfg.APIKey != "", panelURL(cfg.Listen))
-	if shouldAutoOpen(*openBrowserFlag) {
+	if shouldAutoOpen(openBrowser) {
 		go autoOpenPanel(panelURL(cfg.Listen))
 	}
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -813,7 +902,7 @@ func panelListenPath(listen string) string {
 // 落盘用"先写 tmp 再 rename"原子替换，且优先保留磁盘上的原始 JSON 结构（只改
 // 面板表单覆盖到的键），避免把用户手写的注释性字段/未知键洗掉——这里直接整体
 // 序列化校验后的配置，未知键在 json.Unmarshal 时已丢失，故先合并原始 map。
-func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager) ([]string, error) {
+func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager, alertMgr *alert.Manager) ([]string, error) {
 	// 1) 解析原始 JSON 为 map（保留用户手写的未知键），再叠加面板提交的键。
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
@@ -846,14 +935,14 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	}
 
 	// 2) 校验 + 落盘 + 热应用（与账号中心投影共用同一条内部链——applyConfig）。
-	return applyConfig(merged, path, live, p, up, sch, extMgr, grpMgr)
+	return applyConfig(merged, path, live, p, up, sch, extMgr, grpMgr, alertMgr)
 }
 
 // applyConfig 校验 + 原子写 + 热应用（saveConfig 的内部函数化，架构 §4.2）：
 // 输入是"已合并/已脱敏"的完整配置 map。账号中心的写操作
 // （saveChannelsAccounts）与面板表单（saveConfig）共用这一份实现——
 // 校验/SSRF/原子写/热重载各只有一份代码。
-func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager) ([]string, error) {
+func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager, alertMgr *alert.Manager) ([]string, error) {
 	// 校验（与启动同一套 Default+normalize），失败直接返回、不落盘。
 	newCfg, err := ParseConfig(mergedJSON(merged))
 	if err != nil {
@@ -950,6 +1039,9 @@ func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *po
 	// 路由组热重载：无运行态可复用，整表替换即生效（轮转计数按组名沿用）。
 	grpMgr.ReplaceAll(modelGroupDefs(newCfg.ModelGroups))
 
+	// 告警配置热生效（webhook/开关/冷却即时切换，已发送计时保留）。
+	alertMgr.Reconfigure(alertConfig(newCfg))
+
 	return restartRequiredFieldsChanged(prevCfg, newCfg), nil
 }
 
@@ -962,7 +1054,7 @@ func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *po
 //     出过接口），没有"回填"一说；
 //   - 不做托管凭证差异检查：本次变更本身就是账号中心的合法写入（托管保护只
 //     拦"用户经表单改 managed 渠道凭证"这一条路径，见 saveConfig 的 1.5 步）。
-func saveChannelsAccounts(defs []extchan.ChannelDef, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager) error {
+func saveChannelsAccounts(defs []extchan.ChannelDef, path string, live *livecfg.Holder, p *pool.Pool, up *upstream.Client, sch *scheduler.Scheduler, extMgr *extchan.Manager, grpMgr *modelgroup.Manager, alertMgr *alert.Manager) error {
 	oldRaw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read current config: %w", err)
@@ -983,7 +1075,7 @@ func saveChannelsAccounts(defs []extchan.ChannelDef, path string, live *livecfg.
 		channels = append(channels, channelDefToMap(def))
 	}
 	cur["ext_channels"] = channels
-	_, err = applyConfig(cur, path, live, p, up, sch, extMgr, grpMgr)
+	_, err = applyConfig(cur, path, live, p, up, sch, extMgr, grpMgr, alertMgr)
 	return err
 }
 
@@ -1080,6 +1172,16 @@ func channelDefToMap(def extchan.ChannelDef) map[string]any {
 		m["accounts"] = def.Accounts
 	}
 	return m
+}
+
+// alertConfig Config.Alert → alert.Config 映射（装配/热重载共用）。
+func alertConfig(c *Config) alert.Config {
+	return alert.Config{
+		Enabled:         c.Alert.Enabled,
+		WebhookType:     c.Alert.WebhookType,
+		WebhookURL:      c.Alert.WebhookURL,
+		CooldownMinutes: c.Alert.CooldownMinutes,
+	}
 }
 
 // modelGroupDefs Config.ModelGroups → modelgroup.Def 映射（装配/热重载共用）。
@@ -1221,6 +1323,12 @@ func scrubSecretSentinels(incoming, cur map[string]any) {
 	if us, ok := incoming["upstash"].(map[string]any); ok {
 		if v, ok := us["token"].(string); ok && v == panel.SecretSentinel {
 			delete(us, "token")
+		}
+	}
+	// 告警 webhook（内嵌 token，脱敏口径同 api_key）：哨兵不下发，深合并保留原值。
+	if al, ok := incoming["alert"].(map[string]any); ok {
+		if v, ok := al["webhook_url"].(string); ok && v == panel.SecretSentinel {
+			delete(al, "webhook_url")
 		}
 	}
 	// 外部渠道 api_key 哨兵（F-004 同源）：整条渠道数组逐项检查——数组是整体

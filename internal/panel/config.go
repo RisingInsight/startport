@@ -49,6 +49,10 @@ func (p *Panel) getConfig(w http.ResponseWriter, r *http.Request) {
 	if us, ok := m["upstash"].(map[string]any); ok {
 		maskSecret(us, "token")
 	}
+	// 告警 webhook（内嵌 token）：同一套哨兵脱敏，保存侧 scrubSecretSentinels 回填。
+	if al, ok := m["alert"].(map[string]any); ok {
+		maskSecret(al, "webhook_url")
+	}
 	// 外部渠道 api_key 同一套脱敏（F-004）：非空 → 哨兵；保存时哨兵被
 	// scrubExtChannelSentinels 删除、深合并保留原值（避免掩码写回）。
 	if ecs, ok := m["ext_channels"].([]any); ok {
@@ -80,6 +84,22 @@ func maskSecret(m map[string]any, key string) {
 	if v, ok := m[key].(string); ok && v != "" {
 		m[key] = SecretSentinel
 	}
+}
+
+// alertTest POST /startport/api/alert/test：按当前生效配置发一条测试告警，
+// 把发送结果（含"未启用"的业务原因）交回面板 toast。绕过冷却——测试按钮
+// 必须每次都真实可达。
+func (p *Panel) alertTest(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Alert == nil {
+		writeErr(w, http.StatusNotImplemented, "alert not enabled")
+		return
+	}
+	err := p.cfg.Alert.SendTest("StarPort 测试告警", "如果你在 IM 里看到这条消息，说明告警链路已打通。")
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "message": "测试告警已推送，请到 IM 查收"})
 }
 
 // saveConfig 保存配置：body 直接是配置 JSON（前端按 schema 组装完整对象）。

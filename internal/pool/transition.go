@@ -54,6 +54,15 @@ func (p *Pool) disableLocked(e *entry, reason string) {
 	e.paused = false // 禁用是比暂停更强的终态，二者不叠加（禁用后须 revive 才能复用）
 	e.reason = reason
 	p.dirty.Store(true)
+	// 通知钩子（OnDisabled 契约：快速返回、不得反向调用 Pool 方法）。仅通知
+	// **本次真正转为 disabled** 的调用——已禁用号重复 Disable 不再刷通知。
+	if p.OnDisabled != nil && !e.notifiedDisabled {
+		e.notifiedDisabled = true
+		uid, nick := e.a.UID, e.a.Nickname
+		p.mu.Unlock()
+		defer p.mu.Lock()
+		p.OnDisabled(uid, nick, reason)
+	}
 }
 
 // pauseLocked 暂停选号迁移：置 paused 使账号退出选号候选（healthy 判否），

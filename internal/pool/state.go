@@ -66,6 +66,7 @@ func (p *Pool) ReviveDisabled(uid string) {
 		e.disabled = false
 		e.reason = ""
 		e.sessionDeadFails = 0
+		e.notifiedDisabled = false // 复活清通知位：再次判死时 OnDisabled 再触发
 		p.dirty.Store(true)
 	}
 }
@@ -83,6 +84,7 @@ func (p *Pool) Revive(uid string) bool {
 	}
 	e.disabled = false
 	e.paused = false // 解冻是全清：暂停选号一并解除
+	e.notifiedDisabled = false
 	e.until = time.Time{}
 	e.coolKind = 0
 	e.reason = ""

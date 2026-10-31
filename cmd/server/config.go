@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/RisingInsight/startport/internal/alert"
 	"github.com/RisingInsight/startport/internal/extchan"
 	"github.com/RisingInsight/startport/internal/prompt"
 	"github.com/RisingInsight/startport/internal/provider"
@@ -255,6 +256,21 @@ type Config struct {
 	// 裸名模型都不能以它开头（校验期拒绝）。
 	ModelGroups []ModelGroupDef `json:"model_groups"`
 
+	// Alert 异常告警推送（运维闭环）：关键事件（账号判死/签到失败/池无可服务
+	// 账号）经 webhook 推到 IM。webhook_url 通常内嵌 token（Server酱 SendKey /
+	// 飞书 bot key），与 api_key 同一套哨兵脱敏——面板 GET 不回显，保存时
+	// 哨兵不下发、深合并保留磁盘原值。
+	Alert struct {
+		// Enabled 总开关（false = 全部事件静默，零额外请求）。
+		Enabled bool `json:"enabled"`
+		// WebhookType 渠道模板：feishu | dingtalk | serverchan | generic。
+		WebhookType string `json:"webhook_type"`
+		// WebhookURL 完整 webhook 地址（敏感，脱敏口径同 api_key）。
+		WebhookURL string `json:"webhook_url"`
+		// CooldownMinutes 同一事件键的最小重发间隔（默认 30；<=0 回落 30）。
+		CooldownMinutes int `json:"cooldown_minutes"`
+	} `json:"alert"`
+
 	// ExtIntel 额度情报拉取（token-fbi data.json 定时快照，仅面板展示）。
 	ExtIntel struct {
 		// Enabled 缺省 true；false 时不发起任何情报请求（离线/隐私场景）。
@@ -451,6 +467,10 @@ func Default() *Config {
 	// 外部渠道默认无（纯 CodeBuddy 部署零行为变化）；情报默认开、指向 token-fbi。
 	c.ExtChannels = []ExtChannel{}
 	c.ModelGroups = []ModelGroupDef{}
+	// 告警缺省关闭（不配置 webhook = 零外部请求）；类型给个主流缺省省一步。
+	c.Alert.Enabled = false
+	c.Alert.WebhookType = "feishu"
+	c.Alert.CooldownMinutes = 30
 	c.ExtIntel.Enabled = true
 	c.ExtIntel.URL = "https://token-fbi.com/data.json"
 	c.ExtIntel.Hours = 12
@@ -771,7 +791,33 @@ func (c *Config) normalize() error {
 	if err := c.validateModelGroups(); err != nil {
 		return err
 	}
+	if err := c.validateAlert(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// validateAlert 告警配置静态校验：开着的告警必须有合法渠道与地址；
+// 关着的时候脏值也拦下（保存了也发不出去，提前报错比静默吞掉友好）。
+func (c *Config) validateAlert() error {
+	a := &c.Alert
+	if a.WebhookURL == "" {
+		if a.Enabled {
+			return fmt.Errorf("alert: enabled 但未配置 webhook_url")
+		}
+		if a.WebhookType != "" && a.WebhookType != "feishu" && a.WebhookType != "dingtalk" &&
+			a.WebhookType != "serverchan" && a.WebhookType != "generic" {
+			return fmt.Errorf("alert: webhook_type %q 不支持（feishu / dingtalk / serverchan / generic）", a.WebhookType)
+		}
+		return nil
+	}
+	if !alert.ValidType(a.WebhookType) {
+		return fmt.Errorf("alert: webhook_type %q 不支持（feishu / dingtalk / serverchan / generic）", a.WebhookType)
+	}
+	if !strings.HasPrefix(a.WebhookURL, "http://") && !strings.HasPrefix(a.WebhookURL, "https://") {
+		return fmt.Errorf("alert: webhook_url 须为 http(s) 地址")
+	}
+	return nil
 }
 
 // validateModelGroups 路由组静态校验（fail fast，同渠道校验口径）。

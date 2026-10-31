@@ -38,6 +38,11 @@ type SchedulerConfig struct {
 	// OnRefresh 登录态刷新并回写 accounts.json 后的钩子（main 注入 = acctchan.Sync
 	// 重投影）。必须在 UpdateCred 之后调用，否则 managed 渠道仍持旧 secret。
 	OnRefresh func(platform, accountID string)
+	// OnDailySweep 每日定时签到轮结束后的汇总钩子（告警推送用；nil = 静默）。
+	// 只对**定时路径**（runDailyIfDue → RunAll）触发，面板手动一键签到不打扰。
+	// failed > 0 时才有告警价值，但完整汇总（含 already/ok 计数）一并提供，
+	// 文案由注入方决定。
+	OnDailySweep func(summary BatchSummary, failures []string)
 
 	Now  func() time.Time                 // 时钟注入（测试）
 	Logf func(format string, args ...any) // 日志注入（测试静音）
@@ -257,6 +262,8 @@ func (s *Scheduler) targets(platforms ...string) []*account.Account {
 
 // RunAll 全账号串行一轮（定时触发）。失败进重试队列。
 func (s *Scheduler) RunAll(ctx context.Context) {
+	var failures []string
+	sum := BatchSummary{}
 	for _, a := range s.targets() {
 		if a.Disabled {
 			continue // 停用账号跳过（与 CodeBuddy 口径一致）
@@ -264,7 +271,27 @@ func (s *Scheduler) RunAll(ctx context.Context) {
 		if _, ok := For(a.Platform); !ok {
 			continue // 平台无签到（qoder-intl / custom）
 		}
-		_, _ = s.checkinAccount(ctx, a.ID, true)
+		sum.Total++
+		res, err := s.checkinAccount(ctx, a.ID, true)
+		if err != nil {
+			sum.Failed++
+			failures = append(failures, a.Label+"："+err.Error())
+			continue
+		}
+		switch res.Status {
+		case StatusOK:
+			sum.OK++
+		case StatusAlready:
+			sum.Already++
+		case StatusFailed:
+			sum.Failed++
+			failures = append(failures, a.Label+"："+res.Message)
+		default:
+			sum.Skipped++
+		}
+	}
+	if s.cfg.OnDailySweep != nil {
+		s.cfg.OnDailySweep(sum, failures)
 	}
 }
 

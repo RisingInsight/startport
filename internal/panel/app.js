@@ -1187,6 +1187,8 @@ const CFG_MAP = {
   sanitize_blacklist_fingerprints: ['features', 'sanitize_blacklist_fingerprints'],
   session_sticky_enabled: ['session_sticky', 'enabled'],
   request_client_info: ['logging', 'request_client_info'],
+  alert_enabled: ['alert', 'enabled'], alert_webhook_type: ['alert', 'webhook_type'],
+  alert_webhook_url: ['alert', 'webhook_url'], alert_cooldown_minutes: ['alert', 'cooldown_minutes'],
 };
 /* 「覆盖型」文本字段：空串本身是有意义的取值（= 回落到内置默认），必须照发。
  *
@@ -1284,6 +1286,20 @@ $('btnEye').onclick = () => {
   $('btnEye').textContent = show ? '隐藏' : '显示';
 };
 $('btnCfgReload').onclick = loadConfig;
+/* 告警「发送测试」：按**已保存**的配置发真实一条（表单未保存的改动不算数，
+   与后端 Manager 里生效的配置同一事实来源）。 */
+if ($('btnAlertTest')) $('btnAlertTest').onclick = async () => {
+  const btn = $('btnAlertTest');
+  btn.disabled = true; btn.textContent = '发送中…';
+  try {
+    const r = await api('alert/test', { method: 'POST' });
+    toast(r.message || '测试告警已发送', 'ok');
+  } catch (e) {
+    toast(e.message || '发送失败', 'bad');
+  } finally {
+    btn.disabled = false; btn.textContent = '发送测试';
+  }
+};
 $('cfgForm').onsubmit = async ev => {
   ev.preventDefault();
   // 时长字段脏值拦截：标红 + toast 点名，不发保存请求（后端同样会拒，这里前置）。
