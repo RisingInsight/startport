@@ -271,6 +271,18 @@ type Config struct {
 		CooldownMinutes int `json:"cooldown_minutes"`
 	} `json:"alert"`
 
+	// Backup 本地定时备份：每日把 config.json 与数据目录整体快照到
+	// data/backups/，保留最近 keep 份（拷贝保留 0600 权限）。循环每个 tick
+	// 重读本节，改配置无需重启。
+	Backup struct {
+		// Enabled 总开关（缺省 true——备份是廉价保险，关掉需要显式动作）。
+		Enabled bool `json:"enabled"`
+		// Keep 保留份数（缺省 7）。
+		Keep int `json:"keep"`
+		// Hour 每日触发小时（本地时区；缺省 4，凌晨低峰）。
+		Hour int `json:"hour"`
+	} `json:"backup"`
+
 	// ExtIntel 额度情报拉取（token-fbi data.json 定时快照，仅面板展示）。
 	ExtIntel struct {
 		// Enabled 缺省 true；false 时不发起任何情报请求（离线/隐私场景）。
@@ -471,6 +483,10 @@ func Default() *Config {
 	c.Alert.Enabled = false
 	c.Alert.WebhookType = "feishu"
 	c.Alert.CooldownMinutes = 30
+	// 备份缺省开：enabled 的缺省值即立场——快照是廉价保险，关闭须显式动作。
+	c.Backup.Enabled = true
+	c.Backup.Keep = 7
+	c.Backup.Hour = 4
 	c.ExtIntel.Enabled = true
 	c.ExtIntel.URL = "https://token-fbi.com/data.json"
 	c.ExtIntel.Hours = 12
@@ -794,7 +810,21 @@ func (c *Config) normalize() error {
 	if err := c.validateAlert(); err != nil {
 		return err
 	}
+	if err := c.validateBackup(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// validateBackup 备份参数静态校验（0 值 = 沿用缺省，合法）。
+func (c *Config) validateBackup() error {
+	if c.Backup.Keep < 0 || c.Backup.Keep > 90 {
+		return fmt.Errorf("backup: keep 须在 0（用缺省 7）..90 之间，当前 %d", c.Backup.Keep)
+	}
+	if c.Backup.Hour < 0 || c.Backup.Hour > 23 {
+		return fmt.Errorf("backup: hour 须在 0..23（本地时区小时），当前 %d", c.Backup.Hour)
+	}
+	return nil
 }
 
 // validateAlert 告警配置静态校验：开着的告警必须有合法渠道与地址；

@@ -319,6 +319,13 @@ func serverMain(ctx context.Context, cfgPath string, openBrowser bool) {
 			log.Fatalf("config: %v", err)
 		}
 	}
+	// 告警 webhook 同一套出站红线：内网自建接收器合法（allowPrivate=true），
+	// 云元数据端点恒拒——告警内容虽不含凭证，也不该成为内网探测的口子。
+	if cfg.Alert.WebhookURL != "" {
+		if err := upstream.ValidateOutboundBaseAllowPrivate(cfg.Alert.WebhookURL, "alert.webhook_url", true); err != nil {
+			log.Fatalf("config: %v", err)
+		}
+	}
 	extMgr.ReplaceAll(extChannelDefs(cfg.ExtChannels))
 
 	// 路由组（借鉴 magpie routing groups）：group/<name> → 成员模型的准入改写层。
@@ -644,6 +651,10 @@ func serverMain(ctx context.Context, cfgPath string, openBrowser bool) {
 		ModelGroups: grpMgr,
 	})
 
+	// 本地定时备份（config.backup）：每日快照 config.json + 数据目录，保留 N 份。
+	// 循环内重读配置，改 backup 节无需重启。
+	go backupLoop(ctx, cfgPath, log.Printf)
+
 	// 池健康边沿检测（告警事件之三）：没有任何健康账号 → 推一条；恢复 → 再推一条。
 	// 只看 healthy==0（真停摆），不看在途占满（突发并发是正常负载，冷却去重兜不住它）。
 	go func() {
@@ -962,6 +973,12 @@ func applyConfig(merged map[string]any, path string, live *livecfg.Holder, p *po
 	// 元数据端点恒拒。
 	for i, ec := range newCfg.ExtChannels {
 		if err := upstream.ValidateOutboundBaseAllowPrivate(ec.BaseURL, fmt.Sprintf("ext_channels[%d].base_url", i), ec.AllowPrivate); err != nil {
+			return nil, err
+		}
+	}
+	// 告警 webhook 同红线（面板保存路径；见启动期注释）。
+	if newCfg.Alert.WebhookURL != "" {
+		if err := upstream.ValidateOutboundBaseAllowPrivate(newCfg.Alert.WebhookURL, "alert.webhook_url", true); err != nil {
 			return nil, err
 		}
 	}
