@@ -154,7 +154,21 @@ func serviceInstall(args []string) {
 		fmt.Println("服务 " + serviceName + " 已存在。先执行 service uninstall 再安装。")
 		os.Exit(1)
 	}
-	s, err := m.CreateService(serviceName, exe+" --config \""+abs+"\" --service --open=false", mgr.Config{
+	// 服务宿主 exe 复制到 %ProgramData%\StarPort\starport.exe（固定名固定位）：
+	// 用户桌面/下载目录的 ACL 会挡住 SYSTEM 拉起服务（实测：StartService 5 拒绝
+	// 访问，中文用户名的桌面目录尤甚），ProgramData 是 Windows 服务的标准落位，
+	// SYSTEM 可执行、升级路径清晰（stop → 覆盖 → start）。
+	dest := filepath.Join(os.Getenv("ProgramData"), "StarPort", "starport.exe")
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		fmt.Println("创建服务目录失败:", err)
+		os.Exit(1)
+	}
+	if err := copyFile(exe, dest); err != nil {
+		fmt.Println("复制服务 exe 失败（服务正在运行时先 stop/uninstall 再 install）:", err)
+		os.Exit(1)
+	}
+	binPath := fmt.Sprintf("%q --config %q --service --open=false", dest, abs)
+	s, err := m.CreateService(serviceName, binPath, mgr.Config{
 		StartType:   mgr.StartAutomatic,
 		Description: "StarPort 星港：本地多协议 AI 网关（账号池 / 平台签到 / 管理面板）。崩溃后自动重启。",
 	})
@@ -173,7 +187,7 @@ func serviceInstall(args []string) {
 		fmt.Println("警告: 设置崩溃恢复动作失败（服务已安装但崩溃后不会自动重启）:", err)
 	}
 	fmt.Println("服务已安装：", serviceName)
-	fmt.Println("  exe:", exe)
+	fmt.Println("  exe:", dest)
 	fmt.Println("  config:", abs)
 	fmt.Println("  启动:", serviceName+" 会随系统自动启动；现在启动请执行 starport service start（管理员）")
 }
