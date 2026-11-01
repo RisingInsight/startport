@@ -748,14 +748,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 让下方既有控制流自然分流；选号/body 重写/记账全部只消费改写后的 peek.Model。
 	// grpTag 进 st.pick 前缀：运行日志能看到"这条请求是经哪个组落到该成员的"。
 	grpTag := ""
+	var grp *modelgroup.Def // 非 nil = 组请求（failover 换员的成员清单与序）
+	grpModel := ""          // 组请求的原始模型名（group/<name>；换员后日志 model 回归此值）
+	triedMembers := map[string]bool{}
 	if strings.HasPrefix(peek.Model, "group/") {
 		member, g, gerr := h.resolveGroupModel(peek.Model)
 		if gerr != nil {
 			writeOpenAIError(w, http.StatusBadRequest, "invalid_request", gerr.Error())
 			return
 		}
+		grpModel = peek.Model // 客户端请求的组名（日志 model 字段的权威值）
 		peek.Model = member
 		grpTag = "组" + g.Name + "→"
+		triedMembers[member] = true
+		grp = &g
 	}
 
 	// 外部渠道短路（多平台阶段一）：model 带 "ext:<channel>/<model>" 前缀（或裸名
@@ -765,11 +771,39 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 选号路径处理不了它）——裸名消歧放在 modelList/文档层约定，前缀是权威路由协议。
 	if h.cfg.Ext != nil {
 		if _, _, isExt := h.cfg.Ext.HasPrefix(peek.Model); isExt {
-			if grpTag != "" {
-				st.pick = grpTag + peek.Model
+			if grp == nil {
+				h.handleExtChat(w, r, st, body, peek.Model, apiKeyName)
+				return
 			}
-			h.handleExtChat(w, r, st, body, peek.Model, apiKeyName)
-			return
+			// 组 ext 成员：预写失败（传输失败/渠道冷却/上游 >=400，一个字节都没
+			// 出去）按声明序换员。换到另一个 ext 成员继续试；换到池成员则把
+			// peek.Model 改写后**落回下方既有池路径**（轮转/粘性/记账全部复用）。
+			// 全部成员都预写失败 → 把最后一次的错误写出（客户端拿到真实失败原因）。
+			member := peek.Model
+			for {
+				st.pick = grpTag + member
+				if h.extChatOnce(w, r, st, body, member, apiKeyName, false) {
+					st.model = grpModel
+					return // 响应已提交（成功或末端错误）
+				}
+				next := nextGroupMember(grp, triedMembers)
+				if next == "" {
+					h.extChatOnce(w, r, st, body, member, apiKeyName, true)
+					st.model = grpModel
+					return
+				}
+				triedMembers[next] = true
+				if strings.HasPrefix(next, "ext:") {
+					member = next
+					continue
+				}
+				peek.Model = next // 池成员：走池路径
+				// 记账恢复：model 回归组名；首个 ext 成员的失败文案不残留到
+				// 后续池成员的成功条目上（200 带错误文案会被误读）。
+				st.model = grpModel
+				st.errCode, st.errMsg = "", ""
+				break
+			}
 		}
 	}
 
@@ -1021,6 +1055,22 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 与 /healthz 的 ServableNow 同口径（healthy 里排除 inFlightFull）。
 			if _, healthy, _, _, full := h.cfg.Pool.CountsDetailedForRealm(realm); healthy > 0 && full >= healthy {
 				inFlightFull = true
+			}
+			// 路由组 failover（池→池）：本成员在池里已无可用号 → 切到组内下一个
+			// 未试的**池成员**重置轮换继续（MaxRotate 是全程总预算，多成员均摊）。
+			// 粘性号由 PickByUIDForModel 对新成员模型的可用性校验自然处理（不可用
+			// 即解绑回落轮换，无需此处干预）。
+			if grp != nil {
+				if next := nextGroupMember(grp, triedMembers); next != "" && !strings.HasPrefix(next, "ext:") {
+					triedMembers[next] = true
+					realm, bareModel = resolveModel(next)
+					if h.cfg.Upstream != nil {
+						modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
+					}
+					tried = map[string]bool{}
+					st.pick = grpTag + "换员→" + next
+					continue
+				}
 			}
 			break
 		}
@@ -1450,6 +1500,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// （限流语义、客户端应等待重试），其余保持 503。本地调度类错误（无可用账号/
 	// 传输层抖动/非上游返回的 lastErr）→ 保留自有文案 no_healthy_account（本地错误
 	// 没有上游原文可透传，不编造）。
+	// 路由组 failover（池→ext）：池成员全部失败（轮转耗尽/无可用号）→ 组内未试
+	// 的 ext 成员兜底。ext 成员预写失败继续换下一个；全部失败则落到原 503
+	// （池侧原因是主因，ext 失败细节在运行日志 st.pick / error_code 里）。
+	if grp != nil {
+		for {
+			next := nextGroupMember(grp, triedMembers)
+			if next == "" {
+				break
+			}
+			triedMembers[next] = true
+			if !strings.HasPrefix(next, "ext:") {
+				continue
+			}
+			st.pick = grpTag + "兜底→" + next
+			if h.extChatOnce(w, r, st, body, next, apiKeyName, false) {
+				st.model = grpModel // 日志 model = 客户端请求的组名（成员在 pick 里）
+				return              // ext 成员已写出响应（成功或其末端错误）
+			}
+		}
+	}
 	status := http.StatusServiceUnavailable
 	code := "no_healthy_account"
 	msg := "all accounts are temporarily unavailable, please retry later"

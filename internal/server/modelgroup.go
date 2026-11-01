@@ -73,3 +73,14 @@ func (h *Handler) memberServable(raw string) bool {
 		return h.cfg.Pool.ServableForRealm(realm)
 	}
 }
+
+// nextGroupMember 返回组内下一个未尝试的成员（按声明序）；全部试过返回 ""。
+// tried 的键是成员规范模型名（config 校验保证组内无重复）。
+func nextGroupMember(g *modelgroup.Def, tried map[string]bool) string {
+	for _, m := range g.Members {
+		if !tried[m] {
+			return m
+		}
+	}
+	return ""
+}

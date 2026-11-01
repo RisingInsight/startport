@@ -39,13 +39,26 @@ var sseHeartbeatInterval = sseupstream.DefaultHeartbeatInterval
 // body 为原始请求体（未做任何提示词改写）；model 为入站原始模型名。
 func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 	st *chatStat, body []byte, model string, apiKeyName string) {
+	// 非组路径：所有失败分支自写错误响应（writeErrors=true，恒 submitted）。
+	h.extChatOnce(w, r, st, body, model, apiKeyName, true)
+}
+
+// extChatOnce 执行一次 ext 转发。writeErrors=false（路由组 failover）时三个
+// 失败分支（模型路由失败 / Do 失败 / 上游 >=400）**不写任何字节**、返回 false
+// ——这是跨成员换员的窗口；成功写出响应时返回 true（调用方必须停止）。
+// writeErrors=true 时行为与旧 handleExtChat 完全一致（失败自写 + 返回 true）。
+func (h *Handler) extChatOnce(w http.ResponseWriter, r *http.Request,
+	st *chatStat, body []byte, model string, apiKeyName string, writeErrors bool) bool {
 
 	ch2, upstream, display, rerr := h.cfg.Ext.RouteModel(model)
 	if rerr != nil {
-		writeOpenAIError(w, http.StatusBadRequest, "model_not_found", rerr.Error())
 		st.status = http.StatusBadRequest
 		st.outcome = reqlog.OutcomeHTTPError
-		return
+		if !writeErrors {
+			return false
+		}
+		writeOpenAIError(w, http.StatusBadRequest, "model_not_found", rerr.Error())
+		return true
 	}
 	st.uid = "ext:" + ch2.Name
 	st.nick = ""
@@ -76,10 +89,14 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 		st.status = status
 		st.outcome = reqlog.OutcomeHTTPError
 		log.Printf("WARN: [server] ext=%s model=%s: %s (%s)", ch2.Name, upstream, code, msg)
+		if !writeErrors {
+			return false
+		}
 		writeOpenAIError(w, status, code, msg)
-		return
+		return true
 	}
 	cred := ch2.CredentialByLabel(res.CredentialLabel)
+	st.errCode, st.errMsg = "", "" // 成功开跑：前置成员的失败文案不残留到本条目
 
 	if res.Status >= 400 {
 		code, msg := extErrorFromBody(res.Body)
@@ -88,10 +105,13 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 		recordExtAttempt(h, st, apiKeyName, ch2, cred, upstream, pool.TokenUsageDelta{}, 0, false, false, attemptStarted, 0, display)
 		st.status = res.Status
 		st.outcome = reqlog.OutcomeHTTPError
+		if !writeErrors {
+			return false
+		}
 		// 错误原文透传（与主链路 error-passthrough 同哲学：客户端必须看到
 		// 上游真实错误才能排查——额度耗尽/模型不存在/参数问题的处理方式不同）。
 		writeUpstreamError(w, res.Status, res.Body, credSecret(cred))
-		return
+		return true
 	}
 
 	// 成功开流/拿到响应。流式：**逐字节透传**（挂 chatStatsReader 只做观测，
@@ -166,7 +186,7 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 			st.toks = toks
 		}
 		res.Reader.Close()
-		return
+		return true
 	}
 
 	// 非流式：body 已由 Do 折回 OpenAI 形态，原样回写。
@@ -197,6 +217,9 @@ func (h *Handler) handleExtChat(w http.ResponseWriter, r *http.Request,
 		st.outcome = reqlog.OutcomeHTTPError
 		writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", "ext channel returned non-JSON body")
 	}
+
+	// 成功路径写完（流式/非流式）：响应已提交。
+	return true
 }
 
 // extErrorFields 把出站错误翻译成 (HTTP 状态, error.code, message)。
