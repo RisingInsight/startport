@@ -60,3 +60,9 @@ deliverables/gstack/
 *.zip
 server.exe
 .DS_Store
+
+# 运行产物（服务模式日志 / 一键安装脚本 / 本地构建）
+/starport-service.log
+/install-service.log
+/install-service.cmd
+/*.exe
