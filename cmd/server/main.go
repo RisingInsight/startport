@@ -681,6 +681,7 @@ func serverMain(ctx context.Context, cfgPath string, openBrowser bool) {
 		}
 	}()
 	go sch.Run(ctx)
+	sch.StartCheckinSweep(ctx) // 签到收尾循环：槽位失败/重启跨槽的按日自愈（幂等）
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
 	upd.Start(ctx)
 

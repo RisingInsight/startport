@@ -82,6 +82,9 @@ type Scheduler struct {
 	// balanceInterval 余额刷新间隔（纳秒，0=暂停）。atomic 读写：执行循环每轮读当前值，
 	// SetBalanceInterval 可任意时刻热改（面板保存配置）。
 	balanceInterval atomic.Int64
+
+	// sweep 签到收尾循环状态（StartCheckinSweep 的退避记账；uid → 上次补跑时刻）。
+	sweep checkinSweepState
 }
 
 // New 构建。
@@ -686,4 +689,147 @@ func (s *Scheduler) SetBalanceInterval(d time.Duration) {
 	}
 	s.balanceInterval.Store(int64(d))
 	poke(s.rearmBalance)
+}
+
+// ── 签到收尾循环（按日幂等 + 失败自愈）────────────────────────────
+//
+// 背景（2026-11-03 实测）：定时槽 09:00 整轮失败（开机后 DNS 未就绪），nextFire
+// 只会跳到 21:00 的下一个槽——Qoder/AutoClaw 有各自的分钟级补签循环当天救回，
+// CodeBuddy 却干等 12 小时。根因是 CodeBuddy 签到没有"按日闭环"概念：槽是
+// 触发器，失败不重试，成功也不阻止后续槽重复打上游。
+//
+// 本循环补上闭环：每分钟盘点一次"还有哪些账号今天没签到成功"，对未完成者
+// 按退避节奏补跑；成功/幂等已签（NoteCheckinDone）后当天不再发起。于是：
+//   - 槽位失败（网络抖动/开机断网/上游故障）→ 最长 retryDelay 后自动重试；
+//   - 服务重启跨过槽位 → 启动后第一个 tick 即补跑（幂等，绝不多签）；
+//   - 全部完成 → 循环空转，当日零额外请求。
+//
+// 与槽位排程的关系：槽位是"准点主干"（9/21 点准点跑），本循环是"兜底收尾"
+// ——两者都经过 CheckedInToday 幂等闸与 CheckinDisabled 开关，互不重复记账。
+// 面板手动「立即签到」不走本闸（用户显式动作必须执行），但成功同样落
+// NoteCheckinDone，之后兜底循环自然不再重复。
+
+const (
+	checkinSweepTick   = time.Minute      // 盘点节拍（与余额刷新 ticker 同量级）
+	checkinRetryDelay  = 10 * time.Minute // 同一账号两次补跑的最小间隔（退避基数）
+	checkinRetryMaxGap = time.Hour        // 退避封顶：网络长时段不可用也不至于一天只试两次
+)
+
+// checkinSweep 状态：uid → 上次补跑时刻（运行态，重启归零=重启后立即补跑一次，
+// 与"重启补签"语义一致）。按日无需单独字段：成功即 NoteCheckinDone，
+// CheckedInToday 的跨零点过期就是天然的"新一天全部重来"。
+type checkinSweepState struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+// StartCheckinSweep 启动签到收尾循环（main 在 Run 旁调用；ctx 取消即停）。
+func (s *Scheduler) StartCheckinSweep(ctx context.Context) {
+	go func() {
+		t := time.NewTicker(checkinSweepTick)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.sweepCheckin()
+			}
+		}
+	}()
+}
+
+// checkinDisabledFast 开关快照（避免热路径反复拿 schedMu）。
+func (s *Scheduler) checkinDisabledFast() bool {
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+	return s.cfg.CheckinDisabled
+}
+
+// sweepCheckin 一轮盘点：对"今天未成功签到"且"距上次补跑已到退避"的账号执行
+// 一次签到。全部完成时零上游请求（幂等闸在发起前短路）。
+func (s *Scheduler) sweepCheckin() {
+	if s.checkinDisabledFast() {
+		return
+	}
+	pool := s.cfg.Pool
+	if pool == nil {
+		return
+	}
+	now := time.Now()
+	for _, st := range pool.List() {
+		uid := st.UID
+		if pool.CheckedInToday(uid) {
+			continue // 今日闭环已完成：幂等闸（成功/已签都算）
+		}
+		// 退避闸：同一账号两次补跑之间至少隔 retryDelay（连续失败按次数翻倍，
+		// 封顶 retryMaxGap）——网络长时段不可用时不会每分钟轰炸上游。
+		if !s.checkinSweepDue(uid, now) {
+			continue
+		}
+		s.markSweepAttempt(uid, now)
+		s.checkinOne(uid)
+	}
+}
+
+// checkinSweepDue 报告该账号本次是否到了补跑时点（失败次数越多间隔越长）。
+func (s *Scheduler) checkinSweepDue(uid string, now time.Time) bool {
+	s.sweep.mu.Lock()
+	defer s.sweep.mu.Unlock()
+	last, ok := s.sweep.last[uid]
+	if !ok {
+		return true // 从未补跑过（今天首次/重启后首次）
+	}
+	// 连续失败次数 ≈ (last 距今 / retryDelay) 的量级；用简单倍增：间隔 = retryDelay
+	// × 2^n，n 随失败次数增长但封顶 maxGap。此处不需要精确次数：按"上次到现在
+	// 的间隔是否已达当前应退避值"判定即可，状态只有 last 一项。
+	gap := checkinRetryDelay
+	for gap < checkinRetryMaxGap && now.Sub(last) > gap*2 {
+		gap *= 2
+	}
+	return now.Sub(last) >= gap
+}
+
+func (s *Scheduler) markSweepAttempt(uid string, now time.Time) {
+	s.sweep.mu.Lock()
+	defer s.sweep.mu.Unlock()
+	if s.sweep.last == nil {
+		s.sweep.last = map[string]time.Time{}
+	}
+	s.sweep.last[uid] = now
+}
+
+// checkinOne 单账号签到（收尾循环专用）：与 RunCheckinNow 的签到段同一套语义
+// （企业/global 门控、幂等记账、成功日志），但不查余额不抽奖——那些是槽位
+// 任务的职责，兜底轮只补签到这一件事，把对上游的打扰压到最小。
+func (s *Scheduler) checkinOne(uid string) {
+	pool := s.cfg.Pool
+	a := pool.AuthByUID(uid)
+	if a == nil || a.RefreshTokenValue() == "" {
+		return
+	}
+	// 企业号无签到体系（上游 400 code 10001）：跳过但不进退避——每轮都快速
+	// 短路在门控上，零上游请求（与 RunCheckinNow 同口径）。
+	if a.IsEnterprise() {
+		pool.NoteCheckinDone(uid) // 无体系=闭环完成，当天不再盘点它
+		return
+	}
+	// global 门控：国际版上游长期无 daily-checkin 端点（panel.go 同口径注释），
+	// 发起必然失败。跳过并标记完成——"无活动"与"已签"在按日闭环里等价。
+	if a.IsGlobal() {
+		pool.NoteCheckinDone(uid)
+		return
+	}
+	if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
+		if upstream.IsAlreadyCheckin(err) {
+			pool.NoteCheckinDone(uid)
+			log.Printf("checkin %s: 今天已签到（幂等）", logfmt.Label(uid, a.Nickname))
+		} else {
+			// 失败：不标记，下一轮退避后重试。日志限频由退避闸天然保证。
+			log.Printf("checkin %s: %v（收尾循环将重试）", logfmt.Label(uid, a.Nickname), err)
+		}
+		return
+	}
+	pool.NoteCheckinDone(uid)
+	log.Printf("checkin %s: 签到成功", logfmt.Label(uid, a.Nickname))
 }

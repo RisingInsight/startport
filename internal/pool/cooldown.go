@@ -63,6 +63,21 @@ func (p *Pool) NoteCheckinDone(uid string) {
 	}
 }
 
+// CheckedInToday 报告账号今天是否已成功签到（lastCheckinDay == 今日）。
+// CodeBuddy 签到的按日幂等去重依据（scheduler.RunCheckinNow）：
+// true = 当天签到闭环已完成，定时轮/补签轮/手动触发都不再对上游发起签到；
+// false = 还没有成功记录，应当继续尝试（含失败后的重试与重启后的补跑）。
+// 账号不存在按"未签"处理——让调用方照常尝试，由签到链路自己报错可见。
+func (p *Pool) CheckedInToday(uid string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false
+	}
+	return e.lastCheckinDay == time.Now().Format("2006-01-02")
+}
+
 // SetCreditsDetailed 更新账号余额/总额、配置窗口内的快过架子集，以及最早未来
 // 到期批次。earliestAt 为零或不在未来时清空最早批次；expiring/earliestRemaining
 // 均钳到 [0, credits]，避免上游脏数据污染选号。
