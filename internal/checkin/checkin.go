@@ -2,7 +2,8 @@
 //
 // ── 是什么 ──────────────────────────────────────────────────
 // 平台可选的每日签到能力：loomy（每日登录积分）/ autoclaw（task-complete 通
-// 用任务接口，国内/国际两地区）/ qoder 中国版（sash 活动领取）。CodeBuddy 的
+// 用任务接口，国内/国际两地区）/ qoder 中国版（sash 活动领取）/ trae 国内
+// SOLO（checkin_credits/claim + status 回查）。CodeBuddy 的
 // 签到在 internal/scheduler，两套语义**命名强区分**：本包日志前缀
 // `[checkin:<platform>]`，面板文案「平台签到」（架构 §11 风险 2 的对策）。
 //
@@ -129,6 +130,5 @@ func init() {
 	Register(newAutoClawChecker(false)) // 国内版
 	Register(newAutoClawChecker(true))  // 国际版（任务体系两地独立，域不同）
 	Register(newQoderChecker())
-	// TRAE Checker（newTraeChecker）已实现但暂不注册：能力接线随 platform.go
-	// TRAE 条目（Checkin/Refresh/Balance 翻 true）一次性打开，见该处注释。
+	Register(newTraeChecker()) // TRAE（SOLO 国内）：签到/状态契约见 trae.go
 }

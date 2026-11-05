@@ -58,9 +58,29 @@ func TestTraeCredentialShape(t *testing.T) {
 	if !account.NativePlatform(account.PlatformTrae) || account.AdapterOf(account.PlatformTrae) != "trae" {
 		t.Error("TRAE 应注册为原生平台 adapter=trae")
 	}
-	// 第一批不做刷新：即使 blob 带 refresh_token 也不广告可刷新。
+	// 刷新能力已接线，但仍按账号凭证动态判定：blob 缺 refreshToken 的粘贴
+	// 凭证不广告可刷新；带 refreshToken 的浏览器登录产物才广告。
 	a := &account.Account{Platform: account.PlatformTrae, Cred: flat}
 	if account.CanRefresh(a) {
-		t.Error("第一批不应声明刷新能力")
+		t.Error("blob 缺 refreshToken 时不应广告可刷新")
+	}
+	withRefresh := json.RawMessage(`{"accessToken":"jwt-1","refreshToken":"rt-1","deviceId":"d-1"}`)
+	b := &account.Account{Platform: account.PlatformTrae, Cred: withRefresh}
+	if !account.CanRefresh(b) {
+		t.Error("TRAE 刷新能力已接线：blob 带 refreshToken 时应广告可刷新")
+	}
+	// traeField 补读 account{} 后，CPA 形状（accessToken 只在 account{} 内）
+	// 也应通过校验——traePrimarySecret 的 pick 早已把 accountPart 列为合法
+	// 来源，校验层与投影层 / 执行层口径必须一致。
+	cpa := json.RawMessage(`{"auth":{},"account":{"access_token":"jwt-3","refresh_token":"rt-3"}}`)
+	if err := account.ValidateCred(account.PlatformTrae, cpa); err != nil {
+		t.Errorf("CPA 形状 account{} 内的 access_token 应通过校验: %v", err)
+	}
+	if secret, err := account.PrimarySecret(account.PlatformTrae, cpa); err != nil || !strings.Contains(secret, "jwt-3") {
+		t.Errorf("CPA 形状投影应能读出 account{} 的 accessToken（err=%v）", err)
+	}
+	c := &account.Account{Platform: account.PlatformTrae, Cred: cpa}
+	if !account.CanRefresh(c) {
+		t.Error("CPA 形状 account{} 内的 refresh_token 应广告可刷新")
 	}
 }

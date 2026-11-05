@@ -152,11 +152,13 @@ Eight native platforms (each with a dedicated adapter) plus generic channels (co
 | **AutoClaw Intl** | `ext:autoclaw-intl/` | OAuth + captcha | ✅ | ✅ | ✅ | available |
 | **Qoder CN** (Alibaba) | `ext:qoder/` | PKCE device code | ✅ | ✅ | ✅ | available |
 | **Qoder Intl** | `ext:qoder-intl/` | PKCE device code | no such program | ✅ | ✅ | available |
-| **TRAE** (ByteDance · SOLO CN) | `ext:trae/` | PKCE loopback | ⏳ contract ready | ⏳ | ⏳ | forwarding + login |
+| **TRAE** (ByteDance · SOLO CN) | `ext:trae/` | PKCE loopback | ✅ wired | ✅ (needs refreshToken) | ✅ | contract not verified against a real account |
 | **Codex** (ChatGPT subscription) | `ext:codex/` | paste `auth.json` via channel wizard | — | ⚠️ unverified | — | experimental |
 | **Generic** (custom) | `ext:c-<id>/` | paste `base_url` + secret | — | — | — | available |
 
-> ⏳ = implemented with contract tests, gated until validated against a real account. ⚠️ = contract derived from a public reference implementation, not yet validated with a live account; failures surface loudly in the panel ledger rather than silently.
+> ✅ = capability wired; ⚠️ = contract derived from a public reference implementation, **not validated against a live account** — mismatches surface loudly in the panel ledger / balance response (observable, never silent, never fabricated numbers).
+>
+> **TRAE**: browser login, daily check-in, balance query and token refresh are **all wired** (`Checkin/Refresh/Balance` in `platformSpecs` are true); however the `checkin_credits/claim`, `ExchangeToken` renewal and `ide_user_ent_usage` pack-balance upstream contracts remain ⚠️ **unverified against a real account** — validate via the panel's "one-click check-in / refresh balance" actions and the redacted error messages.
 >
 > There is also an **account/balance-only** platform: **Kuku AI** (Baidu GenFlow). It only contributes a credits dashboard — it has **no chat API and takes no part in routing** (`AccountOnly`), and its credential is a browser login cookie. Contract status in **[docs/PLATFORMS.md](docs/PLATFORMS.md)**.
 > Per-platform auth headers, request shapes, error codes, and known limits live in **[docs/PLATFORMS.md](docs/PLATFORMS.md)** (Chinese).
@@ -338,7 +340,7 @@ Moving from a personal tool toward general-purpose middleware; each item has an 
 
 **Near term (v1.9)**
 - **Protocol conformance matrix**: turn the "three inbound × four outbound × each adapter" combinations into table-driven tests (currently spread across per-package unit tests, so new protocol surfaces can miss combinations)
-- TRAE upkeep, second batch: check-in / refresh / balance enabled once validated against a real account
+- ✅ TRAE upkeep wired: check-in / refresh / balance enabled via `platformSpecs` (contract reverse-engineered from a reference implementation, ⚠ pending validation against a real account; mismatches surface as explicit errors)
 - `go test -cover` enforced in CI with a recorded baseline to prevent regressions
 
 **Mid term**

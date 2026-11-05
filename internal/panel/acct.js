@@ -51,8 +51,8 @@ const ACCT_PLATFORMS = {
   },
   trae: {
     name: 'TRAE（字节 · SOLO 国内）',
-    sample: '{\n  "accessToken": "<Cloud-IDE-JWT>",\n  "uid": "<用户 ID>",\n  "machineId": "<设备指纹>",\n  "deviceId": "<设备指纹>",\n  "refreshToken": "可选：下一批刷新链用",\n  "variant": "solo"\n}',
-    schema: '必填 accessToken；uid/machineId/deviceId 建议一并填写（上游按设备绑定）。当前仅支持国内 SOLO 通道；登录/签到/刷新在下一批接入。',
+    sample: '{\n  "accessToken": "<Cloud-IDE-JWT>",\n  "uid": "<用户 ID>",\n  "machineId": "<设备指纹>",\n  "deviceId": "<设备指纹>",\n  "refreshToken": "浏览器登录自动带回，也可手填以启用自动续期",\n  "variant": "solo"\n}',
+    schema: '必填 accessToken；uid/machineId/deviceId 建议一并填写（上游按设备绑定）；带 refreshToken 时可自动续期。当前仅支持国内 SOLO 通道；已支持浏览器登录、每日签到、余额查询与登录态刷新（契约未用真实账号联调，接口变更会显式报错）。',
     required: ['accessToken']
   },
   codex: {
@@ -677,7 +677,8 @@ function acctBalanceHtml(a) {
 }
 
 function acctAttentionHtml(scope) {
-  if (!scope.length) return { cls: 'attn ok', html: '<div class="row">暂无平台账号</div>' };
+  // 空集合不是健康信号：0 个账号推不出「全部正常」，用中性样式留白。
+  if (!scope.length) return { cls: 'attn', html: '<div class="row">暂无平台账号</div>' };
   const items = [];
   scope.forEach(a => {
     const st = acctStateOf(a);
@@ -687,6 +688,11 @@ function acctAttentionHtml(scope) {
       items.push({ cls: 'warn', tag: '未投影', label: a.label });
     } else if (st === 'cooling') {
       items.push({ cls: 'warn', tag: '冷却', label: a.label });
+    } else if (st === 'paused') {
+      // 暂停选号 / 停用是明确的不可用状态，不能被「全部平台账号状态正常」掩盖。
+      items.push({ cls: 'warn', tag: '暂停选号', label: a.label });
+    } else if (st === 'disabled') {
+      items.push({ cls: 'warn', tag: '已停用', label: a.label });
     } else if (a.checkin && a.checkin.last_status === 'failed' && acctCheckinCurrent(a)) {
       items.push({ cls: 'warn', tag: '签到失败', label: a.label, detail: a.checkin.last_error || '' });
     }

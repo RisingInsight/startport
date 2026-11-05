@@ -170,7 +170,7 @@
 - **白名单 payload**：只搬 `messages` / `tools` / `tool_choice` / 采样字段；`tools[].function.parameters` 转 JSON 字符串、`tool_choice` 转裸字符串、assistant `tool_calls[].function` 改名 `function_call`、`developer` 降成 `system`。多带字段不是被忽略，是被上游拒。
 - **自有 SSE**：没有 `[DONE]`（`event: done` 后由网关补）；`token_usage` 欠到下一帧；**HTTP 200 的 `event: error`** 在首帧预读阶段归一成 401/429/404/413，换证无损；非流式由网关整段聚合。
 - **浏览器登录**：PKCE + 本机回环回调——`GetLoginGuidance` 定登录域 → `{loginHost}/authorization?…`（`auth_callback_url=http://127.0.0.1:<port>/authorize` 刻意不编码，官方前端正则硬校验）→ 回调携带 `authCode/refreshToken/userInfo` → `ExchangeToken`（每登录上送 P-256 SPKI 公钥，空公钥 = 业务码 20405）→ `GetUserInfo` 补身份。设备身份落 `data/trae-device-identity.json`（0600）同安装复用；上游 20401（设备位满）时先在官方客户端解绑旧设备。
-- **本批边界**：签到、refreshToken 绑定续期、余额已实现契约与单测，**待真实账号验收后打开**；浏览器登录产出的凭证已含设备密钥对，粘贴凭证账号不受影响。
+- **日常养护（已接线）**：签到（`checkin_credits/claim` + `status` 回查）、refreshToken 裸续期（`ExchangeToken`）、余额（全部订阅包余量求和）已在账号中心接通，随 `platformSpecs` 的 `Checkin/Refresh/Balance` 能力位、`checkin` 注册表与 `RefreshAccount/QueryBalance` 分发一起生效；契约与单测来自参考实现逆向，**⚠ 尚未用真实账号联调**——上游形态不符时在签到台账、余额响应里显式报错，绝不返回编造数字，也不静默降级。浏览器登录产出的凭证已含 `refreshToken` 与设备密钥对，可直接参与签到 / 刷新 / 余额；仅含 `accessToken` 的粘贴凭证不广告刷新（`CanRefresh` 按 blob 判定），签到与余额仍可用。
 
 ### Codex（ChatGPT 订阅）
 

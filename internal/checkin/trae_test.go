@@ -1,4 +1,4 @@
-// trae_test.go TRAE 日常养护（第二批）的契约测试：签到/刷新/余额。
+// trae_test.go TRAE 日常养护（已接线）的契约测试：签到/刷新/余额。
 // 全部走 httptest 注入（Base / traeExchangeBases / traeRefreshInvoke），不打真实上游。
 package checkin
 

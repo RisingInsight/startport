@@ -420,7 +420,7 @@ func (p *Panel) platformAccountProbe(w http.ResponseWriter, r *http.Request) {
 }
 
 // platformAccountRefresh POST /startport/api/accounts/{id}/refresh
-// 手动刷新登录态（AutoClaw / Qoder）：刷新 → 回写 accounts.json → 立即投影。
+// 手动刷新登录态（AutoClaw / Qoder / Codex / TRAE）：刷新 → 回写 accounts.json → 立即投影。
 // 与签到失败触发的自动刷新同一条链，用于真实账号验收与令牌临期自救。
 func (p *Panel) platformAccountRefresh(w http.ResponseWriter, r *http.Request) {
 	if !p.acctReady() {

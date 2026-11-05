@@ -112,9 +112,10 @@ func TestAcctUnifiedViewCapabilities(t *testing.T) {
 		t.Errorf("loomy 能力位异常: %+v", lo)
 	}
 	tr := byPlatform["trae"]
-	// v1.7.6：TRAE 接入浏览器登录（Login=true）；签到/余额/刷新仍属第二批。
-	if tr.PlatformName == "" || !tr.Capabilities.Login || tr.Capabilities.Checkin ||
-		tr.Capabilities.Refresh || !tr.Capabilities.Probe || tr.Capabilities.Balance {
+	// 浏览器登录 + 签到 + 余额 + 探测均已接线；Refresh 需 blob 带 refreshToken，
+	// 该测试 blob 只有 accessToken，故按账号凭证动态判定为 false。
+	if tr.PlatformName == "" || !tr.Capabilities.Login || !tr.Capabilities.Checkin ||
+		tr.Capabilities.Refresh || !tr.Capabilities.Probe || !tr.Capabilities.Balance {
 		t.Errorf("trae 能力位异常: %+v", tr)
 	}
 

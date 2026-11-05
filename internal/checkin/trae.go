@@ -1,5 +1,7 @@
-// trae.go TRAE（SOLO 国内）的日常养护：每日签到 + 登录态刷新（第二批）。
+// trae.go TRAE（SOLO 国内）的日常养护：每日签到 + 登录态刷新（已接线）。
 //
+// 能力位由 account/platform.go 的 TRAE 条目统一声明；本 Checker 由
+// checkin.init() 注册，刷新由 refresh.go 分发。
 // 契约来源（⚠ 未真实账号验收——接口形态来自参考实现逆向，失败在签到台账
 // 显式报错，不静默）：
 //   - 签到/状态：AgentHub trae 适配器——POST /trae/api/v2/ug/checkin_credits/claim
@@ -63,6 +65,24 @@ func newTraeChecker() *traeChecker {
 // Platform 实现 Checker 接口（与 account.PlatformTrae 同枚举）。
 func (c *traeChecker) Platform() string { return account.PlatformTrae }
 
+// traeBlobString 读 Trae blob 字段：嵌套 auth{} / account{} 优先，其次平铺；
+// 兼容驼峰与下划线键名。能力开关打开后，浏览器登录产物（camelCase 平铺）与
+// 手工粘贴凭证（access_token / refresh_token / CPA 嵌套形状）必须走同一条读取
+// 口径，否则会出现「能力位显示可用、执行时却报缺字段」的分叉。
+func traeBlobString(m map[string]any, keys ...string) string {
+	if nested, ok := m["auth"].(map[string]any); ok {
+		if s := blobString(nested, keys...); s != "" {
+			return s
+		}
+	}
+	if acct, ok := m["account"].(map[string]any); ok {
+		if s := blobString(acct, keys...); s != "" {
+			return s
+		}
+	}
+	return blobString(m, keys...)
+}
+
 // traeHeaders 签到/状态/支付域（trae.cn web 域，非推理网关域）公共头束。
 // 契约来源 AgentHub：x-user-region/x-device-id/x-app-type 为该域风控口径。
 func traeHeaders(token, deviceID string) map[string]string {
@@ -96,11 +116,11 @@ func (c *traeChecker) CheckIn(ctx context.Context, a *account.Account) (Result, 
 	if err != nil {
 		return Result{}, err
 	}
-	token := blobString(blob, "accessToken")
+	token := traeBlobString(blob, "accessToken", "access_token")
 	if token == "" {
 		return Result{}, fmt.Errorf("blob 缺 accessToken（请重新登录）")
 	}
-	deviceID := blobString(blob, "deviceId")
+	deviceID := traeBlobString(blob, "deviceId", "device_id")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		strings.TrimRight(c.Base, "/")+traeClaimPath, strings.NewReader("{}"))
 	if err != nil {
@@ -194,7 +214,7 @@ func RefreshTrae(ctx context.Context, a *account.Account) (map[string]any, error
 	if err != nil {
 		return nil, err
 	}
-	rt := blobString(blob, "refreshToken")
+	rt := traeBlobString(blob, "refreshToken", "refresh_token")
 	if rt == "" {
 		return nil, fmt.Errorf("blob 缺 refreshToken（旧版登录产物），请重新登录获取")
 	}

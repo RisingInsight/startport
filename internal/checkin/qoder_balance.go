@@ -45,6 +45,8 @@ func QueryBalance(ctx context.Context, a *account.Account) (*account.BalanceSnap
 		return queryAutoClawBalance(ctx, a)
 	case account.PlatformKuku:
 		return queryKukuBalance(ctx, a)
+	case account.PlatformTrae:
+		return queryTraeBalance(ctx, a)
 	default:
 		return nil, ErrPlatformNotSupported
 	}

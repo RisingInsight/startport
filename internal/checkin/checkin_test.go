@@ -348,7 +348,7 @@ func TestQoderCheckinFailureModes(t *testing.T) {
 
 // 注册表：支持的平台与"平台无此活动"语义。
 func TestRegistrySupport(t *testing.T) {
-	for _, p := range []string{"loomy", "autoclaw", "autoclaw-intl", "qoder"} {
+	for _, p := range []string{"loomy", "autoclaw", "autoclaw-intl", "qoder", "trae"} {
 		if !Supported(p) {
 			t.Errorf("%s 应有签到能力", p)
 		}

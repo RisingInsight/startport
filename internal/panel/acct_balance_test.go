@@ -53,8 +53,22 @@ func TestAcctPlatformBalanceEndpoint(t *testing.T) {
 		}
 	}
 
+	// TRAE 余额能力已接线：走注入的 mock，写回快照并在列表回显（不打真实上游）。
 	traeID, _ := e.add("trae", `{"accessToken":"jwt","uid":"u","machineId":"m","deviceId":"d"}`)
 	rec = e.do("POST", "/startport/api/accounts/"+traeID+"/platform_balance", "")
+	if rec.Code != http.StatusOK {
+		t.Errorf("TRAE 余额 status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got := e.store.Get(traeID); got.Balance == nil || got.Balance.Available != 325 {
+		t.Errorf("TRAE Store balance = %+v", got.Balance)
+	}
+
+	// 真正不支持余额的平台（custom）仍返回 400；未知账号 404。
+	customID, addRec := e.add("custom", `{"base_url":"https://example.com","secret":"k"}`)
+	if addRec.Code != http.StatusCreated {
+		t.Fatalf("custom 账号预置失败 status = %d: %s", addRec.Code, addRec.Body.String())
+	}
+	rec = e.do("POST", "/startport/api/accounts/"+customID+"/platform_balance", "")
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("不支持余额的平台 status = %d, want 400", rec.Code)
 	}

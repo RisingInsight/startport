@@ -201,14 +201,24 @@ func PrimarySecret(platform string, cred json.RawMessage) (string, error) {
 	}
 }
 
-// traeField 读 Trae blob 字段：嵌套 auth{} 优先，其次平铺。
+// traeField 读 Trae blob 字段：嵌套 auth{} → account{} → 平铺，与 checkin
+// 包的 traeBlobString **同口径同顺序**（CPA 形状 {auth:{…},account:{…}} 的
+// accessToken / refreshToken / variant 可能落在任意一层；traePrimarySecret
+// 的 pick 也把 accountPart 列为合法来源）。
+//
+// 两包各自实现而不是复用，是因为 account 不能 import checkin（循环依赖）；
+// 任何一边调整查找顺序，另一边必须同步，否则会出现「CanRefresh 说可刷新、
+// 执行却报缺字段」或「能刷新却不广告」的分叉。
 func traeField(m map[string]any, keys ...string) string {
-	auth := m
 	if nested, ok := m["auth"].(map[string]any); ok {
-		auth = nested
+		if s := blobString(nested, keys...); s != "" {
+			return s
+		}
 	}
-	if s := blobString(auth, keys...); s != "" {
-		return s
+	if acct, ok := m["account"].(map[string]any); ok {
+		if s := blobString(acct, keys...); s != "" {
+			return s
+		}
 	}
 	return blobString(m, keys...)
 }

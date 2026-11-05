@@ -1,6 +1,7 @@
 // refresh.go 平台登录态刷新的统一入口（账号中心刷新闭环）。
 //
-// 各平台刷新协议不同（AutoClaw userapi 签名链 / Qoder openapi 匿名刷新），
+// 各平台刷新协议不同（AutoClaw userapi 签名链 / Qoder openapi 匿名刷新 /
+// TRAE cloudide ExchangeToken / Codex OAuth），
 // 但调度器的编排完全一致：登录态失效 → 刷新 → 回写 accounts.json → 重试一次。
 // 本文件只做平台分发，协议实现留在各平台文件里。
 package checkin
@@ -34,7 +35,8 @@ func RefreshAccount(ctx context.Context, a *account.Account) (map[string]any, er
 		return RefreshQoder(ctx, a)
 	case account.PlatformCodex:
 		return RefreshCodex(ctx, a)
-	// TRAE：RefreshTrae 已实现（trae.go）暂不接线，随 platform.go 能力开关一并打开。
+	case account.PlatformTrae:
+		return RefreshTrae(ctx, a)
 	default:
 		return nil, ErrPlatformNotSupported
 	}

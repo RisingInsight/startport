@@ -17,8 +17,10 @@
 //     写任何字节之前预读首帧，否则换证/401 语义全丢。
 //
 // ── 本批边界 ─────────────────────────────────────────────────
-// 只支持国内 SOLO（`llm_utils_chat` + `solo_work_lite`）。登录、签到、刷新
-// 在第二批接入；国际版是另一套两步协议，显式拒绝而不是让凭据打到错主机。
+// 只支持国内 SOLO（`llm_utils_chat` + `solo_work_lite`）。本适配器只负责对话
+// 转发；浏览器登录、每日签到、登录态刷新、余额查询由账号中心（acclogin /
+// checkin）负责，能力位见 account/platform.go 的 TRAE 条目。国际版是另一套
+// 两步协议，显式拒绝而不是让凭据打到错主机。
 package provider
 
 import (
@@ -70,7 +72,8 @@ func init() { RegisterNative(NewTraeAdapter()) }
 func (a *traeAdapter) Name() string       { return TraeAdapterName }
 func (a *traeAdapter) Protocol() Protocol { return ProtocolOpenAI }
 
-// traeCreds 适配器需要的身份字段（其余字段留给第二批刷新链）。
+// traeCreds 适配器需要的身份字段（refreshToken 等其余字段由账号中心 checkin
+// 用于签到 / 刷新 / 余额，适配器本身不读）。
 type traeCreds struct {
 	AccessToken string
 	UID         string

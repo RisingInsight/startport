@@ -11,15 +11,16 @@ import (
 )
 
 func TestBalanceSupported(t *testing.T) {
+	// TRAE 余额能力（trae_balance.go）已随 platform.go 的 Balance 位接线，
+	// 与 loomy / autoclaw / qoder / kuku 同列。
 	for _, p := range []string{account.PlatformLoomy, account.PlatformAutoClaw,
-		account.PlatformAutoClawIntl, account.PlatformQoder, account.PlatformQoderIntl} {
+		account.PlatformAutoClawIntl, account.PlatformQoder, account.PlatformQoderIntl,
+		account.PlatformTrae, account.PlatformKuku} {
 		if !BalanceSupported(p) {
 			t.Errorf("%s 应支持余额查询", p)
 		}
 	}
-	// TRAE：queryTraeBalanceAt 实现与单测已就位（trae_balance.go），能力开关随
-	// platform.go TRAE 条目接线时移入上方清单。
-	for _, p := range []string{account.PlatformTrae, account.PlatformCustom} {
+	for _, p := range []string{account.PlatformCodex, account.PlatformCustom} {
 		if BalanceSupported(p) {
 			t.Errorf("%s 不应支持余额查询", p)
 		}

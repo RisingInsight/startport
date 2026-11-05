@@ -267,6 +267,13 @@ function renderAttn(d) {
   });
   items.sort((a, b) => b.sev - a.sev);
   if (!items.length) {
+    // 0 个观测点推不出「全部正常」：空集合 / 全 0 数据不是健康信号，不能用
+    // 绿色「全部正常」把「还没数据」包装成 100% 健康（统计口径修复）。
+    if (!(d.accounts || []).length) {
+      box.className = 'attn';
+      box.innerHTML = '<div class="row">暂无账号数据 · 等待运行上报</div>';
+      return;
+    }
     box.className = 'attn ok';
     box.innerHTML = '<div class="row">全部正常 · 上次检查 ' + new Date().toTimeString().slice(0, 5) + '</div>';
     return;

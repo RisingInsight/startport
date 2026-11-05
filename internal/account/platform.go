@@ -94,10 +94,14 @@ var platformSpecs = []PlatformSpec{
 		Key: PlatformTrae, Name: "TRAE（字节 · SOLO 国内）", Native: true, Adapter: PlatformTrae,
 		DefaultBaseURL: "https://trae-api-cn.mchost.guru",
 		Login:          LoginCallback,
-		// 第二批实现与契约单测已就位（checkin/trae.go、trae_balance.go；⚠ 未真实
-		// 账号验收——契约来自参考实现逆向，失败在台账显式报错不静默）。
-		// 能力接线（本三项翻 true + checkin 注册 + refresh/QueryBalance 分发）在
-		// 真实账号验收通过后一次性打开（参见 TraeChecker/RefreshTrae 注释）。
+		// 签到 / 刷新 / 余额的实现与契约单测已就位（checkin/trae.go、
+		// trae_balance.go），本批随注册表一次性接线：Checkin Checker 注册、
+		// RefreshAccount / QueryBalance 分发。⚠ 契约来自参考实现逆向，尚未用
+		// 真实账号联调——上游形态不符时在签到台账 / 余额响应里显式报错，绝不
+		// 返回编造数字，也不静默降级（见 TraeChecker / RefreshTrae 注释）。
+		Checkin: true,
+		Refresh: true,
+		Balance: true,
 	},
 	{
 		Key: PlatformCodex, Name: "Codex（ChatGPT 订阅）", Native: true, Adapter: PlatformCodex,
@@ -157,6 +161,13 @@ func CanRefresh(a *Account) bool {
 	m, err := decodeBlob(a.Cred)
 	if err != nil {
 		return false
+	}
+	// TRAE 走 traeField（auth{} → account{} → 平铺，兼容两种键名），与
+	// checkin.RefreshTrae 的 traeBlobString 同口径同顺序：任一层的
+	// refreshToken 都要既能广告可刷新、也能被刷新执行读到——两个方向
+	// 都不能出现分叉（低估会挡住可刷新账号，高估会报缺字段）。
+	if a.Platform == PlatformTrae {
+		return traeField(m, "refreshToken", "refresh_token") != ""
 	}
 	return blobString(m, "refresh_token", "refreshToken") != ""
 }

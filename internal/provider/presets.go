@@ -88,9 +88,10 @@ var presetList = []Preset{
 		Protocol: ProtocolOpenAI, Adapter: TraeAdapterName,
 		NativeRequired: false,
 		Note: "原生适配器（adapter=trae，国内 SOLO 通道）：base 建议 https://trae-api-cn.mchost.guru（以官方为准）；" +
-			"凭证填 Trae 登录态（accessToken 必填；uid/machineId/deviceId 建议一并填写，上游按设备绑定）；" +
-			"模型目录自动从 /api/ide/v1/get_detail_param 拉取，广告名不带后缀；" +
-			"本批先支持粘贴凭据转发，登录/签到/刷新在下一批接入；国际版是另一套协议，暂不支持。",
+			"凭证填 Trae 登录态（accessToken 必填；uid/machineId/deviceId 建议一并填写，上游按设备绑定；" +
+			"带 refreshToken 时可自动续期）；模型目录自动从 /api/ide/v1/get_detail_param 拉取，广告名不带后缀；" +
+			"账号中心已支持浏览器登录（PKCE + 回环回调）、每日签到、余额查询与登录态刷新" +
+			"（契约未用真实账号联调，接口变更时显式报错）；国际版是另一套协议，暂不支持。",
 		DocsURL: "https://www.trae.cn/",
 	},
 	{

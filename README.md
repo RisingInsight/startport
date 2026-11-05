@@ -154,11 +154,13 @@ flowchart LR
 | **AutoClaw 国际** | `ext:autoclaw-intl/` | OAuth + 滑块 | ✅ | ✅ | ✅ | 可用 |
 | **Qoder 国内**（阿里） | `ext:qoder/` | PKCE 设备码 | ✅ | ✅ | ✅ | 可用 |
 | **Qoder 国际** | `ext:qoder-intl/` | PKCE 设备码 | 平台无活动 | ✅ | ✅ | 可用 |
-| **TRAE**（字节 · SOLO 国内） | `ext:trae/` | PKCE 回环回调 | ⏳ 契约就位 | ⏳ | ⏳ | 转发 + 登录可用 |
+| **TRAE**（字节 · SOLO 国内） | `ext:trae/` | PKCE 回环回调 | ✅ 已接线 | ✅（需 refreshToken） | ✅ | 契约未真实账号联调，失败显式报错 |
 | **Codex**（ChatGPT 订阅） | `ext:codex/` | 粘贴 `auth.json`（渠道向导） | — | ⚠️ 未验收 | — | 实验性 |
 | **通用平台**（custom） | `ext:c-<id>/` | 粘贴 `base_url` + secret | — | — | — | 可用 |
 
-> ⏳ = 实现与契约测试已就位，等待真实账号验收后一次性打开；⚠️ = 契约来自公开参考实现，未用真实账号联调，失败会在面板台账显式报错（可观测，不静默）。
+> ✅ = 能力已接线；⚠️ = 契约来自公开参考实现，**未用真实账号联调**，接口形态不符时在面板台账 / 余额响应里显式报错（可观测，不静默、不返回编造数字）。
+>
+> **TRAE**：浏览器登录、每日签到、余额查询、登录态刷新**均已接线**（`platformSpecs` 的 `Checkin/Refresh/Balance` 均为 true）；但签到 `checkin_credits/claim`、`ExchangeToken` 续期、`ide_user_ent_usage` 订阅包余额这三条上游契约仍属 ⚠️ **未经真实账号联调**，请通过面板「一键签到 / 刷新余额」按脱敏错误文案校准。
 >
 > 另有**账号 / 额度型**平台 **库库AI**（百度 GenFlow）：只做积分/额度看板，**没有对话 API、不参与路由**（`AccountOnly`），凭证为网页登录 Cookie。契约状态见 **[docs/PLATFORMS.md](docs/PLATFORMS.md)**。
 > 各平台的鉴权头、请求形态、错误码与已知边界见 **[docs/PLATFORMS.md](docs/PLATFORMS.md)**。
@@ -341,7 +343,7 @@ wire_api = "responses"
 
 **近期（v1.9）**
 - ✅ **协议一致性矩阵**（已完成：3 入站 × 4 出站全组合表驱动固化，`internal/server/protocol_matrix_test.go`）
-- TRAE 保号第二批：真实账号验收通过后一次性打开签到 / 刷新 / 余额
+- ✅ TRAE 保号能力接线：签到 / 刷新 / 余额已随 `platformSpecs` 打开（契约与单测来自参考实现逆向，⚠ 待真实账号联调；接口形态不符时显式报错，不返回编造数字）
 - ✅ `go test -cover` 纳入 CI 门禁（已完成：`scripts/coverage_gate.sh` + 基线文件，总语句覆盖率 64.1% 防回退，本地实测 64.5%）
 
 **中期**

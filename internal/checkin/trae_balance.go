@@ -1,4 +1,5 @@
-// trae_balance.go TRAE（SOLO 国内）余额查询：订阅包口径（第二批）。
+// trae_balance.go TRAE（SOLO 国内）余额查询：订阅包口径（已接线，由
+// QueryBalance 分发；能力位由 account/platform.go 的 TRAE 条目声明）。
 //
 // 契约来源（⚠ 未真实账号验收，参考实现逆向）：POST /trae/api/v2/pay/ide_user_ent_usage
 // （v1 兜底，空体）；余额 = 全部订阅包（credits_limit - usage.credits_amount）求和
@@ -25,17 +26,21 @@ const (
 	traePacksKey       = "user_entitlement_pack_list"
 )
 
+// traeBalanceBase 余额查询基址（包级变量：测试注入 httptest 用，与
+// traeExchangeBases 同款；生产恒为 traeCheckinBase）。
+var traeBalanceBase = traeCheckinBase
+
 // queryTraeBalance TRAE 余额统一入口（QueryBalance 分发）。
 func queryTraeBalance(ctx context.Context, a *account.Account) (*account.BalanceSnapshot, error) {
 	blob, err := decodeBlob(a)
 	if err != nil {
 		return nil, err
 	}
-	token := blobString(blob, "accessToken")
+	token := traeBlobString(blob, "accessToken", "access_token")
 	if token == "" {
 		return nil, fmt.Errorf("blob 缺 accessToken（请重新登录）")
 	}
-	return queryTraeBalanceAt(ctx, traeCheckinBase, token, blobString(blob, "deviceId"))
+	return queryTraeBalanceAt(ctx, traeBalanceBase, token, traeBlobString(blob, "deviceId", "device_id"))
 }
 
 // queryTraeBalanceAt 余额查询（base 可注入 httptest）。
