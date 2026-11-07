@@ -7,6 +7,12 @@
 
 <p align="center">
   English ｜ <a href="README.md">简体中文</a>
+<p align="center">
+  <img src="docs/screenshots/accounts-center.png" alt="Accounts center" width="820"><br>
+  <img src="docs/screenshots/usage.png" alt="Usage" width="820"><br>
+  <em>Accounts: multi-platform credential pool · daily check-ins · balances  |  Usage: credit/token aggregation · cache hit rate · timeline</em>
+</p>
+
 </p>
 
 <p align="center">

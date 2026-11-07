@@ -7,6 +7,12 @@
 
 <p align="center">
   <a href="README.en.md">English</a> ｜ 简体中文
+<p align="center">
+  <img src="docs/screenshots/accounts-center.png" alt="Accounts center" width="820"><br>
+  <img src="docs/screenshots/usage.png" alt="Usage" width="820"><br>
+  <em>账号中心：多平台凭证池 · 每日签到 · 余额与签到台账 ｜ 用量视图：积分/token 聚合 · 缓存命中率 · 时序</em>
+</p>
+
 </p>
 
 <p align="center">
