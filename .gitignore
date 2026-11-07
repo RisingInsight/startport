@@ -66,3 +66,8 @@ server.exe
 /install-service.log
 /install-service.cmd
 /*.exe
+
+# 本地运维脚本（Windows 服务/推送辅助，机器相关不进库）
+deploy-trae-fix.cmd
+push-when-ready.cmd
+update-service.cmd
