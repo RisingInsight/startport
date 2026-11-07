@@ -166,6 +166,8 @@ func NewHandler(cfg Config) *Handler {
 	// Responses 出口（阶段三）：Codex CLI 直连。鉴权与 /v1/messages 同通道。
 	h.mux.HandleFunc("POST /v1/responses", h.chatAuth(h.handleResponses))
 	h.mux.HandleFunc("GET /v1/models", h.chatAuth(h.models))
+	// 一键诊断（管理面）：网络/凭证/渠道一把抓
+	h.mux.HandleFunc("/startport/api/diagnose", h.withAuth(h.diagnose))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
 	// 存活探针（liveness）：恒 200，只证明 HTTP 栈还能应答。

@@ -199,6 +199,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /startport/core.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/qr.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/keys.js", p.appScript)
+	p.mux.HandleFunc("GET /startport/diagnose_ui.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/ext.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/extwiz.js", p.appScript)
 	p.mux.HandleFunc("GET /startport/captcha.js", p.appScript)

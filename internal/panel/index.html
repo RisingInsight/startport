@@ -2153,7 +2153,8 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
             <span class="grow"></span>
             <span class="note" id="acctAllNote">—</span>
             <button type="button" class="xs" id="btnAcctAdd">添加账号</button>
-            <button type="button" class="xs" id="btnAcctCheckinAll" title="对当前范围（全部平台账号 = 全量；平台页签 = 当前平台）支持签到的账号执行一次签到">一键签到</button>
+            <button type="button" class="xs" id="btnDiag">一键诊断</button>
+<button type="button" class="xs" id="btnAcctCheckinAll" title="对当前范围（全部平台账号 = 全量；平台页签 = 当前平台）支持签到的账号执行一次签到">一键签到</button>
             <button type="button" class="xs" id="btnExtDrawer" title="原「外部渠道」页的全部能力收进这里（进阶）">渠道设置 ▾</button>
           </header>
           <div class="attn ok" id="acctAttn" style="margin:12px 17px 0">—</div>
@@ -2968,6 +2969,15 @@ button.primary:hover:not(:disabled) { box-shadow: 0 1px 0 rgba(255,255,255,.18) 
       <span class="grow"></span>
       <button class="primary" id="btnAkLimitOk">保存</button>
     </footer>
+  </div>
+</div>
+
+<!-- 一键诊断结果 -->
+<div class="veil" id="diagVeil">
+  <div class="dlg" style="width:680px">
+    <header><h3>一键诊断</h3><div class="hint">实时探测各平台上游连通性、账号池健康与近期风控拦截</div></header>
+    <div class="body"><pre id="diagResult" style="white-space:pre-wrap;font-family:var(--mono);font-size:12px;line-height:1.6;padding:8px;background:var(--bg-1);border-radius:6px;max-height:400px;overflow:auto">正在诊断…</pre></div>
+    <footer><span class="grow"></span><button class="primary" onclick="document.getElementById('diagVeil').classList.remove('on')">关闭</button></footer>
   </div>
 </div>
 
