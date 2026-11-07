@@ -271,6 +271,16 @@ type Config struct {
 		CooldownMinutes int `json:"cooldown_minutes"`
 	} `json:"alert"`
 
+	// CommunityWatch 社区信号监控：周期性轮询仓库/文章的公开统计（star、
+	// issue、评论、反应），发现变化经 alert 管道推送。循环每个 tick 重读本节。
+	CommunityWatch struct {
+		Enabled         bool   `json:"enabled"`
+		GitHubRepo      string `json:"github_repo"`       // "owner/name"
+		GitHubDiscussio int    `json:"github_discussion"` // Discussions 编号
+		DevToArticle    string `json:"devto_article"`     // "username/slug"
+		IntervalMinutes int    `json:"interval_minutes"`
+	} `json:"community_watch"`
+
 	// Backup 本地定时备份：每日把 config.json 与数据目录整体快照到
 	// data/backups/，保留最近 keep 份（拷贝保留 0600 权限）。循环每个 tick
 	// 重读本节，改配置无需重启。
@@ -487,6 +497,9 @@ func Default() *Config {
 	c.Backup.Enabled = true
 	c.Backup.Keep = 7
 	c.Backup.Hour = 4
+	// 社区监控缺省开但数据源为空 = 空转（零请求）；配置了 repo 才开始轮询。
+	c.CommunityWatch.Enabled = true
+	c.CommunityWatch.IntervalMinutes = 30
 	c.ExtIntel.Enabled = true
 	c.ExtIntel.URL = "https://token-fbi.com/data.json"
 	c.ExtIntel.Hours = 12
@@ -813,7 +826,25 @@ func (c *Config) normalize() error {
 	if err := c.validateBackup(); err != nil {
 		return err
 	}
+	if err := c.validateCommunityWatch(); err != nil {
+		return err
+	}
 	return c.normalizePrompt()
+}
+
+// validateCommunityWatch 社区监控参数静态校验（格式性校验；空源 = 合法空转）。
+func (c *Config) validateCommunityWatch() error {
+	cw := &c.CommunityWatch
+	if cw.IntervalMinutes != 0 && (cw.IntervalMinutes < 5 || cw.IntervalMinutes > 1440) {
+		return fmt.Errorf("community_watch: interval_minutes 须在 0（用缺省 30）..1440 之间，当前 %d", cw.IntervalMinutes)
+	}
+	if cw.GitHubRepo != "" && !strings.Contains(cw.GitHubRepo, "/") {
+		return fmt.Errorf("community_watch: github_repo 须为 \"owner/name\" 形态，当前 %q", cw.GitHubRepo)
+	}
+	if cw.DevToArticle != "" && !strings.Contains(cw.DevToArticle, "/") {
+		return fmt.Errorf("community_watch: devto_article 须为 \"username/slug\" 形态，当前 %q", cw.DevToArticle)
+	}
+	return nil
 }
 
 // validateBackup 备份参数静态校验（0 值 = 沿用缺省，合法）。

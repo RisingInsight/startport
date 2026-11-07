@@ -655,6 +655,11 @@ func serverMain(ctx context.Context, cfgPath string, openBrowser bool) {
 	// 循环内重读配置，改 backup 节无需重启。
 	go backupLoop(ctx, cfgPath, log.Printf)
 
+	// 社区信号监控（config.community_watch）：仓库 star/issue、dev.to 文章反馈
+	// 的变化经告警管道推送。循环内重读配置，改 community_watch 节无需重启。
+	notify := func(key, title, body string) { alertMgr.Send(key, title, body) }
+	go communityWatchLoop(ctx, cfgPath, notify, log.Printf)
+
 	// 池健康边沿检测（告警事件之三）：没有任何健康账号 → 推一条；恢复 → 再推一条。
 	// 只看 healthy==0（真停摆），不看在途占满（突发并发是正常负载，冷却去重兜不住它）。
 	go func() {
