@@ -71,3 +71,4 @@ server.exe
 deploy-trae-fix.cmd
 push-when-ready.cmd
 update-service.cmd
+config-test.json
