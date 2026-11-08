@@ -1,0 +1,190 @@
+{
+  "alert": {
+    "cooldown_minutes": 1,
+    "enabled": false,
+    "webhook_type": "generic",
+    "webhook_url": "http://127.0.0.1:7899/hook"
+  },
+  "api_key": "sk-QBuTUtJL72JjBLGPPL-QAFPEfzo2aqxM",
+  "auth_dir": "./auths",
+  "community_watch": {
+    "devto_article": "risinginsight/starport-one-local-endpoint-for-claude-code-codex-cli-and-cline-with-credential-pools-and-auto-kc2",
+    "enabled": true,
+    "github_discussion": 1,
+    "github_repo": "RisingInsight/startport",
+    "interval_minutes": 30
+  },
+  "cooldown": {
+    "soft_rate": "600s",
+    "soft_rate_max": "2h"
+  },
+  "ext_channels": [
+    {
+      "accounts": {
+        "acc-5391707a": "acc-5391707a"
+      },
+      "adapter": "qoder",
+      "base_url": "https://gateway.qoder.com.cn",
+      "credentials": [
+        {
+          "label": "acc-5391707a",
+          "secret": "{\"accessToken\":\"dt-5dhG8b6HySivScQkvJfgnKhX\",\"email\":\"\",\"machineId\":\"9034f072-2f4d-4331-87a2-af445bf1653e\",\"mode\":\"cn\",\"nickname\":\"nick9065565047\",\"userId\":\"01a15289-f814-724d-ad57-c9f2ded819f6\"}"
+        }
+      ],
+      "managed": true,
+      "name": "qoder",
+      "note": "账号中心托管渠道（managed）——credentials 由账号中心投影，渠道级字段可在此调整",
+      "origin": "account-center",
+      "protocol": "openai"
+    },
+    {
+      "accounts": {
+        "acc-07d54137": "acc-07d54137"
+      },
+      "adapter": "qoder-intl",
+      "base_url": "https://api2.qoder.sh",
+      "credentials": [
+        {
+          "label": "acc-07d54137",
+          "secret": "{\"accessToken\":\"dt-wzrbcFI80ozxopMiJBvkqicU\",\"email\":\"1668676243@qq.com\",\"machineId\":\"9034f072-2f4d-4331-87a2-af445bf1653e\",\"mode\":\"global\",\"nickname\":\"test test\",\"userId\":\"01a156b4-74e8-7460-9695-e15103546718\"}"
+        }
+      ],
+      "managed": true,
+      "name": "qoder-intl",
+      "note": "账号中心托管渠道（managed）——credentials 由账号中心投影，渠道级字段可在此调整",
+      "origin": "account-center",
+      "protocol": "openai"
+    },
+    {
+      "accounts": {
+        "acc-119b1744": "acc-119b1744"
+      },
+      "adapter": "autoclaw",
+      "base_url": "https://autoglm-acceleration-api.zhipuai.cn/autoclaw-proxy/proxy/autoclaw",
+      "credentials": [
+        {
+          "label": "acc-119b1744",
+          "secret": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjo4ODM2MzAsImRldmljZV9pZCI6IjhlYjdmMTNlNzUwMGI0ODhkNjlkYzQxZWI1NTk0YmVjMWZhY2U0YmI2NDg3MWUyNDNkZTJlM2ZmOTIwOWM5ZDYiLCJzb3VyY2VfaWQiOiJhdXRvY2xhd2FjY2Vzc190b2tlbiIsImd1aWQiOiIiLCJpc19ndWVzdCI6ZmFsc2UsInBvd2VyIjowLCJleHAiOjE3OTQxMTg4NDAsImlhdCI6MTc5NDAzMjQ0MCwianRpIjoiMTk3MTg2ODY5MTMifQ.YMqoYN_tJT6qCNJVNVSP09iUDX2KXwNykf-BxGZxt_4"
+        }
+      ],
+      "managed": true,
+      "name": "autoclaw",
+      "note": "账号中心托管渠道（managed）——credentials 由账号中心投影，渠道级字段可在此调整",
+      "origin": "account-center",
+      "protocol": "openai"
+    },
+    {
+      "accounts": {
+        "acc-b9fa2de3": "acc-b9fa2de3"
+      },
+      "adapter": "trae",
+      "base_url": "https://trae-api-cn.mchost.guru",
+      "credentials": [
+        {
+          "label": "acc-b9fa2de3",
+          "secret": "{\"accessToken\":\"eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJkYXRhIjp7ImlkIjoiMTY0MjAxNzUwMzU5MzM2OSIsInNvdXJjZSI6InJlZnJlc2hfdG9rZW4iLCJzb3VyY2VfaWQiOiJETEJkM3EyVEI2NVVKbUpEWmRiU3RTVTNIcnloNXlqbmVmbEtPZlg2RFZjPS4xOGU1MTU4NmUyZWE0N2M2IiwidGVuYW50X2lkIjoiN28yZDg5NHA3ZHIwbzQiLCJ0eXBlIjoidXNlciJ9LCJleHAiOjE3OTUwNzMyOTUsImlhdCI6MTc5Mzg2MzY5NX0.sefG09SHLrS0KijQZMZISe7Q3tH7OzVdFthCiW3fuLmQ6M2z5STPXoo7MGvRl0clNu0aBh46RI9kjuEvnruzaic9pYFoi1k2Ad22ItPIr36O_T6phqJF92UBFsskIFof9UaOXPDAJrSsseKPISxJeh7xULQIrGd0TxWkwadAx04Q6QP4j5ZYm5VhiPjNgOYlJmC-3AJdmxUi1t3TIlIhwnMbpKcxjPSAlOAr_APxAQzPfzVweKgh2NWaVuDcr7bmaLPNM6Ac7Yrez436vewajsbvNtR1G5C8aeskFqEP6RMt7CKW3jlTM1iAPwGI11DFxzJCyFGYdMw4uVO8Y4vbTbRNoNDnIhajrVINMguN7oXWoy880lNX2XMjt3O2Ott3TbbAN10Jq8iaOhwYqGPOMoTtPFRoGETne3pYkIYvIq4z9eqlbNMnRAQq8eZO751mWZk0EHqhDhBqh2ODNeJFqXrXaKl_3HCiAZl9WWh1kM9h1HntkYN8cctXXp7TLKbgOismiNA5ppjZ7VNICEexo-Lddk77DnEAtQ3cpf3OloHtvt3eh92ukIipFyRWhKblzAynT8Tk5g0utw2eVuDBzMMucd7np9wGjHIeenk9z9sb2UHa2geYuh_sBFEAiSiyY9CPTxvVx1y2aaZmcXPkv2CdkMty2fnX1BS9Q4MFxxc\",\"apiHost\":\"https://api.trae.cn\",\"authClientId\":\"en1oxy7wnw8j9n\",\"deviceId\":\"7845583445278544\",\"devicePrivateKey\":\"-----BEGIN PRIVATE KEY-----\\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgDsPiO5BP0qw9Fw3R\\nvdyrrQivzxWyfniPO20Ku1/mytWhRANCAAQO/FgLgOS8PCUFRh8Xqb+ACo2XtGQG\\n3a2N+/ZA8+WIfnOuZg3NTARUGdxQumIjbElOk0/SZtxgjxG1R6gy0tZ8\\n-----END PRIVATE KEY-----\",\"devicePublicKey\":\"-----BEGIN PUBLIC KEY-----\\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEDvxYC4DkvDwlBUYfF6m/gAqNl7Rk\\nBt2tjfv2QPPliH5zrmYNzUwEVBncULpiI2xJTpNP0mbcYI8RtUeoMtLWfA==\\n-----END PUBLIC KEY-----\",\"domain\":\"trae.cn\",\"expiresAt\":1795073295,\"machineId\":\"ba6bc61d-544d-433b-8446-9a2dae5591d5\",\"nickname\":\"用户38866110582\",\"refreshToken\":\"DLBd3q2TB65UJmJDZdbStSU3Hryh5yjneflKOfX6DVc=.18e51586e2ea47c6\",\"uid\":\"1642017503593369\",\"variant\":\"solo\"}"
+        }
+      ],
+      "managed": true,
+      "name": "trae",
+      "note": "账号中心托管渠道（managed）——credentials 由账号中心投影，渠道级字段可在此调整",
+      "origin": "account-center",
+      "protocol": "openai"
+    }
+  ],
+  "features": {
+    "sanitize_blacklist_fingerprints": true
+  },
+  "global": {
+    "billing_base": "",
+    "chat_base": "",
+    "enabled": true
+  },
+  "listen": "127.0.0.1:7898",
+  "logging": {
+    "request_archive_enabled": true,
+    "request_archive_max_mb": 100,
+    "request_client_info": true,
+    "request_retention_days": 7
+  },
+  "model_groups": [],
+  "panel": {
+    "package_detail_limit": 5
+  },
+  "pool": {
+    "breaker_cooldown": "30m",
+    "breaker_cooldown_max": "6h",
+    "breaker_threshold": 3,
+    "cost_explore_interval": "30m",
+    "credit_floor": 100,
+    "degrade_cooldown": "10m",
+    "degrade_cooldown_max": "2h",
+    "degrade_threshold": 5,
+    "expiring_soon": "168h",
+    "idle_weight_max": 5,
+    "idle_weight_per_hour": 0.5,
+    "max_in_flight": 6,
+    "max_in_flight_global": 2,
+    "prefer_expiring": true
+  },
+  "prompt": {
+    "file": "",
+    "mode": "passthrough"
+  },
+  "schedule": {
+    "activity_enabled": true,
+    "activity_hours": [
+      10
+    ],
+    "balance_refresh_enabled": true,
+    "balance_refresh_minutes": 5,
+    "blackcat_enabled": true,
+    "blackcat_hours": [
+      23
+    ],
+    "checkin_enabled": true,
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "growth_enabled": true,
+    "growth_hours": [
+      1
+    ],
+    "include_disabled_in_tasks": false,
+    "keepalive_enabled": true,
+    "keepalive_hours": [
+      22
+    ],
+    "travel_enabled": true,
+    "travel_hours": [
+      9,
+      21
+    ]
+  },
+  "server": {
+    "read_timeout": "300s"
+  },
+  "session_sticky": {
+    "enabled": true,
+    "gc_interval": "5m",
+    "ttl": "30m"
+  },
+  "state_file": "./data/state.json",
+  "upstash": {
+    "token": "",
+    "url": ""
+  },
+  "upstream": {
+    "cli_version": "",
+    "client_name": "",
+    "client_version": "",
+    "device_token": "",
+    "device_token_file": "",
+    "header_timeout_seconds": 120,
+    "idle_timeout_seconds": 300,
+    "passthrough_ip": false,
+    "timeout_seconds": 120,
+    "user_agent": ""
+  }
+}
