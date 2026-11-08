@@ -83,19 +83,24 @@ func traeBlobString(m map[string]any, keys ...string) string {
 	return blobString(m, keys...)
 }
 
-// traeHeaders 签到/状态/支付域（trae.cn web 域，非推理网关域）公共头束。
-// 契约来源 AgentHub：x-user-region/x-device-id/x-app-type 为该域风控口径。
+// traeHeaders 签到/状态/支付域（trae.cn web 域）公共头束。
+// 认证方案 = Cloud-IDE-JWT（非 Bearer）+ X-Cloudide-Token + X-Ide-Token 三头，
+// 与 internal/provider/trae.go 的对话域出站同口径。缺 Cloud-IDE-JWT 头时
+// 上游返回 code 1001（「token 未识别」≠「服务未开放」——此前误读导致
+// 签到功能看似不可用，实际是认证方案发错了）。
 func traeHeaders(token, deviceID string) map[string]string {
 	h := map[string]string{
-		"content-type":  "application/json",
-		"accept":        "application/json",
-		"x-user-region": "CN",
-		"x-device-id":   deviceID,
-		"x-app-type":    "trae",
-		"origin":        traeWebOrigin,
-		"referer":       traeWebOrigin + "/",
+		"content-type":     "application/json",
+		"accept":           "application/json",
+		"x-user-region":    "CN",
+		"x-device-id":      deviceID,
+		"x-app-type":       "trae",
+		"origin":           traeWebOrigin,
+		"referer":          traeWebOrigin + "/",
 	}
-	h["Authorization"] = "Bearer " + token
+	h["Authorization"] = "Cloud-IDE-JWT " + token
+	h["X-Cloudide-Token"] = token
+	h["X-Ide-Token"] = token
 	return h
 }
 

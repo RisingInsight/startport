@@ -31,8 +31,8 @@ func TestTraeCheckinClaim(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == traeClaimPath && r.Method == http.MethodPost:
-			if r.Header.Get("Authorization") != "Bearer at" {
-				t.Errorf("claim 应带 Bearer token, got %q", r.Header.Get("Authorization"))
+			if r.Header.Get("Authorization") != "Cloud-IDE-JWT at" {
+				t.Errorf("claim 应带 Cloud-IDE-JWT token, got %q", r.Header.Get("Authorization"))
 			}
 			if r.Header.Get("x-device-id") != "dev-1" || r.Header.Get("x-user-region") != "CN" || r.Header.Get("x-app-type") != "trae" {
 				t.Errorf("claim 头束契约缺失: %v", r.Header)
