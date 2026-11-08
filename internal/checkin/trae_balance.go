@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -83,6 +85,11 @@ func queryTraeBalanceAt(ctx context.Context, base, token, deviceID string) (*acc
 			lastErr = "上游未返回订阅包"
 			continue
 		}
+		if f, ferr := os.CreateTemp(".", "trae-packs-*.json"); ferr == nil {
+			f.WriteString(string(raw))
+			f.Close()
+			log.Printf("[trae-balance-debug] packs=%d dumped", len(packs))
+		}
 		snap := traePacksToSnapshot(packs)
 		if snap != nil {
 			return snap, nil
@@ -118,9 +125,18 @@ func traePacksToSnapshot(packs []any) *account.BalanceSnapshot {
 		if !ok {
 			continue
 		}
+		// TRAE 新版响应：credits_limit 在 entitlement_base_info.quota 嵌套层；
+		// 旧版形态（pack 顶层 credits_limit/total_credit）保持兼容。
 		limit, hasLimit := traeNum(pack, "credits_limit")
 		if !hasLimit {
 			limit, hasLimit = traeNum(pack, "total_credit")
+		}
+		if !hasLimit {
+			if base, ok := pack["entitlement_base_info"].(map[string]any); ok {
+				if quota, ok := base["quota"].(map[string]any); ok {
+					limit, hasLimit = traeNum(quota, "credits_limit")
+				}
+			}
 		}
 		var used int64
 		if usage, ok := pack["usage"].(map[string]any); ok {
@@ -143,7 +159,7 @@ func traePacksToSnapshot(packs []any) *account.BalanceSnapshot {
 			}
 		}
 		label := traeFirst(
-			traeStr(pack, "entitlement_pack_id", "pack_id", "id"),
+			traeStr(pack, "display_desc"), traeStr(pack, "entitlement_pack_id", "pack_id", "id"),
 			fmt.Sprintf("pack-%d", i+1))
 		row := account.BalanceRow{Name: label, Available: float64(credits), Unit: "credits"}
 		if end, ok := traeNum(pack, "end_time"); ok && end > 0 {
