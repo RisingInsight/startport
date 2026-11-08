@@ -1,4 +1,4 @@
-// trae.go TRAE（SOLO 国内）的日常养护：每日签到 + 登录态刷新（已接线）。
+// trae.go TRAE CN的日常养护：每日签到 + 登录态刷新（已接线）。
 //
 // 能力位由 account/platform.go 的 TRAE 条目统一声明；本 Checker 由
 // checkin.init() 注册，刷新由 refresh.go 分发。
@@ -30,7 +30,7 @@ import (
 	"github.com/RisingInsight/startport/internal/account"
 )
 
-// TRAE SOLO 国内常量（与 acclogin 登录同源；实测抓包值）。
+// TRAE CN常量（与 acclogin 登录同源；实测抓包值）。
 const (
 	traeSoloClientID  = "en1oxy7wnw8j9n"
 	traeCheckinBase   = "https://api.trae.cn"

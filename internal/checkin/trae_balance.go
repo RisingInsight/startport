@@ -1,4 +1,4 @@
-// trae_balance.go TRAE（SOLO 国内）余额查询：订阅包口径（已接线，由
+// trae_balance.go TRAE CN余额查询：订阅包口径（已接线，由
 // QueryBalance 分发；能力位由 account/platform.go 的 TRAE 条目声明）。
 //
 // 契约来源（⚠ 未真实账号验收，参考实现逆向）：POST /trae/api/v2/pay/ide_user_ent_usage

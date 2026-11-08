@@ -91,7 +91,7 @@ var platformSpecs = []PlatformSpec{
 		Balance:        true,
 	},
 	{
-		Key: PlatformTrae, Name: "TRAE（字节 · SOLO 国内）", Native: true, Adapter: PlatformTrae,
+		Key: PlatformTrae, Name: "TRAE CN（字节 · 国内）", Native: true, Adapter: PlatformTrae,
 		DefaultBaseURL: "https://trae-api-cn.mchost.guru",
 		Login:          LoginCallback,
 		// 签到 / 刷新 / 余额的实现与契约单测已就位（checkin/trae.go、
