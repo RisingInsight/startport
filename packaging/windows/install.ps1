@@ -9,17 +9,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function New-StarPortShortcut([string]$ShortcutPath, [string]$TargetPath) {
-    $shell = New-Object -ComObject WScript.Shell
-    try {
-        $shortcut = $shell.CreateShortcut($ShortcutPath)
-        $shortcut.TargetPath = $TargetPath
-        $shortcut.WorkingDirectory = $InstallDir
-        $shortcut.IconLocation = (Join-Path $InstallDir 'starport.exe') + ',0'
-        $shortcut.Save()
-    } finally {
-        if ($null -ne $shortcut) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut) }
-        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)
-    }
+    [StarPort.WindowsShortcut]::Create($ShortcutPath, $TargetPath, $InstallDir, (Join-Path $InstallDir 'starport.exe'))
 }
 
 try {
@@ -38,7 +28,7 @@ try {
         throw 'Extract the entire ZIP first, then double-click INSTALL.cmd inside the extracted folder.'
     }
     # This allowlist never includes config.json, auths, data, or local build caches.
-    $allowedFiles = @('starport.exe', 'start-local.cmd', 'stop-local.cmd', 'scripts/local-server.ps1', 'LICENSE', 'README-install.txt')
+    $allowedFiles = @('starport.exe', 'start-local.cmd', 'stop-local.cmd', 'scripts/local-server.ps1', 'scripts/windows-shortcut.ps1', 'LICENSE', 'README-install.txt')
     $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
     $entries = @($manifest.files)
     if ($entries.Count -ne $allowedFiles.Count) { throw 'Unexpected installation manifest.' }
@@ -97,6 +87,9 @@ try {
 
     if (-not $NoShortcuts) {
         try {
+            # Load only the verified, installed helper. IShellLinkW preserves
+            # paths that cannot be represented in the system ANSI code page.
+            . (Join-Path $InstallDir 'scripts\windows-shortcut.ps1')
             $desktopDir = $ShortcutDir
             if (-not $desktopDir) {
                 $desktopShell = New-Object -ComObject WScript.Shell

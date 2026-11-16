@@ -7,8 +7,11 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $zipPath = Join-Path $projectRoot 'dist\StarPort-Windows-x64-Setup.zip'
 $testRoot = Join-Path $projectRoot ('data\installer-test-' + [Guid]::NewGuid().ToString('N'))
 $extracted = Join-Path $testRoot 'extracted package'
-$destination = Join-Path $testRoot (([string][char]0x5B89) + [char]0x88C5 + ' installed app')
-$shortcutDir = Join-Path $testRoot 'test desktop'
+# Mix scripts so neither Western nor Chinese ANSI code pages can represent
+# the complete path. Shortcut creation and readback must use Unicode APIs.
+$unicodeSuffix = ([string][char]0x5B89) + [char]0x88C5 + [char]0x1200
+$destination = Join-Path $testRoot ($unicodeSuffix + ' installed app')
+$shortcutDir = Join-Path $testRoot ($unicodeSuffix + ' test desktop')
 $powershellExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 
 function Assert-True($Condition, [string]$Message) {
@@ -19,7 +22,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
 try {
     $actual = @($archive.Entries | Where-Object { $_.Name } | ForEach-Object { $_.FullName.Replace('\', '/') })
-    $expected = @('INSTALL.cmd', 'install.ps1', 'README.txt', 'manifest.json', 'payload/starport.exe', 'payload/start-local.cmd', 'payload/stop-local.cmd', 'payload/scripts/local-server.ps1', 'payload/LICENSE', 'payload/README-install.txt')
+    $expected = @('INSTALL.cmd', 'install.ps1', 'README.txt', 'manifest.json', 'payload/starport.exe', 'payload/start-local.cmd', 'payload/stop-local.cmd', 'payload/scripts/local-server.ps1', 'payload/scripts/windows-shortcut.ps1', 'payload/LICENSE', 'payload/README-install.txt')
     Assert-True (-not (Compare-Object $expected $actual)) 'Unexpected ZIP contents; refusing to test a package that may include private files.'
 } finally { $archive.Dispose() }
 Write-Output 'PASS: ZIP contains only the approved files'
@@ -31,15 +34,15 @@ $installer = Join-Path $extracted 'install.ps1'
 Assert-True ($LASTEXITCODE -eq 0) 'Fresh installation failed.'
 Assert-True (-not (Test-Path -LiteralPath (Join-Path $destination 'config.json'))) 'Installer copied a pre-existing configuration.'
 Assert-True ((Get-FileHash -LiteralPath (Join-Path $destination 'starport.exe')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $projectRoot 'starport.exe')).Hash) 'Installed executable does not match the built executable.'
-$shell = New-Object -ComObject WScript.Shell
-try {
-    foreach ($action in @('Start', 'Stop')) {
-        $shortcut = $shell.CreateShortcut((Join-Path $shortcutDir ('StarPort - ' + $action + '.lnk')))
-        Assert-True ($shortcut.TargetPath -eq (Join-Path $destination ($action.ToLowerInvariant() + '-local.cmd'))) 'Incorrect shortcut target.'
-        Assert-True ($shortcut.WorkingDirectory -eq $destination) 'Incorrect shortcut working directory.'
-        [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut)
-    }
-} finally { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) }
+. (Join-Path $projectRoot 'scripts\windows-shortcut.ps1')
+foreach ($action in @('Start', 'Stop')) {
+    $shortcutPath = Join-Path $shortcutDir ('StarPort - ' + $action + '.lnk')
+    Assert-True (Test-Path -LiteralPath $shortcutPath -PathType Leaf) 'Installer did not create the shortcut file.'
+    $shortcut = [StarPort.WindowsShortcut]::Read($shortcutPath)
+    Assert-True ($shortcut.TargetPath -eq (Join-Path $destination ($action.ToLowerInvariant() + '-local.cmd'))) 'Incorrect shortcut target.'
+    Assert-True ($shortcut.WorkingDirectory -eq $destination) 'Incorrect shortcut working directory.'
+    Assert-True ($shortcut.IconPath -eq (Join-Path $destination 'starport.exe') -and $shortcut.IconIndex -eq 0) 'Incorrect shortcut icon.'
+}
 Write-Output 'PASS: fresh install, executable identity, and real Windows shortcuts'
 
 $configPath = Join-Path $destination 'config.json'

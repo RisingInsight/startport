@@ -15,6 +15,7 @@ $payloadFiles = @(
     'stop-local.cmd'
     'LICENSE'
     'scripts/local-server.ps1'
+    'scripts/windows-shortcut.ps1'
     'README-install.txt'
 )
 
