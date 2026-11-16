@@ -21,6 +21,7 @@ config.json
 *.tmp
 __pycache__/
 .gocache/
+/dist/
 
 # Backups (contains auth tokens)
 backups/

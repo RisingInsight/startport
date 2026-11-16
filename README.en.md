@@ -235,6 +235,23 @@ go build -trimpath -ldflags="-s -w" -o starport ./cmd/server
 
 Front-end assets are embedded, so the binary is self-contained; it only needs writable `auths/` and `data/` directories.
 
+**Windows offline installer**
+
+Build and package on Windows x64:
+
+```powershell
+go build -trimpath -ldflags="-s -w" -o starport.exe ./cmd/server
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+```
+
+Copy `dist/StarPort-Windows-x64-Setup.zip` to a Windows 10/11 x64 computer, **extract the entire archive, then double-click `INSTALL.cmd`**. Installation requires neither Go/Docker nor administrator privileges. It installs under `%LOCALAPPDATA%\Programs\StarPort`, creates desktop Start/Stop shortcuts, and opens the panel. First launch generates a new admin key in `config.json`; add your own upstream accounts or credentials afterwards.
+
+No startup entry is registered. Reinstallation preserves `config.json`, `auths/`, and `data/`. Packaging uses an explicit allowlist and excludes the builder's accounts and configuration. The SHA-256 manifest detects transfer corruption; it is not a publisher signature. Stop a running installation before replacing it with a different binary.
+
+The source checkout also provides `start-local.cmd` / `stop-local.cmd` for background operation. Closing the browser does not stop the gateway; the stop script terminates in-flight requests. Use Ctrl+C for a normal shutdown when running `starport.exe` in a console.
+
+Maintainers can run `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows-package.ps1 -Live` to check installation, shortcuts, process lifecycle, preserved data, and rejection of corrupted packages using an isolated directory and loopback port. The `windows-installer` workflow runs these checks on Windows and uploads the installer as an artifact.
+
 **Verify**
 
 ```bash
