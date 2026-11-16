@@ -238,6 +238,23 @@ go build -trimpath -ldflags="-s -w" -o starport.exe ./cmd/server
 
 前端资源已嵌入二进制，拷到任意机器可跑，只需 `auths/` 与 `data/` 可写。
 
+### Windows 离线安装包
+
+在 Windows x64 上构建并打包：
+
+```powershell
+go build -trimpath -ldflags="-s -w" -o starport.exe ./cmd/server
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\package-windows.ps1
+```
+
+将 `dist/StarPort-Windows-x64-Setup.zip` 复制到目标 Windows 10/11 x64 电脑，**全部解压后双击 `INSTALL.cmd`**。目标电脑无需 Go、Docker 或管理员权限；默认安装到 `%LOCALAPPDATA%\Programs\StarPort`，创建桌面启动/停止快捷方式并打开面板。首次运行自动生成管理密钥，见安装目录 `config.json` 的 `api_key`；账号和上游凭证需自行添加。
+
+安装器不注册开机自启，重装保留目标电脑的 `config.json`、`auths/` 和 `data/`。打包只包含程序、启停脚本、说明和许可证，不复制打包电脑的配置或账号。包内 SHA-256 清单用于检查传输损坏，不是发布者签名。运行中的程序若版本不同，需先停止再安装。
+
+源码目录也可使用 `start-local.cmd` / `stop-local.cmd` 管理后台进程。关闭浏览器不会停止网关；停止脚本会终止在途请求。手动运行 `starport.exe` 时可在控制台按 Ctrl+C 正常退出。
+
+维护者可运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows-package.ps1 -Live` 验证安装、快捷方式、实际启停、重装数据保留和损坏包拒绝；测试使用独立目录与临时回环端口。`windows-installer` 工作流在 Windows runner 上执行同样的检查，并保留安装包 artifact。
+
 ### 验证
 
 ```bash

@@ -14,6 +14,8 @@
 *.yml          text eol=lf
 *.yaml         text eol=lf
 *.sh           text eol=lf
+*.ps1          text eol=lf
+*.cmd          text eol=crlf
 *.svg          text eol=lf
 *.mod          text eol=lf
 *.sum          text eol=lf

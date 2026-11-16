@@ -1,0 +1,67 @@
+name: windows-installer
+
+on:
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "packaging/windows/**"
+      - "scripts/local-server.ps1"
+      - "scripts/windows-shortcut.ps1"
+      - "scripts/package-windows.ps1"
+      - "scripts/test-windows-package.ps1"
+      - "start-local.cmd"
+      - "stop-local.cmd"
+      - ".github/workflows/windows-installer.yml"
+  push:
+    branches: [main]
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/**"
+      - "packaging/windows/**"
+      - "scripts/local-server.ps1"
+      - "scripts/windows-shortcut.ps1"
+      - "scripts/package-windows.ps1"
+      - "scripts/test-windows-package.ps1"
+      - "start-local.cmd"
+      - "stop-local.cmd"
+      - ".github/workflows/windows-installer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+      - name: Build Windows binary
+        env:
+          CGO_ENABLED: 0
+        run: go build -trimpath '-ldflags=-s -w' -o starport.exe ./cmd/server
+      - name: Package offline installer
+        run: .\scripts\package-windows.ps1
+      - name: Test installation and process lifecycle
+        run: .\scripts\test-windows-package.ps1 -Live
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: StarPort-Windows-x64-Setup
+          path: dist/StarPort-Windows-x64-Setup.zip
+          if-no-files-found: error
+          retention-days: 7
